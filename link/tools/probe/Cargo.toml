@@ -1,0 +1,17 @@
+[package]
+name = "uu-link-probe"
+description = "uu Link probe: serve / dial a session, RPC echo, control ping, datagram ping and load, link: lines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+uu-link.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+ring.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

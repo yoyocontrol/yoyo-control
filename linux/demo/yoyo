@@ -1,0 +1,6 @@
+#!/bin/sh
+# The running server's commands, on this machine's state:  yoyo pair | devices | remove <id> | disconnect | status
+[ $# -ge 1 ] || { echo "usage: yoyo pair | devices | remove <id> | disconnect | status" >&2; exit 2; }
+cmd=$1
+shift
+exec node /opt/yoyo-linux/server.mjs "$cmd" --remote /data/remote "$@"

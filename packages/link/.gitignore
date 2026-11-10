@@ -1,0 +1,2 @@
+# prebuilt addons (scripts/build-native.mjs, the Linux release build): shipped in the dist branch, not committed here
+/native/

@@ -1,0 +1,5 @@
+Yoyo Control
+Copyright 2026 The Yoyo Control Authors
+
+This product is licensed under the Apache License, Version 2.0 (LICENSE).
+link/vendor/sctp-proto is a modified copy of sctp-proto (MIT OR Apache-2.0), with its own license files.

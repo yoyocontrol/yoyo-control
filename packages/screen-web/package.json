@@ -1,0 +1,38 @@
+{
+  "name": "@yoyocontrol/screen-web",
+  "version": "0.3.1",
+  "description": "Transport-free web client of a Yoyo Control screen: stream parts, H.264 on WebCodecs, acks, cursor, timed sound, input, status model, media over a uu Link, stats line, A/V sync",
+  "keywords": [
+    "yoyo-control",
+    "remote-desktop",
+    "webcodecs",
+    "h264",
+    "screen-sharing"
+  ],
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yoyocontrol/yoyo-control.git",
+    "directory": "packages/screen-web"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --import tsx \"test/*.test.ts\""
+  }
+}

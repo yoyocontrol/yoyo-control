@@ -1,0 +1,1088 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "%@ (HTTP %lld)" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ (HTTP %lld)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@（HTTP %lld）"
+          }
+        }
+      }
+    },
+    "Copied from the computer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copied from the computer"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已从电脑复制"
+          }
+        }
+      }
+    },
+    "Copied from the Mac" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copied from the Mac"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已从 Mac 复制"
+          }
+        }
+      }
+    },
+    "Copied on computer: %@ — Copy to iPhone" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copied on computer: %@ — Copy to iPhone"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "电脑上拷贝了：%@ — 复制到 iPhone"
+          }
+        }
+      }
+    },
+    "Copied on Mac: %@ — Copy to iPhone" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copied on Mac: %@ — Copy to iPhone"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac 上拷贝了：%@ — 复制到 iPhone"
+          }
+        }
+      }
+    },
+    "Copied on the computer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copied on the computer"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在电脑上复制"
+          }
+        }
+      }
+    },
+    "Copied on the computer · %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copied on the computer · %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在电脑上复制 · %@"
+          }
+        }
+      }
+    },
+    "Copied on the Mac" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copied on the Mac"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 Mac 上复制"
+          }
+        }
+      }
+    },
+    "Copied on the Mac · %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copied on the Mac · %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 Mac 上复制 · %@"
+          }
+        }
+      }
+    },
+    "Copied to the computer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copied to the computer"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已复制到电脑"
+          }
+        }
+      }
+    },
+    "Copied to the computer. Take control to paste." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copied to the computer. Take control to paste."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已复制到电脑。接管后即可粘贴。"
+          }
+        }
+      }
+    },
+    "Copied to the Mac" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copied to the Mac"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已复制到 Mac"
+          }
+        }
+      }
+    },
+    "Copied to the Mac. Take control to paste." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copied to the Mac. Take control to paste."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已复制到 Mac。接管后即可粘贴。"
+          }
+        }
+      }
+    },
+    "Copy from Computer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copy from Computer"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "从电脑复制"
+          }
+        }
+      }
+    },
+    "Copy from Mac" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copy from Mac"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "从 Mac 复制"
+          }
+        }
+      }
+    },
+    "Copy something on the computer and it shows up here." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copy something on the computer and it shows up here."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在电脑上复制点什么，就会显示在这里。"
+          }
+        }
+      }
+    },
+    "Copy something on the Mac and it shows up here." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copy something on the Mac and it shows up here."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 Mac 上复制点什么，就会显示在这里。"
+          }
+        }
+      }
+    },
+    "Couldn’t read the server’s response: %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn’t read the server’s response: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法解析服务器响应：%@"
+          }
+        }
+      }
+    },
+    "Desktop" : {
+      "comment" : "A member's Screen page / My Computer section: the Linux desktop of their own machine",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Desktop"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "桌面"
+          }
+        }
+      }
+    },
+    "Desktop unavailable" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Desktop unavailable"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法显示桌面"
+          }
+        }
+      }
+    },
+    "Folder · copy its contents on the computer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Folder · copy its contents on the computer"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文件夹 · 请在电脑上复制其中的内容"
+          }
+        }
+      }
+    },
+    "Folder · copy its contents on the Mac" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Folder · copy its contents on the Mac"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文件夹 · 请在 Mac 上复制其中的内容"
+          }
+        }
+      }
+    },
+    "Invalid server address." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Invalid server address."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "服务器地址无效。"
+          }
+        }
+      }
+    },
+    "iPhone clipboard: %@ — Paste on Computer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPhone clipboard: %@ — Paste on Computer"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPhone 剪贴板：%@ — 粘贴到电脑"
+          }
+        }
+      }
+    },
+    "iPhone clipboard: %@ — Paste on Mac" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPhone clipboard: %@ — Paste on Mac"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPhone 剪贴板：%@ — 粘贴到 Mac"
+          }
+        }
+      }
+    },
+    "Mac screen" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac screen"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac 屏幕"
+          }
+        }
+      }
+    },
+    "Mute Mac sound" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mute Mac sound"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "静音 Mac 的声音"
+          }
+        }
+      }
+    },
+    "Mute sound" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mute sound"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "静音"
+          }
+        }
+      }
+    },
+    "Nothing the iPhone can take from the computer’s clipboard." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nothing the iPhone can take from the computer’s clipboard."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "电脑剪贴板上的内容无法放到 iPhone 上。"
+          }
+        }
+      }
+    },
+    "Nothing the iPhone can take from the Mac’s clipboard." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nothing the iPhone can take from the Mac’s clipboard."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac 剪贴板上的内容无法放到 iPhone 上。"
+          }
+        }
+      }
+    },
+    "On your computer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "On your computer"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "电脑上的内容"
+          }
+        }
+      }
+    },
+    "On your Mac" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "On your Mac"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac 上的内容"
+          }
+        }
+      }
+    },
+    "Paste on Computer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Paste on Computer"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "粘贴到电脑"
+          }
+        }
+      }
+    },
+    "Paste on Mac" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Paste on Mac"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "粘贴到 Mac"
+          }
+        }
+      }
+    },
+    "Pasted on the computer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pasted on the computer"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已在电脑上粘贴"
+          }
+        }
+      }
+    },
+    "Pasted on the Mac" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pasted on the Mac"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已在 Mac 上粘贴"
+          }
+        }
+      }
+    },
+    "Play Mac sound" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Play Mac sound"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "播放 Mac 的声音"
+          }
+        }
+      }
+    },
+    "Play sound" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Play sound"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "播放声音"
+          }
+        }
+      }
+    },
+    "Screen" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Screen"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "屏幕"
+          }
+        }
+      }
+    },
+    "Screen unavailable" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Screen unavailable"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法显示屏幕"
+          }
+        }
+      }
+    },
+    "Send to Computer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Send to Computer"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "发送到电脑"
+          }
+        }
+      }
+    },
+    "Send to Mac" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Send to Mac"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "发送到 Mac"
+          }
+        }
+      }
+    },
+    "Sending %lld files to the computer…" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Sending %lld file to the computer…"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Sending %lld files to the computer…"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在把 %lld 个文件发送到电脑…"
+          }
+        }
+      }
+    },
+    "Sending %lld files to the Mac…" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Sending %lld file to the Mac…"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Sending %lld files to the Mac…"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在把 %lld 个文件发送到 Mac…"
+          }
+        }
+      }
+    },
+    "Sent to the computer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sent to the computer"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已发送到电脑"
+          }
+        }
+      }
+    },
+    "Sent to the computer · saved in %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sent to the computer · saved in %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已发送到电脑 · 保存在「%@」"
+          }
+        }
+      }
+    },
+    "Sent to the Mac" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sent to the Mac"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已发送到 Mac"
+          }
+        }
+      }
+    },
+    "Sent to the Mac · saved in %@" : {
+      "comment" : "Clipboard toast: the Mac folder the files landed in (Downloads)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sent to the Mac · saved in %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已发送到 Mac · 保存在「%@」"
+          }
+        }
+      }
+    },
+    "Text and links go onto the computer’s clipboard. Photos and files are saved to its Downloads folder and copied there too." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Text and links go onto the computer’s clipboard. Photos and files are saved to its Downloads folder and copied there too."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文本和链接会放到电脑的剪贴板上；照片和文件会保存到电脑的「下载」文件夹，并同时复制到剪贴板。"
+          }
+        }
+      }
+    },
+    "Text and links go onto the Mac’s clipboard. Photos and files are saved to its Downloads folder and copied there too." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Text and links go onto the Mac’s clipboard. Photos and files are saved to its Downloads folder and copied there too."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文本和链接会放到 Mac 的剪贴板上；照片和文件会保存到 Mac 的「下载」文件夹，并同时复制到剪贴板。"
+          }
+        }
+      }
+    },
+    "The computer’s clipboard is empty" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The computer’s clipboard is empty"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "电脑的剪贴板是空的"
+          }
+        }
+      }
+    },
+    "The computer’s clipboard is empty." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The computer’s clipboard is empty."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "电脑的剪贴板是空的。"
+          }
+        }
+      }
+    },
+    "The computer’s clipboard is hidden by a password manager." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The computer’s clipboard is hidden by a password manager."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "电脑的剪贴板内容被密码管理器隐藏了。"
+          }
+        }
+      }
+    },
+    "The desktop can’t be shown right now." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The desktop can’t be shown right now."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "现在无法显示桌面。"
+          }
+        }
+      }
+    },
+    "The Mac’s clipboard is empty" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The Mac’s clipboard is empty"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac 的剪贴板是空的"
+          }
+        }
+      }
+    },
+    "The Mac’s clipboard is empty." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The Mac’s clipboard is empty."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac 的剪贴板是空的。"
+          }
+        }
+      }
+    },
+    "The Mac’s clipboard is hidden by a password manager." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The Mac’s clipboard is hidden by a password manager."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac 的剪贴板内容被密码管理器隐藏了。"
+          }
+        }
+      }
+    },
+    "The Mac’s screen can’t be shown right now." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The Mac’s screen can’t be shown right now."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "现在无法显示 Mac 的屏幕。"
+          }
+        }
+      }
+    },
+    "The server returned HTTP %lld." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The server returned HTTP %lld."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "服务器返回 HTTP %lld。"
+          }
+        }
+      }
+    },
+    "Watch the desktop, or take control" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Watch the desktop, or take control"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "查看桌面，或接管操作"
+          }
+        }
+      }
+    },
+    "Watch the Mac, or take control" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Watch the Mac, or take control"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "查看 Mac 的画面，或接管操作"
+          }
+        }
+      }
+    },
+    "What the computer copied comes to this iPhone’s clipboard" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "What the computer copied comes to this iPhone’s clipboard"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "把电脑上拷贝的内容放进这台 iPhone 的剪贴板"
+          }
+        }
+      }
+    },
+    "What the Mac copied comes to this iPhone’s clipboard" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "What the Mac copied comes to this iPhone’s clipboard"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "把 Mac 上拷贝的内容放进这台 iPhone 的剪贴板"
+          }
+        }
+      }
+    },
+    "What you copied on this iPhone goes to the computer and is pasted there" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "What you copied on this iPhone goes to the computer and is pasted there"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "把这台 iPhone 上拷贝的内容放到电脑上并粘贴"
+          }
+        }
+      }
+    },
+    "What you copied on this iPhone goes to the Mac and is pasted there" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "What you copied on this iPhone goes to the Mac and is pasted there"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "把这台 iPhone 上拷贝的内容放到 Mac 上并粘贴"
+          }
+        }
+      }
+    },
+    "Your session has expired. Please sign in again." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Your session has expired. Please sign in again."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "登录已失效，请重新登录。"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

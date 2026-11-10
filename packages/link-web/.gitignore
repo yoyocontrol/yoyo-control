@@ -1,0 +1,2 @@
+# the media layer, built from link/wasm by `npm run wasm` (the glue next to it is committed)
+src/wasm/*.wasm

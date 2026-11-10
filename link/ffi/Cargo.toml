@@ -1,0 +1,31 @@
+[package]
+name = "uu-link-ffi"
+description = "uu Link for Swift (UniFFI): YoyoLinkFFI.xcframework + the generated bindings (scripts/link-apple.sh)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "uu_link_ffi"
+crate-type = ["staticlib", "lib"]
+
+[[bin]]
+# the Swift bindings generator, built for the host (scripts/link-apple.sh)
+name = "uniffi-bindgen-swift"
+path = "src/bin/uniffi-bindgen-swift.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+uu-link.workspace = true
+uniffi = "0.32"
+tokio.workspace = true
+bytes.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+n0-future.workspace = true

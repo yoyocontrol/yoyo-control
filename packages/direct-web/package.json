@@ -1,0 +1,35 @@
+{
+  "name": "@yoyocontrol/direct-web",
+  "version": "0.2.0",
+  "description": "Yoyo Control's own backend for browsers: paired Macs kept in IndexedDB, reached over uu Link (WebRTC signaled through the relay), as a ScreenBackend for @yoyocontrol/screen-ui",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "dependencies": {
+    "@yoyocontrol/link-web": "^0.1.1",
+    "@yoyocontrol/screen-web": "^0.3.0"
+  },
+  "peerDependencies": {
+    "@yoyocontrol/screen-ui": "^0.1.0"
+  },
+  "devDependencies": {
+    "@yoyocontrol/screen-ui": "^0.1.0"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --import tsx \"test/*.test.ts\""
+  }
+}

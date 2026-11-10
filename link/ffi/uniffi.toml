@@ -1,0 +1,8 @@
+# Swift: the generated file is part of the `YoyoLink` target (root Package.swift); its C side is the
+# `YoyoLinkFFI` module of YoyoLinkFFI.xcframework.
+[bindings.swift]
+module_name = "YoyoLink"
+ffi_module_name = "YoyoLinkFFI"
+ffi_module_filename = "YoyoLinkFFI"
+omit_argument_labels = false
+generate_module_map = false

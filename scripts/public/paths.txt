@@ -1,0 +1,35 @@
+# What the public repository (github.com/yoyocontrol/yoyo-control) holds: scripts/public/export.sh copies the tracked
+# files these lines select. `+path` takes a file or a directory, `-path` leaves one out; the last line that matches a
+# file decides. Everything else stays in this (private) repository: Yoyo Control's own product and services —
+# the iPhone app, the menu bar app with Sparkle and signing, the Pro paywall, relay1 / signal1, the website.
+
+# the open-source libraries and servers
++LICENSE
++NOTICE
++.gitignore
++Package.swift
++package.json
++tsconfig.base.json
++packages/
++link/
++linux/
++windows/
++ios/README.md
++ios/YoyoKit/
++ios/Scripts/
++mac/Package.swift
++mac/README.md
++mac/Sources/YoyoServer/
++mac/Sources/yoyo-server/
++mac/Tests/YoyoServerTests/
++docs/
++scripts/check-private.mjs
++scripts/git-dist.sh
++scripts/link-apple.sh
++scripts/link-trace.py
++scripts/public/
+
+# the product's, inside the open parts
+-ios/YoyoKit/Sources/YoyoPro/
+-ios/YoyoKit/Tests/YoyoKitTests/ProAccessTests.swift
+-docs/ACCOUNT.md

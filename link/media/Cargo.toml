@@ -1,0 +1,11 @@
+[package]
+name = "uu-link-media"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+publish = false
+description = "uu Link media layer: sans-IO video FEC/NACK, rate control, audio redundancy, input reliability"
+
+[dependencies]
+reed-solomon-simd = "3.1"

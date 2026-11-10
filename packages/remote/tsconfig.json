@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    // typecheck and tests read the port mapper's sources; the build resolves the built package and bundles it
+    // (scripts/bundle-portmap.mjs)
+    "baseUrl": ".",
+    "paths": { "@yoyocontrol/portmap": ["../portmap/src/index.ts"] }
+  },
+  "include": ["src", "test"]
+}

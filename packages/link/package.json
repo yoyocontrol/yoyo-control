@@ -1,0 +1,22 @@
+{
+  "name": "@yoyocontrol/link",
+  "version": "0.1.0",
+  "description": "uu Link for Node: the UDP / QUIC phone ↔ computer transport (sessions, control messages, RPC, datagram channels) over the shared Rust core",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+  },
+  "files": ["dist", "native", "README.md"],
+  "sideEffects": false,
+  "os": ["darwin", "linux"],
+  "scripts": {
+    "native": "node scripts/build-native.mjs",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --import tsx \"test/*.test.ts\""
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "yoyocontrol",
+  "private": true,
+  "description": "Yoyo Control's TypeScript kits (packages/*).",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm -ws run build",
+    "typecheck": "npm -ws run typecheck",
+    "test": "npm -ws run test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.0"
+  }
+}

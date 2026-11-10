@@ -1,0 +1,23 @@
+.DS_Store
+.claude/
+# the root Package.swift (the iOS kits) when Xcode or SwiftPM opens it
+.swiftpm/
+.build/
+
+# TypeScript kits (packages/*)
+node_modules/
+packages/*/dist/
+
+# the web app's build (webapp/), and its copy in the site's assets (web/deploy.sh)
+webapp/dist/
+web/public/app/
+
+# the Linux server's release assets (linux/build.sh)
+linux/build/
+
+# the iOS app's build output (ios/App/testflight.sh, device builds with -derivedDataPath build/device)
+ios/App/build/
+linux/vendor/link/*.node
+
+# local, never committed: the private-string list of scripts/check-private.mjs
+.private/

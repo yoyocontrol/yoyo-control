@@ -1,0 +1,53 @@
+{
+  "name": "@yoyocontrol/link-web",
+  "version": "0.1.3",
+  "description": "uu Link in the browser: a WebRTC session (control, RPC, datagram channels) with the media layer as WebAssembly, and the screen's media route for @yoyocontrol/screen-web",
+  "keywords": [
+    "yoyo-control",
+    "webrtc",
+    "webassembly",
+    "uu-link"
+  ],
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yoyocontrol/yoyo-control.git",
+    "directory": "packages/link-web"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./uu_link_wasm_bg.wasm": "./dist/wasm/uu_link_wasm_bg.wasm",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "peerDependencies": {
+    "@yoyocontrol/screen-web": ">=0.3.0"
+  },
+  "peerDependenciesMeta": {
+    "@yoyocontrol/screen-web": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "wasm": "node scripts/build-wasm.mjs",
+    "wasm:check": "node scripts/build-wasm.mjs --check",
+    "build": "node scripts/build-wasm.mjs && rm -rf dist && tsc -p tsconfig.build.json && node scripts/copy-wasm.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --import tsx \"test/*.test.ts\"",
+    "e2e": "node test/e2e/run.mjs"
+  },
+  "devDependencies": {
+    "@yoyocontrol/screen-web": "*",
+    "esbuild": "^0.28.2"
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "%@ isn't on the same network as this iPhone. Reaching it from elsewhere needs Yoyo Control Pro." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ isn't on the same network as this iPhone. Reaching it from elsewhere needs Yoyo Control Pro."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 跟这台 iPhone 不在同一个网络。要在别处连它，需要 Yoyo Control Pro。"
+          }
+        }
+      }
+    },
+    "Can't reach %@. Make sure it's on and awake, and that remote access is on there (on a Mac: Allow Remote Access in Yoyo Control's menu)." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Can't reach %@. Make sure it's on and awake, and that remote access is on there (on a Mac: Allow Remote Access in Yoyo Control's menu)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "连不上 %@。请确认它开着、没有睡眠，并且那边打开了远程访问（Mac 上是 Yoyo Control 菜单里的「允许远程访问」）。"
+          }
+        }
+      }
+    },
+    "Grant the permissions from Yoyo Control’s menu on the Mac." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Grant the permissions from Yoyo Control’s menu on the Mac."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在 Mac 上 Yoyo Control 的菜单里授予权限。"
+          }
+        }
+      }
+    },
+    "The computer answered %lld: %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The computer answered %lld: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "电脑回答了 %lld：%@"
+          }
+        }
+      }
+    },
+    "The computer refused the pairing code: %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The computer refused the pairing code: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "电脑拒绝了配对码：%@"
+          }
+        }
+      }
+    },
+    "This computer no longer knows this iPhone. Pair it again." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This computer no longer knows this iPhone. Pair it again."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这台电脑已经不认这台 iPhone 了。请重新配对。"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

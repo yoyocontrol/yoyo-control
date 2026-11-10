@@ -1,0 +1,52 @@
+/** The pages' icons: 24 × 24 line drawings in `currentColor` (SF Symbols' shapes, drawn for the web). */
+export declare const ICONS: {
+    readonly close: string;
+    readonly question: string;
+    readonly display: string;
+    readonly keyboard: string;
+    readonly keyboardDown: string;
+    readonly speaker: string;
+    readonly speakerOff: string;
+    readonly clipboard: string;
+    readonly paste: string;
+    readonly copyFrom: string;
+    readonly photo: string;
+    readonly folder: string;
+    readonly file: string;
+    readonly enterFull: string;
+    readonly exitFull: string;
+    readonly trackpad: string;
+    readonly touch: string;
+    readonly eye: string;
+    readonly sparkle: string;
+    readonly handTap: string;
+    readonly device: string;
+    readonly pointer: string;
+    readonly doubleTap: string;
+    readonly twoFingers: string;
+    readonly select: string;
+    readonly drag: string;
+    readonly scroll: string;
+    readonly scrollH: string;
+    readonly pinch: string;
+    readonly hold: string;
+    readonly mouse: string;
+    readonly key: string;
+    readonly zoomIn: string;
+    readonly check: string;
+    readonly share: string;
+    readonly download: string;
+    readonly copy: string;
+    readonly warning: string;
+    readonly wifiOff: string;
+    readonly record: string;
+};
+export type IconName = keyof typeof ICONS;
+/** The client-drawn pointer when the computer's shape is missing: a black arrow with a white edge (13 × 20). */
+export declare const FALLBACK_POINTER: string;
+export declare const FALLBACK_POINTER_SIZE: {
+    width: number;
+    height: number;
+    hotX: number;
+    hotY: number;
+};

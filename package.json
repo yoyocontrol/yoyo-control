@@ -1,0 +1,24 @@
+{
+  "name": "@yoyocontrol/local",
+  "version": "0.2.0",
+  "description": "Client of Yoyo Control's local API for programs on the same machine: finding the app, requests, /events, clipboard",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "gitHead": "c2d67ea863f2bc0b41a187a2efe17718650b3be5"
+}

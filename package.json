@@ -1,0 +1,24 @@
+{
+  "name": "@yoyocontrol/portmap",
+  "version": "0.1.0",
+  "description": "Port mapping on the home router (UPnP IGD, NAT-PMP, PCP) with lease renewal, cleanup and the public address",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "gitHead": "c2d67ea863f2bc0b41a187a2efe17718650b3be5"
+}

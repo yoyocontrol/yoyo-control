@@ -6,8 +6,12 @@
 //   yoyo-winwindows --esc [--xtest] long-running: a line per Escape pressed (see below) until stdin ends
 //
 // One shot. The top-level windows in Z order, bottom → top (EnumWindows gives top → bottom), only the visible ones
-// that are not cloaked (another virtual desktop's, a suspended Store app's), not click-through (WS_EX_TRANSPARENT: an
-// overlay over everything that clicks pass through) and have an area. An app is its program:
+// that are not cloaked (another virtual desktop's, a suspended Store app's), not click-through and have an area.
+// Click-through: WS_EX_TRANSPARENT (an overlay over everything that clicks pass through), or a window the system's
+// own hit test finds nowhere although nothing is in front of it there (pointer_passes below: a layered overlay whose
+// pixels are fully transparent — NVIDIA's lies over the whole screen without the style — or one cut away by a window
+// region). Listed, such a window would be "the app at" every point under it and hide what is really clicked.
+// An app is its program:
 // `class` = the executable's name without ".exe" (chrome, Code, explorer), `instance` = the window class, `pid` = the
 // owning process. Never a title. `type`: "desktop" for the shell's desktop (Progman / WorkerW), "dock" for the
 // taskbars, "menu" / "tooltip" for those window classes, else "normal"; `or` (a popup that isn't the app's window:
@@ -70,6 +74,35 @@ static char *program_of(DWORD pid) {
   return out;
 }
 
+// Whether the pointer goes through `h` (items[k]; EnumWindows' order: a smaller index is in front). The system's own
+// hit test (WindowFromPoint skips what a click skips: transparent pixels of a layered window, what a window region
+// cuts away, click-through styles) at a grid of points inside the frame: a point answers this window (solid: not
+// through, at once), a window behind it or none (through there) or a window in front of it (covered: says nothing).
+// Through = some point was and none was solid. A disabled window (behind its modal dialog) is skipped by
+// WindowFromPoint although clicks stop at it: never through.
+static int pointer_passes(size_t k, HWND h, const RECT *r) {
+  enum { N = 8 };
+  if (!IsWindowEnabled(h)) return 0;
+  int through = 0;
+  LONG w = r->right - r->left, ht = r->bottom - r->top;
+  for (int iy = 0; iy < N; iy++) {
+    for (int ix = 0; ix < N; ix++) {
+      POINT p = {r->left + (LONG)(((long long)(2 * ix + 1) * w) / (2 * N)), r->top + (LONG)(((long long)(2 * iy + 1) * ht) / (2 * N))};
+      HWND at = WindowFromPoint(p);
+      HWND root = at ? GetAncestor(at, GA_ROOT) : NULL;
+      if (root == h) return 0;
+      if (!root) {
+        through++;
+        continue;
+      }
+      size_t j = 0;
+      while (j < items_n && items[j].hwnd != root) j++;
+      if (j < items_n && j > k) through++;
+    }
+  }
+  return through > 0;
+}
+
 static int one_shot(void) {
   EnumWindows(collect, 0);
   int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
@@ -91,6 +124,8 @@ static int one_shot(void) {
     LONG style = GetWindowLongW(h, GWL_STYLE), ex = GetWindowLongW(h, GWL_EXSTYLE);
     // click-through windows (a game overlay, a screen dimmer over everything) take no part of the screen
     if (ex & WS_EX_TRANSPARENT) continue;
+    // …and so do the ones that let the pointer through without saying so in their style
+    if (!IsIconic(h) && pointer_passes(k, h, &r)) continue;
     DWORD pid = 0;
     GetWindowThreadProcessId(h, &pid);
     WCHAR wcls[256] = {0};

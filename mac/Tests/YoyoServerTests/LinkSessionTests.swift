@@ -306,6 +306,24 @@ final class LinkSessionTests: XCTestCase {
 
         try await session.send(controlObject: ["t": "video.close", "id": 1])
         XCTAssertNotNil(phone.message("video.closed") { $0["id"] as? Int == 1 })
+
+        // an embedder's display over the same session (ExternalDisplay.swift): its own size, a `ready` status, pictures
+        let external = ExternalDisplay(id: 4_000_000_104)
+        XCTAssertTrue(ExternalDisplays.add(external))
+        defer { ExternalDisplays.remove(id: external.id) }
+        external.publish(fakeDesktopPicture(0, width: 600, height: 1200))
+        let framesBefore = phone.frames
+        try await session.send(controlObject: ["t": "video.open", "id": 1,
+                                               "query": "display=4000000104&codecs=h264&fps=30&maxWidth=300&status=1"])
+        let externalOpened = try XCTUnwrap(phone.message("video.opened"))
+        XCTAssertEqual(externalOpened["width"] as? Int, 300)
+        XCTAssertEqual(externalOpened["height"] as? Int, 600)
+        XCTAssertEqual((externalOpened["headers"] as? [String: Any])?["X-Display"] as? String, "4000000104")
+        let externalStatus = try XCTUnwrap(phone.message("video.status") { ($0["json"] as? [String: Any])?["display"] as? Int == 4_000_000_104 })
+        XCTAssertEqual((externalStatus["json"] as? [String: Any])?["phase"] as? String, "ready")
+        XCTAssertTrue(phone.wait(timeout: 5) { $0.frames > framesBefore }, "the external display's pictures arrive")
+        try await session.send(controlObject: ["t": "video.close", "id": 1])
+        XCTAssertNotNil(phone.message("video.closed") { $0["id"] as? Int == 1 })
         try await session.send(controlObject: ["t": "audio.close", "id": 2])
         XCTAssertNotNil(phone.message("audio.closed") { $0["id"] as? Int == 2 })
 

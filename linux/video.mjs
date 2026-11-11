@@ -23,6 +23,10 @@ const monotonic = () => performance.now() / 1000;
  * The video helper of one stream: yoyo-x11video, driven over its stdin, its records read from its stdout. `cursor`:
  * `--cursor client` (the pointer as 'P' records to `onPointer`, never in the picture); `ready` then waits for the
  * first one too (it comes right after the hello), so the stream's first cursor part has a position and a shape.
+ *
+ * A helper whose hello says so keeps time for the loop (`timer`; yoyo-winvideo): Node's timers on Windows tick every
+ * 15.6 ms, too coarse to pace 60 pictures a second, so a precise wait is a `T <ms> <id>` to the helper (which runs at
+ * 1 ms) and its 'T' record back; a setTimeout behind it stays as the backstop.
  */
 export class VideoHelper {
   constructor({ path, fps, env, log, spawnFn = spawn, cursor = false }) {
@@ -35,6 +39,11 @@ export class VideoHelper {
     this.child = spawnFn(path, args, { stdio: ["pipe", "pipe", "pipe"], env });
     this.reader = new RecordReader();
     this.size = null;
+    /** The helper answers `T <ms> <id>` with a 'T' record (its hello's flag). */
+    this.timer = false;
+    this.timerId = 0;
+    /** Waits a 'T' record ends: a wait()'s (also in `waiters`) or a pause()'s. */
+    this.timed = new Set();
     this.changeToken = 0;
     this.waiters = new Set();
     /** A wake() with nobody waiting: the next wait() returns at once (a cursor change between look and wait). */
@@ -68,6 +77,7 @@ export class VideoHelper {
       this.exitCode = code;
       this.readyReject(new Error(`the video helper exited (${signal ?? `code ${code}`})`));
       for (const p of this.pending.splice(0)) p.resolve(null);
+      for (const w of [...this.timed]) w();
       this.wake();
     });
     this.child.on("error", (err) => {
@@ -79,6 +89,7 @@ export class VideoHelper {
   onRecord(r) {
     if (r.type === "H") {
       this.size = [r.width, r.height];
+      this.timer = !!r.timer;
       if (!this.cursor || this.pointerSeen) this.readyResolve(this.size);
     } else if (r.type === "P") {
       this.onPointer?.(r);
@@ -86,6 +97,9 @@ export class VideoHelper {
         this.pointerSeen = true;
         if (this.size) this.readyResolve(this.size);
       }
+    } else if (r.type === "T") {
+      // the timer asked for last (an earlier one was replaced: its waits ended, or the backstop ends them)
+      if (r.id === this.timerId) for (const w of [...this.timed]) w();
     } else if (r.type === "C") {
       this.changeToken++;
       this.wake();
@@ -105,18 +119,44 @@ export class VideoHelper {
     });
   }
 
-  /** Resolves when something changed since `token`, `wake()` was called (since the last `clearKick()`), or after `ms`. */
-  wait(token, ms) {
+  /**
+   * Resolves when something changed since `token`, `wake()` was called (since the last `clearKick()`), or after `ms` —
+   * `precise`: to the millisecond where the helper keeps time (a picture's pace), else as Node's timers have it.
+   */
+  wait(token, ms, precise = false) {
     if (this.changeToken !== token || this.exited || this.kicked) return Promise.resolve();
     return new Promise((resolve) => {
       const done = () => {
         clearTimeout(t);
         this.waiters.delete(done);
+        this.timed.delete(done);
         resolve();
       };
-      const t = setTimeout(done, Math.max(2, ms));
+      const t = setTimeout(done, this.askTimer(precise, ms, done));
       this.waiters.add(done);
     });
+  }
+
+  /** Resolves after `ms`, whatever changes meanwhile (precise where the helper keeps time). */
+  pause(ms) {
+    if (this.exited) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(t);
+        this.timed.delete(done);
+        resolve();
+      };
+      const t = setTimeout(done, this.askTimer(true, ms, done));
+    });
+  }
+
+  /** A precise wait of `ms` asked of the helper when it keeps time (`done` ends it); returns setTimeout's delay. */
+  askTimer(precise, ms, done) {
+    if (!precise || !this.timer || this.exited) return Math.max(precise ? 1 : 2, ms);
+    this.timerId = (this.timerId + 1) >>> 0;
+    this.timed.add(done);
+    this.child.stdin.write(`T ${(Math.max(0, ms) + 0.2).toFixed(1)} ${this.timerId}\n`);
+    return ms + 40;
   }
 
   wake() {
@@ -256,8 +296,8 @@ export async function streamLoop(res, o) {
         if (want === "live" && gap > 0) {
           const ms = Math.min(gap, Math.max(0.001, deadline - now));
           // a cursor stream's pointer moves on during the wait (a wake-up ends it)
-          if (feed && !helper.kicked) await helper.wait(helper.changeToken, ms * 1000);
-          else if (!feed) await sleep(ms);
+          if (feed && !helper.kicked) await helper.wait(helper.changeToken, ms * 1000, true);
+          else if (!feed) await helper.pause(ms * 1000);
           continue;
         }
         let gate = "open";
@@ -333,5 +373,3 @@ export async function streamLoop(res, o) {
     if (flow?.quality) log(`ended; last phone net → ${flow.quality.value.grade}`);
   }
 }
-
-const sleep = (s) => new Promise((r) => setTimeout(r, Math.max(1, s * 1000)));

@@ -16,6 +16,8 @@ export const PLATFORMS = Object.freeze({
     helpers: Object.freeze({ video: "yoyo-x11video", audio: "yoyo-pa-opus", clipboard: "yoyo-x11clip", windows: "yoyo-x11windows" }),
     /** The input program (`<it> -` reads xdotool lines): found in PATH. */
     input: "xdotool",
+    /** The most pictures a second a stream gets unless `maxFps` / YOYO_MAX_FPS says otherwise (x264 on the CPU). */
+    maxFps: 30,
     /** GET /frame: ffmpeg's x11grab (`ffmpeg`), or the video helper's `--jpeg` (`helper`). */
     frame: "ffmpeg",
     /** Where the display is, for the start-up line. */
@@ -28,6 +30,8 @@ export const PLATFORMS = Object.freeze({
     helpers: Object.freeze({ video: "yoyo-winvideo.exe", audio: "yoyo-winaudio.exe", clipboard: "yoyo-winclip.exe", windows: "yoyo-winwindows.exe" }),
     /** Beside this file, like the other helpers. */
     input: "yoyo-wininput.exe",
+    /** The graphics card encodes (a few ms a picture); on x264 the loop's own pace (a picture's work counts) holds it lower. */
+    maxFps: 60,
     frame: "helper",
     display: (env) => `session ${env.SESSIONNAME ?? "?"} of ${env.USERNAME ?? "?"}`,
   }),

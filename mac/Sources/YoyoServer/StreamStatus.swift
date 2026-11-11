@@ -47,19 +47,28 @@ extension Router {
 
 /// The status parts of one `status=1` stream. Used on the stream's handler thread only.
 final class StreamStatusFeed {
-    let tracker: ScreenStateTracker
+    /// nil: an external display's stream (ExternalDisplay.swift), ready for as long as it runs.
+    let tracker: ScreenStateTracker?
     /// The stream's display (`X-Display`): every part names it, whatever id the entry has.
     let display: CGDirectDisplayID
     private var sent: ScreenDisplayState?
     private var seen: UInt64?
+    private let readySince = (Date().timeIntervalSince1970 * 1000).rounded()
 
     init(tracker: ScreenStateTracker, display: CGDirectDisplayID) {
         self.tracker = tracker
         self.display = display
     }
 
+    /// An external display's: one part, `ready` (the Mac's capture path and its console say nothing about it).
+    init(ready display: CGDirectDisplayID) {
+        self.tracker = nil
+        self.display = display
+    }
+
     /// The state this stream reports now: the ScreenCaptureKit path's.
     func current() -> (state: ScreenDisplayState, console: ConsoleState?) {
+        guard let tracker else { return (ScreenDisplayState(display: display, phase: .ready, since: readySince), nil) }
         var out = tracker.captureState()
         // the entry's own id is the main display's (also for a stream of another display)
         out.state.main = out.state.display == display
@@ -69,7 +78,7 @@ final class StreamStatusFeed {
 
     /// The first part: the state as of now.
     func start(_ conn: Connection) -> Bool {
-        tracker.refresh()
+        tracker?.refresh()
         return pump(conn)
     }
 
@@ -81,7 +90,7 @@ final class StreamStatusFeed {
 
     /// `pump` with any writer (the link's `video.status` messages): `send` false = end.
     func pump(send: (ScreenDisplayState, ConsoleState?) -> Bool) -> Bool {
-        let version = tracker.version
+        let version = tracker?.version ?? 0
         if version != seen {
             seen = version
             let (state, console) = current()

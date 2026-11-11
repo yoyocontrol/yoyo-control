@@ -75,7 +75,8 @@ enum Router {
             "session": session.json,
             "screenRecording": CGPreflightScreenCaptureAccess(),
             "accessibility": AXIsProcessTrusted(),
-            "displays": displays.map(\.json),
+            // WindowServer's, then the embedder's (ExternalDisplay.swift: listed whatever the session and permissions are)
+            "displays": displays.map(\.json) + ExternalDisplays.json,
         ]
         if displays.isEmpty { body["error"] = Displays.noDisplayReason() }
         // the connection state (ScreenState.swift), as the latest `/events` line has it
@@ -282,6 +283,7 @@ enum Router {
 
     /// `GET /frame`: one ScreenCaptureKit picture as JPEG.
     static func frame(_ req: HTTPRequest, _ conn: Connection) throws {
+        if let external = try ExternalDisplays.requested(req) { return respondFrame(try frameExternal(req, external), conn) }
         respondFrame(try captureFrame(frameCaptureParams(req)), conn)
     }
 
@@ -297,6 +299,7 @@ enum Router {
 
     /// `GET /stream`: a ScreenCaptureKit video stream of a display.
     static func stream(_ req: HTTPRequest, _ conn: Connection) throws {
+        if let external = try ExternalDisplays.requested(req) { return try streamExternal(req, conn, external) }
         // the last stream closing lifts a button a live drag left down (PointerHold.swift)
         PointerHolds.shared.streamOpened()
         defer { PointerHolds.shared.streamClosed() }

@@ -7,6 +7,7 @@ import { EventEmitter } from "node:events";
 import { AudioCapture, AudioClientQueue, AudioRecordReader, audioCookie, audioEnabled, audioPart } from "../audio.mjs";
 import { drained } from "../server.mjs";
 import { RecordReader, WIRE, nalTypes, negotiate, streamPart } from "../wire.mjs";
+import { VideoHelper } from "../video.mjs";
 import { IDR, P, PPS, SPS, audioHello, audioRecord, fakeProcess, frameRecord, parseParts, record } from "./fakes.mjs";
 
 test("wire: the vnd.yoyo-control names whatever Accept says; a part is --boundary, headers, body, CRLF", () => {
@@ -321,4 +322,63 @@ test("audio: a helper that never says hello and then exits fails the start once 
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(cap.counters.failures, 1);
   assert.equal(lines.filter((l) => l.startsWith("audio: cannot start")).length, 1);
+});
+
+test("video helper timer: a hello with flag 1 keeps time — a precise wait is `T <ms> <id>` and ends on that id's 'T'; without the flag, Node's own timer", async () => {
+  const open = (hello) => {
+    const proc = fakeProcess();
+    const helper = new VideoHelper({ path: "yoyo-winvideo.exe", fps: 60, env: {}, log: () => {}, spawnFn: () => proc });
+    proc.stdout.write(record("H", hello));
+    return { proc, helper };
+  };
+  const id = (n) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32BE(n);
+    return b;
+  };
+  const tick = () => new Promise((r) => setImmediate(r));
+
+  const r = new RecordReader();
+  assert.deepEqual(r.feed(record("H", Buffer.from([5, 0, 3, 64, 1]))), [{ type: "H", width: 1280, height: 832, timer: true }]);
+  assert.deepEqual(r.feed(record("H", Buffer.from([5, 0, 3, 64]))), [{ type: "H", width: 1280, height: 832, timer: false }]);
+  assert.deepEqual(r.feed(record("T", id(7))), [{ type: "T", id: 7 }]);
+
+  const a = open(Buffer.from([5, 0, 3, 64, 1]));
+  await a.helper.ready;
+  assert.equal(a.helper.timer, true);
+  let done = false;
+  a.helper.wait(a.helper.changeToken, 5, true).then(() => (done = true));
+  await tick();
+  assert.deepEqual(a.proc.lines, ["T 5.2 1"]);
+  // another timer's record ends nothing; this one's does, long before the backstop
+  a.proc.stdout.write(record("T", id(9)));
+  await tick();
+  assert.equal(done, false);
+  a.proc.stdout.write(record("T", id(1)));
+  await tick();
+  assert.equal(done, true);
+  // a pause sits through changes (a wait would end on one) and ends on its 'T'
+  done = false;
+  a.helper.pause(4).then(() => (done = true));
+  a.proc.stdout.write(record("C"));
+  await tick();
+  assert.equal(done, false);
+  assert.equal(a.proc.lines.at(-1), "T 4.2 2");
+  a.proc.stdout.write(record("T", id(2)));
+  await tick();
+  assert.equal(done, true);
+  // a wait that is not a picture's pace asks the helper nothing
+  a.helper.clearKick();
+  const plain = a.helper.wait(a.helper.changeToken, 3);
+  await plain;
+  assert.equal(a.proc.lines.length, 2);
+  a.helper.stop();
+
+  const b = open(Buffer.from([5, 0, 3, 64]));
+  await b.helper.ready;
+  assert.equal(b.helper.timer, false);
+  await b.helper.wait(b.helper.changeToken, 3, true);
+  await b.helper.pause(2);
+  assert.deepEqual(b.proc.lines, []);
+  b.helper.stop();
 });

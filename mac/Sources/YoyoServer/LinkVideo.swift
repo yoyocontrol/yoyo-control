@@ -210,7 +210,16 @@ extension Router {
         var o: VideoStreamOptions
         var headers: [String: String]
         var size = (width: 0, height: 0)
-        if let hook = LinkHooks.videoSource {
+        if let external = try ExternalDisplays.requested(req) {
+            // an embedder's display (ExternalDisplay.swift): its own pictures, no pointer, always ready
+            let made = try externalStream(req, external, label: label)
+            if try statusRequested(req) { sink.status = StreamStatusFeed(ready: external.id) }
+            source = made.source
+            o = made.options
+            o.streamID = nil  // the link's own pacing, not the ack window
+            headers = Dictionary(uniqueKeysWithValues: made.headers)
+            size = made.source.size
+        } else if let hook = LinkHooks.videoSource {
             let made = try hook(req)
             source = made.source
             o = VideoStreamOptions(codec: made.codec, label: label)
@@ -247,7 +256,7 @@ extension Router {
                 cleanup.append { tracker.stop() }
             }
             if wantsStatus, let feed = try statusFeed(req, display: display) {
-                feed.tracker.refresh()
+                feed.tracker?.refresh()
                 sink.status = feed
             }
             source = frames

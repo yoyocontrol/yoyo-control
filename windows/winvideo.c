@@ -1,15 +1,23 @@
 // yoyo-winvideo: the video source of yoyo-windows (the shared server, linux/server.mjs with the Windows platform). The
 // Windows twin of linux/x11video.c — the same arguments, commands and records, so the server's stream loop (video.mjs)
 // runs unchanged: it watches the main display for changes (DXGI Desktop Duplication: a frame comes when something
-// was drawn or the pointer moved) and, when told to, takes the latest picture, draws the pointer in, converts it to
-// I420 (BT.709, limited range) and encodes it with x264 as one Annex-B access unit: a key frame (SPS + PPS + IDR) when
-// asked, else a delta; no B-frames, no lookahead, no reordering, no delay. The server decides when to encode (pace,
-// flow-control window, refine, keepalive: linux/README.md「视频流」); this program only reports changes and encodes
-// on command.
+// was drawn or the pointer moved) and, when told to, takes the latest picture, draws the pointer in and encodes it as
+// one Annex-B access unit (BT.709, limited range): a key frame (SPS + PPS + IDR) when asked, else a delta; no
+// B-frames, no lookahead, no reordering, no delay. The server decides when to encode (pace, flow-control window,
+// refine, keepalive: linux/README.md「视频流」); this program only reports changes and encodes on command.
+//
+// Two encoders. The graphics card's own (winhw.h: the picture stays on the card — its video processor makes NV12, its
+// H.264 encoder the access unit; a few ms a picture at any size, no CPU) is used wherever there is one; without (no
+// hardware encoder, a driver that refuses, a Windows without Media Foundation) or when it fails mid-stream, x264 on
+// the CPU: the picture read back, converted to I420 here and encoded as on Linux (x11video.c). `--encoder` /
+// YOYO_VIDEO_ENCODER (`gpu` | `x264`) picks one; a line on stderr says which runs.
+//
+// While a stream runs the display is kept awake (a display asleep presents nothing: there would be no picture), and
+// one found asleep at the start is woken (a pointer move of no distance).
 //
 // With `--cursor client` the pointer is the client's to draw (the protocol's `cursor=client`): it is never drawn into
 // the pictures, its moves and shape changes are no picture change, and it is reported as 'P' records instead — where
-// it is (at most every 33 ms, only when it moved), and its shape (the duplication's pointer shape; the pixels the
+// it is (at most every 8 ms, only when it moved), and its shape (the duplication's pointer shape; the pixels the
 // first time this process sees that shape). A pointer that changes its shape more than 10 times a second (an animated
 // busy cursor) keeps its last reported shape until it has been still for 0.5 s.
 //
@@ -19,19 +27,28 @@
 // screen, Ctrl+Alt+Del; a mode change in progress) the last picture stands and duplication is tried again every
 // 250 ms; a new size ends the stream (exit 3).
 //
-// Arguments: [--preset <x264 preset>] [--threads <n>] [--fps <n>] [--cursor client].
+// Arguments: [--preset <x264 preset>] [--threads <n>] [--fps <n>] [--cursor client] [--encoder gpu|x264].
+//   --bench <pictures> [--size <w> <h>] [--kbps <n>]
+//       no desktop needed (a service's session will do): a moving test picture of w × h (default 2560 × 1440) encoded
+//       that many times as fast as it goes (a key frame halfway, a refine every --fps pictures, as a stream asks);
+//       the raw H.264 on stdout, the encoder and its times on stderr.
 //   --jpeg <quality 10…95> --size <w> <h> [--crop <x> <y> <w> <h>] [--box <x> <y> <w> <h>]…
 //       one picture instead (GET /frame): the pointer drawn in, the boxes (screen pixels) painted over in the mask
 //       colour, the crop (screen pixels) cut out, scaled to w × h (area averaging), a JPEG (WIC) on stdout; exit 0.
+//       The picture is the composed desktop as GDI hands it over (gdi_grab); the duplication only when that fails.
 //
 // stdin, one command per line:
 //   E <key 0|1> <kbps> [<crf> [<buf>]]   grab and encode now: quality-targeted (x264's CRF, default 23) under a cap
 //                                 of kbps over 1 s (VBV); a refine asks for a lower crf and a higher cap. buf: the VBV
 //                                 buffer in kbit (default kbps): kbps per --fps pictures may be scaled up for fewer
 //                                 pictures (the link's frame-rate cap) while a key frame still fits ~1 s of real rate
+//   T <ms> <id>                   a timer: a 'T' record with this id after ms (one at a time: a new T replaces the
+//                                 pending one). Windows' own timers tick every 15.6 ms for the server; this process
+//                                 runs at 1 ms, so the server paces its pictures with these
 //   Q                             quit (stdin's end too)
 // stdout, records: one type byte, a 4-byte big-endian payload length, the payload:
-//   'H' hello, once at start: u16 BE width, u16 BE height (even: an odd edge is left out)
+//   'H' hello, once at start: u16 BE width, u16 BE height (even: an odd edge is left out), u8 flags (1 = T timers)
+//   'T' a timer is due: u32 BE id
 //   'C' the screen (or the pointer) changed since the last grab; once per change until the next E
 //   'F' a frame: u8 flags (1 = key, 2 = the picture changed since the previous grab), f64 LE capture time (ms since
 //       1970), then the access unit
@@ -46,6 +63,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define _WIN32_WINNT 0x0A00
 #include <windows.h>
+#include <mmsystem.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <wincodec.h>
@@ -68,7 +86,20 @@ static IDXGIOutput1 *output;
 static IDXGIOutputDuplication *dupl;
 static ID3D11Texture2D *latest;    // the newest desktop picture (GPU)
 static ID3D11Texture2D *staging;   // read back from here
+static ID3D11Texture2D *shown;     // GPU path, pointer drawn in: `latest` with the pointer over it
+static ID3D11Texture2D *ptr_staging;  // what is under the pointer, read back to blend (256 x 256)
+static UINT adapter_vendor;        // the card's PCI vendor (its own encoder is tried first)
 static int have_image = 0;
+static int fresh_dupl = 0;         // a duplication's first frame is the whole picture, whatever its present time
+static int encoder_mode = 0;       // 0: the GPU's when it has one, 1: the GPU's or none, 2: x264
+static int hw_on = 0, hw_tried = 0;
+static int bench = 0;              // --bench: no desktop, a test picture
+// Two threads while a stream runs: one takes the desktop's frames as they come (the newest picture, the pointer),
+// the other obeys the server (commands, the timer) at once — a wait for a frame can't be cut short by a command.
+// `state` guards what both touch: dirty / told, the pointer (`cur`, its shapes, pending_move), have_image. The
+// graphics context is multithread-protected (open_output), so its calls need no lock of ours.
+static CRITICAL_SECTION state;
+static int capturing = 0;          // the capture thread runs
 static uint8_t *bgra;              // the picture on the CPU (width x height x 4), the pointer drawn in
 static int dirty = 1, told = 0;
 static uint8_t *yuv;
@@ -107,6 +138,8 @@ static void die(const char *what) {
   fprintf(stderr, "yoyo-winvideo: %s\n", what);
   exit(1);
 }
+
+#include "winhw.h"
 
 static void put16(uint8_t *p, int v) {
   p[0] = (uint8_t)((unsigned)v >> 8);
@@ -287,7 +320,11 @@ static void pointer_update(const DXGI_OUTDUPL_FRAME_INFO *fi) {
   cur.visible = vis;
   if (client_cursor) {
     if (new_shape) shape_changed();
-    if (moved) pending_move = 1;
+    // a move goes out at once, at most every 8 ms (the server sends on at most 60 a second); one held back is sent
+    // by the main loop when its time comes
+    if (moved && now_ms() - sent_at >= 8) send_pointer(0);
+    else if (moved) pending_move = 1;
+    if ((pending_move || animating) && lineq_event) SetEvent(lineq_event);
   } else if (moved || new_shape) {
     mark_dirty();
   }
@@ -316,6 +353,8 @@ static void draw_pointer(void) {
 
 // ---- the desktop
 
+static void protect_context(void);
+
 // The main monitor's output (DesktopCoordinates at 0,0) and a device on its adapter.
 static void open_output(void) {
   IDXGIFactory1 *factory;
@@ -341,9 +380,14 @@ static void open_output(void) {
   if (FAILED(IDXGIOutput_QueryInterface(out, &IID_IDXGIOutput1, (void **)&output))) die("no IDXGIOutput1 (Windows 8 or later is needed)");
   IDXGIOutput_Release(out);
   D3D_FEATURE_LEVEL fl;
-  if (FAILED(D3D11CreateDevice((IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0, D3D11_SDK_VERSION, &dev, &fl, &ctx)))
+  DXGI_ADAPTER_DESC1 ad;
+  if (SUCCEEDED(IDXGIAdapter1_GetDesc1(adapter, &ad))) adapter_vendor = ad.VendorId;
+  // video support: the card's video processor and encoder (winhw.h); a device without still captures
+  if (FAILED(D3D11CreateDevice((IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT, NULL, 0, D3D11_SDK_VERSION, &dev, &fl, &ctx)) &&
+      FAILED(D3D11CreateDevice((IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0, D3D11_SDK_VERSION, &dev, &fl, &ctx)))
     die("D3D11CreateDevice failed");
   IDXGIAdapter1_Release(adapter);
+  protect_context();
   DXGI_OUTPUT_DESC d;
   IDXGIOutput1_GetDesc(output, &d);
   out_w = d.DesktopCoordinates.right - d.DesktopCoordinates.left;
@@ -351,6 +395,15 @@ static void open_output(void) {
   width = out_w & ~1;
   height = out_h & ~1;
   if (width < 16 || height < 16) die("the screen is too small");
+}
+
+// The context is used from two threads here, and from the encoder's own.
+static void protect_context(void) {
+  ID3D10Multithread *mt;
+  if (SUCCEEDED(ID3D11DeviceContext_QueryInterface(ctx, &IID_ID3D10Multithread, (void **)&mt))) {
+    ID3D10Multithread_SetMultithreadProtected(mt, TRUE);
+    ID3D10Multithread_Release(mt);
+  }
 }
 
 static HRESULT duplicate(void) {
@@ -366,6 +419,7 @@ static HRESULT duplicate(void) {
   }
   HRESULT hr = IDXGIOutput1_DuplicateOutput(output, (IUnknown *)dev, &dupl);
   if (FAILED(hr)) return hr;
+  fresh_dupl = 1;
   DXGI_OUTDUPL_DESC dd;
   IDXGIOutputDuplication_GetDesc(dupl, &dd);
   int w = (int)dd.ModeDesc.Width, h = (int)dd.ModeDesc.Height;
@@ -390,10 +444,16 @@ static void make_textures(void) {
   td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
   td.SampleDesc.Count = 1;
   td.Usage = D3D11_USAGE_DEFAULT;
+  // a render target: what the card's video processor takes as its input (winhw.h)
+  td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
   if (FAILED(ID3D11Device_CreateTexture2D(dev, &td, NULL, &latest))) die("CreateTexture2D failed");
+  if (!client_cursor && FAILED(ID3D11Device_CreateTexture2D(dev, &td, NULL, &shown))) die("CreateTexture2D failed");
+  td.BindFlags = 0;
   td.Usage = D3D11_USAGE_STAGING;
   td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
   if (FAILED(ID3D11Device_CreateTexture2D(dev, &td, NULL, &staging))) die("CreateTexture2D (staging) failed");
+  td.Width = td.Height = 256;
+  if (FAILED(ID3D11Device_CreateTexture2D(dev, &td, NULL, &ptr_staging))) die("CreateTexture2D (staging) failed");
 }
 
 static double lost_at = 0;
@@ -429,7 +489,10 @@ static int pump(UINT ms) {
     lost_at = 0;
     return 0;
   }
-  if (fi.LastPresentTime.QuadPart != 0) {
+  EnterCriticalSection(&state);
+  // a new duplication's first frame holds the whole desktop even when nothing was presented since (a still screen)
+  if (fi.LastPresentTime.QuadPart != 0 || fresh_dupl) {
+    fresh_dupl = 0;
     ID3D11Texture2D *tex;
     if (SUCCEEDED(IDXGIResource_QueryInterface(res, &IID_ID3D11Texture2D, (void **)&tex))) {
       ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)latest, (ID3D11Resource *)tex);
@@ -439,15 +502,46 @@ static int pump(UINT ms) {
     }
   }
   pointer_update(&fi);
+  LeaveCriticalSection(&state);
   IDXGIResource_Release(res);
   IDXGIOutputDuplication_ReleaseFrame(dupl);
   return 1;
 }
 
+// The first picture comes with the duplication's first frame: waited for once (≤ 0.5 s; black until it comes).
+static void wait_first_picture(void) {
+  static int waited = 0;
+  if (have_image || waited || bench) return;
+  waited = 1;
+  for (int i = 0; !have_image && i < 50; i++) {
+    if (capturing) Sleep(10);
+    else pump(10);
+  }
+}
+
+// The desktop's frames, looked for without waiting inside the duplication: a wait there holds the graphics context's
+// lock, and the encoding thread would stand still for as long. Every ms while frames come, every 4 ms on a still desktop.
+static DWORD WINAPI capture_thread(LPVOID unused) {
+  (void)unused;
+  double frame_at = 0;
+  for (;;) {
+    if (pump(0)) frame_at = now_ms();
+    else Sleep(now_ms() - frame_at < 250 ? 1 : 4);
+  }
+  return 0;
+}
+
+static void cpu_buffers(void) {
+  if (bgra) return;
+  bgra = malloc((size_t)width * height * 4);
+  yuv = malloc((size_t)width * height * 3 / 2);
+  if (!bgra || !yuv) die("out of memory");
+}
+
 // The latest picture → `bgra` (the pointer drawn in unless the client draws it).
 static void grab(int draw) {
-  // the first picture of a duplication comes with its first frame: wait for it (≤ 2 s)
-  for (int i = 0; !have_image && i < 100; i++) pump(20);
+  cpu_buffers();
+  wait_first_picture();
   if (!have_image) {
     memset(bgra, 0, (size_t)width * height * 4);
   } else {
@@ -457,7 +551,11 @@ static void grab(int draw) {
     for (int y = 0; y < height; y++) memcpy(bgra + (size_t)y * width * 4, (uint8_t *)m.pData + (size_t)y * m.RowPitch, (size_t)width * 4);
     ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
   }
-  if (draw) draw_pointer();
+  if (draw) {
+    EnterCriticalSection(&state);
+    draw_pointer();
+    LeaveCriticalSection(&state);
+  }
 }
 
 // BGRX → I420, BT.709 limited range (the VUI says so); chroma from each 2x2 block's sum (as x11video.c).
@@ -531,21 +629,69 @@ static void set_rate(int kbps, int buf, float crf) {
   cur_crf = crf;
 }
 
+// GPU path, pointer drawn in: `latest` → `shown` with the pointer blended over it (what is under it read back: a
+// patch of at most 256 x 256).
+static void hw_draw_pointer(void) {
+  static uint8_t patch[256 * 256 * 4];
+  ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)shown, (ID3D11Resource *)latest);
+  if (!cur.visible || cur.none || !cur.rgba) return;
+  int ox = cur.x - cur.xhot, oy = cur.y - cur.yhot;
+  int x0 = ox < 0 ? 0 : ox, y0 = oy < 0 ? 0 : oy;
+  int x1 = ox + cur.w > out_w ? out_w : ox + cur.w, y1 = oy + cur.h > out_h ? out_h : oy + cur.h;
+  if (x1 <= x0 || y1 <= y0) return;
+  int w = x1 - x0, h = y1 - y0;
+  D3D11_BOX box = {(UINT)x0, (UINT)y0, 0, (UINT)x1, (UINT)y1, 1};
+  ID3D11DeviceContext_CopySubresourceRegion(ctx, (ID3D11Resource *)ptr_staging, 0, 0, 0, 0, (ID3D11Resource *)latest, 0, &box);
+  D3D11_MAPPED_SUBRESOURCE m;
+  if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)ptr_staging, 0, D3D11_MAP_READ, 0, &m))) return;
+  for (int j = 0; j < h; j++) {
+    const uint8_t *under = (uint8_t *)m.pData + (size_t)j * m.RowPitch;
+    const uint8_t *p = cur.rgba + ((size_t)(y0 - oy + j) * cur.w + (x0 - ox)) * 4;
+    uint8_t *d = patch + (size_t)j * w * 4;
+    for (int i = 0; i < w; i++, under += 4, p += 4, d += 4) {
+      unsigned a = p[3];
+      d[0] = (uint8_t)(p[2] + under[0] * (255 - a) / 255);
+      d[1] = (uint8_t)(p[1] + under[1] * (255 - a) / 255);
+      d[2] = (uint8_t)(p[0] + under[2] * (255 - a) / 255);
+      d[3] = 255;
+    }
+  }
+  ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)ptr_staging, 0);
+  ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)shown, 0, &box, patch, (UINT)w * 4, 0);
+}
+
+// The latest picture as one access unit: 1 with it in *au (valid until the next call), 0 when the encoder gave none.
 // buf: the VBV buffer (kbit; <= 0: kbps, 1 s): kbps may be the per-picture rate scaled for fewer pictures than --fps
 // (the link's frame-rate cap), while a key frame should still fit about 1 s of the real rate
-static void encode(int key, int kbps, float crf, int buf) {
+static int encode_picture(int key, int kbps, float crf, int buf, uint8_t **au, size_t *n, int *is_key) {
   if (kbps < 100) kbps = 100;
   if (kbps > 100000) kbps = 100000;
   if (buf <= 0 || buf > kbps) buf = kbps;
   if (buf < 100) buf = 100;
   if (!(crf >= 0 && crf <= 51)) crf = 23;
+  wait_first_picture();
+  if (!hw_tried && encoder_mode != 2) {
+    hw_tried = 1;
+    hw_on = hw_open(dev, ctx, client_cursor ? latest : shown, out_w, out_h, width, height, fps, adapter_vendor, kbps, buf, crf);
+    if (hw_on) fprintf(stderr, "yoyo-winvideo: encoding on the graphics card (%s)\n", hw.name[0] ? hw.name : "hardware H.264");
+    else if (encoder_mode == 1) die("no GPU encoder (--encoder gpu)");
+    else fprintf(stderr, "yoyo-winvideo: encoding with x264 on the CPU\n");
+  }
+  if (hw_on) {
+    if (!client_cursor) {
+      EnterCriticalSection(&state);
+      hw_draw_pointer();
+      LeaveCriticalSection(&state);
+    }
+    int r = hw_encode(key, kbps, buf, crf, au, n, is_key);
+    if (r >= 0) return r;
+    hw_on = 0;
+    if (encoder_mode == 1) die("the GPU encoder failed (--encoder gpu)");
+    fprintf(stderr, "yoyo-winvideo: the GPU encoder failed; going on with x264 on the CPU\n");
+    key = 1;
+  }
   if (!enc) open_encoder(kbps, buf, crf);
   else set_rate(kbps, buf, crf);
-  pump(0);
-  int changed = dirty;
-  double at = now_ms();
-  dirty = 0;
-  told = 0;
   grab(!client_cursor);
   convert();
   x264_picture_t in, out;
@@ -560,17 +706,110 @@ static void encode(int key, int kbps, float crf, int buf) {
   in.i_type = key ? X264_TYPE_IDR : X264_TYPE_AUTO;
   in.i_pts = pts++;
   x264_nal_t *nals;
-  int n;
-  int size = x264_encoder_encode(enc, &nals, &n, &in, &out);
+  int count;
+  int size = x264_encoder_encode(enc, &nals, &count, &in, &out);
   if (size < 0) die("x264_encoder_encode failed");
-  if (size == 0) {
+  if (size == 0) return 0;
+  *au = nals[0].p_payload;
+  *n = (size_t)size;
+  *is_key = out.b_keyframe ? 1 : 0;
+  return 1;
+}
+
+static void encode(int key, int kbps, float crf, int buf) {
+  EnterCriticalSection(&state);
+  int changed = dirty;
+  double at = now_ms();
+  dirty = 0;
+  told = 0;
+  LeaveCriticalSection(&state);
+  uint8_t *au;
+  size_t n;
+  int is_key;
+  if (!encode_picture(key, kbps, crf, buf, &au, &n, &is_key)) {
     record('S', NULL, 0, NULL, 0);
     return;
   }
   uint8_t head[9];
-  head[0] = (uint8_t)((out.b_keyframe ? 1 : 0) | (changed ? 2 : 0));
+  head[0] = (uint8_t)((is_key ? 1 : 0) | (changed ? 2 : 0));
   memcpy(head + 1, &at, 8);  // little-endian (x86-64, arm64)
-  record('F', head, sizeof head, nals[0].p_payload, (size_t)size);
+  record('F', head, sizeof head, au, n);
+}
+
+// ---- --bench: a moving test picture through the encoder, no desktop needed
+
+static int bench_run(int frames, int bw, int bh, int kbps) {
+  D3D_FEATURE_LEVEL fl;
+  if (FAILED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT, NULL, 0, D3D11_SDK_VERSION, &dev, &fl, &ctx)))
+    die("D3D11CreateDevice failed");
+  IDXGIDevice *xd;
+  if (SUCCEEDED(ID3D11Device_QueryInterface(dev, &IID_IDXGIDevice, (void **)&xd))) {
+    IDXGIAdapter *ad;
+    DXGI_ADAPTER_DESC d;
+    if (SUCCEEDED(IDXGIDevice_GetAdapter(xd, &ad))) {
+      if (SUCCEEDED(IDXGIAdapter_GetDesc(ad, &d))) {
+        adapter_vendor = d.VendorId;
+        fprintf(stderr, "yoyo-winvideo: bench on %ls\n", d.Description);
+      }
+      IDXGIAdapter_Release(ad);
+    }
+    IDXGIDevice_Release(xd);
+  }
+  out_w = bw;
+  out_h = bh;
+  width = bw & ~1;
+  height = bh & ~1;
+  if (width < 16 || height < 16) die("--size is too small");
+  make_textures();
+  have_image = 1;
+  // the picture: a grey ramp, five colour patches (white, black, red, green, blue: 64 x 64 from 0,0), a block that moves
+  uint8_t *pic = malloc((size_t)out_w * out_h * 4);
+  if (!pic) die("out of memory");
+  static const uint8_t patches[5][3] = {{255, 255, 255}, {0, 0, 0}, {0, 0, 255}, {0, 255, 0}, {255, 0, 0}};  // BGR
+  for (int y = 0; y < out_h; y++)
+    for (int x = 0; x < out_w; x++) {
+      uint8_t *d = pic + ((size_t)y * out_w + x) * 4;
+      if (y < 64 && x < 320) memcpy(d, patches[x / 64], 3);
+      else d[0] = d[1] = d[2] = (uint8_t)(x * 255 / out_w);
+      d[3] = 255;
+    }
+  ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)latest, 0, NULL, pic, (UINT)out_w * 4, 0);
+  static uint8_t block[200 * 200 * 4];
+  double sum = 0, worst = 0, first = 0;
+  size_t bytes = 0;
+  int keys = 0, skipped = 0;
+  for (int i = 0; i < frames; i++) {
+    // the block: its old place repainted, its new one drawn
+    int bx = 100 + (i * 7) % (out_w - 400), by = 200 + (i * 3) % (out_h - 500);
+    ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)latest, 0, NULL, pic, (UINT)out_w * 4, 0);
+    for (size_t k = 0; k < sizeof block; k += 4) block[k] = (uint8_t)(k + i * 5), block[k + 1] = (uint8_t)(k >> 3), block[k + 2] = (uint8_t)(255 - i), block[k + 3] = 255;
+    D3D11_BOX box = {(UINT)bx, (UINT)by, 0, (UINT)bx + 200, (UINT)by + 200, 1};
+    ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)latest, 0, &box, block, 200 * 4, 0);
+    uint8_t *au;
+    size_t n;
+    int is_key;
+    double t0 = now_ms();
+    // what a stream does on the way: a key frame asked for halfway, a refine (sharper, twice the rate) once a second
+    int refine = i % fps == fps - 1;
+    int r = encode_picture(i == 0 || i == frames / 2, refine ? kbps * 2 : kbps, refine ? 17 : 23, 0, &au, &n, &is_key);
+    double ms = now_ms() - t0;
+    if (!r) {
+      skipped++;
+      continue;
+    }
+    if (i == 0) first = ms;
+    else {
+      sum += ms;
+      if (ms > worst) worst = ms;
+    }
+    bytes += n;
+    keys += is_key;
+    write_all(au, n);
+  }
+  int timed = frames - 1 - skipped;
+  fprintf(stderr, "yoyo-winvideo: bench %dx%d, %d pictures (%d key, %d skipped): the first %.1f ms (the encoder opens), then mean %.2f ms, max %.2f ms; %.0f kbit/s at %d fps; %s\n", width,
+          height, frames, keys, skipped, first, timed > 0 ? sum / timed : 0, worst, frames ? (double)bytes * 8 * fps / frames / 1000 : 0, fps, hw_on ? hw.name : "x264");
+  return 0;
 }
 
 // ---- --jpeg: one picture for GET /frame
@@ -578,8 +817,51 @@ static void encode(int key, int kbps, float crf, int buf) {
 #define MAX_BOXES 512
 static const uint8_t MASK_B = 0x3a, MASK_G = 0x3a, MASK_R = 0x3a;  // windows.mjs WINDOWS.maskColor
 
-static int jpeg_frame(int quality, int ow, int oh, const int crop[4], int (*boxes)[4], int nboxes) {
-  grab(1);
+// The main display as it is composed now → `bgra`, the pointer drawn in: a BitBlt from the screen. Not the
+// duplication: a new one has a picture only once something is presented to the display, and on a still desktop
+// nothing is — its first frame came black (every GET /frame of a PC nobody was using, while a stream beside it, whose
+// duplication had seen the desktop drawn, showed it). 1 = `bgra` holds the picture.
+static int gdi_grab(void) {
+  cpu_buffers();
+  HDC screen = GetDC(NULL);
+  if (!screen) return 0;
+  HDC mem = CreateCompatibleDC(screen);
+  BITMAPINFO bi = {0};
+  bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+  bi.bmiHeader.biWidth = width;
+  bi.bmiHeader.biHeight = -height;  // top row first
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  void *bits = NULL;
+  HBITMAP bmp = mem ? CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
+  int ok = 0;
+  if (bmp && bits) {
+    HGDIOBJ old = SelectObject(mem, bmp);
+    ok = BitBlt(mem, 0, 0, width, height, screen, 0, 0, SRCCOPY | CAPTUREBLT) != 0;
+    if (ok) {
+      CURSORINFO ci = {0};
+      ci.cbSize = sizeof ci;
+      ICONINFO ii;
+      if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && GetIconInfo(ci.hCursor, &ii)) {
+        DrawIconEx(mem, ci.ptScreenPos.x - (int)ii.xHotspot, ci.ptScreenPos.y - (int)ii.yHotspot, ci.hCursor, 0, 0, 0, NULL, DI_NORMAL);
+        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+      }
+      GdiFlush();
+      memcpy(bgra, bits, (size_t)width * height * 4);
+    }
+    SelectObject(mem, old);
+  }
+  if (bmp) DeleteObject(bmp);
+  if (mem) DeleteDC(mem);
+  ReleaseDC(NULL, screen);
+  return ok;
+}
+
+// `grabbed`: `bgra` already holds the picture (gdi_grab); else the duplication's latest.
+static int jpeg_frame(int quality, int ow, int oh, const int crop[4], int (*boxes)[4], int nboxes, int grabbed) {
+  if (!grabbed) grab(1);
   for (int b = 0; b < nboxes; b++) {
     int x0 = boxes[b][0], y0 = boxes[b][1], x1 = x0 + boxes[b][2], y1 = y0 + boxes[b][3];
     if (x0 < 0) x0 = 0;
@@ -654,13 +936,17 @@ static int jpeg_frame(int quality, int ow, int oh, const int crop[4], int (*boxe
 // ---- main
 
 int main(int argc, char **argv) {
-  int jpeg = 0, quality = 70, ow = 0, oh = 0, crop[4] = {0, 0, 0, 0}, nboxes = 0;
+  int jpeg = 0, quality = 70, ow = 0, oh = 0, crop[4] = {0, 0, 0, 0}, nboxes = 0, bench_kbps = 8000;
+  const char *which = getenv("YOYO_VIDEO_ENCODER");
   static int boxes[MAX_BOXES][4];
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--preset") && i + 1 < argc) preset = argv[++i];
     else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--fps") && i + 1 < argc) fps = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--cursor") && i + 1 < argc && !strcmp(argv[i + 1], "client")) client_cursor = 1, i++;
+    else if (!strcmp(argv[i], "--encoder") && i + 1 < argc) which = argv[++i];
+    else if (!strcmp(argv[i], "--bench") && i + 1 < argc) bench = atoi(argv[++i]);
+    else if (!strcmp(argv[i], "--kbps") && i + 1 < argc) bench_kbps = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--jpeg") && i + 1 < argc) jpeg = 1, quality = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--size") && i + 2 < argc) ow = atoi(argv[i + 1]), oh = atoi(argv[i + 2]), i += 2;
     else if (!strcmp(argv[i], "--crop") && i + 4 < argc) {
@@ -671,14 +957,29 @@ int main(int argc, char **argv) {
       nboxes++;
       i += 4;
     } else
-      die("usage: yoyo-winvideo [--preset <x264 preset>] [--threads <n>] [--fps <n>] [--cursor client] | --jpeg <q> --size <w> <h> [--crop x y w h] [--box x y w h]…");
+      die("usage: yoyo-winvideo [--preset <x264 preset>] [--threads <n>] [--fps <n>] [--cursor client] [--encoder gpu|x264] | --jpeg <q> --size <w> <h> [--crop x y w h] [--box x y w h]… | --bench <pictures> [--size <w> <h>] [--kbps <n>]");
   }
   if (fps < 1 || fps > 60) die("--fps must be 1…60");
   if (quality < 10) quality = 10;
   if (quality > 95) quality = 95;
+  if (which && *which) {
+    if (!strcmp(which, "gpu")) encoder_mode = 1;
+    else if (!strcmp(which, "x264")) encoder_mode = 2;
+    else if (strcmp(which, "auto")) die("the encoder is gpu, x264 or auto");
+  }
   helper_init();
+  InitializeCriticalSection(&state);
+  // this process's timers and waits at 1 ms (Windows' default tick is 15.6 ms)
+  timeBeginPeriod(1);
   CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  if (bench > 0) {
+    jpeg_mode = 1;  // stdout is the stream alone
+    return bench_run(bench, ow > 0 ? ow : 2560, oh > 0 ? oh : 1440, bench_kbps);
+  }
   open_output();
+  jpeg_mode = jpeg;
+  // one picture: the composed desktop from GDI (a still desktop gives a new duplication nothing to show)
+  if (jpeg && gdi_grab()) return jpeg_frame(quality, ow, oh, crop, boxes, nboxes, 1);
   make_textures();
   HRESULT hr = duplicate();
   if (FAILED(hr)) {
@@ -686,16 +987,23 @@ int main(int argc, char **argv) {
     fprintf(stderr, "yoyo-winvideo: the desktop can't be duplicated (0x%08lx): run in the signed-in user's session\n", (unsigned long)hr);
     return 1;
   }
-  bgra = malloc((size_t)width * height * 4);
-  yuv = malloc((size_t)width * height * 3 / 2);
-  if (!bgra || !yuv) die("out of memory");
-  jpeg_mode = jpeg;
-  if (jpeg) return jpeg_frame(quality, ow, oh, crop, boxes, nboxes);
+  if (jpeg) return jpeg_frame(quality, ow, oh, crop, boxes, nboxes, 0);
 
-  uint8_t hello[4] = {(uint8_t)(width >> 8), (uint8_t)width, (uint8_t)(height >> 8), (uint8_t)height};
-  record('H', hello, 4, NULL, 0);
+  uint8_t hello[5] = {(uint8_t)(width >> 8), (uint8_t)width, (uint8_t)(height >> 8), (uint8_t)height, 1};
+  record('H', hello, 5, NULL, 0);
+  // someone is watching: the display stays awake, and one asleep (it presents nothing: no picture) is woken
+  SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
   // the first frame carries the picture and the pointer's shape: the client draws the pointer from the first part on
-  for (int i = 0; i < 25 && !have_image; i++) pump(20);
+  for (int i = 0; i < 25 && !have_image; i++) pump(10);
+  if (!have_image) {
+    fprintf(stderr, "yoyo-winvideo: no picture from the desktop yet (the display is asleep?); waking it\n");
+    INPUT in = {0};
+    in.type = INPUT_MOUSE;
+    in.mi.dwFlags = MOUSEEVENTF_MOVE;
+    SendInput(1, &in, sizeof in);
+    for (int i = 0; i < 100 && !have_image; i++) pump(10);
+    if (have_image) fprintf(stderr, "yoyo-winvideo: the desktop shows again\n");
+  }
   if (client_cursor) {
     if (cur.hash) report_shape();
     else send_pointer(0);
@@ -705,24 +1013,60 @@ int main(int argc, char **argv) {
 
   start_stdin_reader();
   char line[256];
+  // from here the desktop's frames are taken on a thread of their own
+  capturing = 1;
+  CreateThread(NULL, 0, capture_thread, NULL, 0, NULL);
+  double timer_due = 0;
+  uint32_t timer_id = 0;
+  // the timer to a fraction of a millisecond where Windows has such timers (10 1803 on), else to the millisecond
+  HANDLE fine = CreateWaitableTimerExW(NULL, NULL, 2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
   for (;;) {
-    pump(8);
+    if (timer_due > 0 && now_ms() >= timer_due) {
+      uint8_t id[4];
+      put32(id, timer_id);
+      timer_due = 0;
+      record('T', id, 4, NULL, 0);
+    }
+    // the pointer: a move held back by the 8 ms pace, a shape held while it animates
+    int soon = 0;
     if (client_cursor) {
+      EnterCriticalSection(&state);
       hold_check();
-      // pointer moves at most every 33 ms (x11video polls at that pace)
-      if (pending_move && now_ms() - sent_at >= 33) send_pointer(0);
+      if (pending_move && now_ms() - sent_at >= 8) send_pointer(0);
+      soon = pending_move || animating;
+      LeaveCriticalSection(&state);
     }
     int r;
     while ((r = next_line(line, sizeof line)) > 0) {
       int key = 0, kbps = 0, buf = 0;
       float crf = 23;
+      double ms = 0;
+      unsigned id = 0;
       if (line[0] == 'Q') goto done;
       if (line[0] == 'E' && sscanf(line + 1, "%d %d %f %d", &key, &kbps, &crf, &buf) >= 2) encode(key, kbps, crf, buf);
+      else if (line[0] == 'T' && sscanf(line + 1, "%lf %u", &ms, &id) == 2) timer_due = now_ms() + (ms > 0 ? ms : 0) + 1e-6, timer_id = id;
       else fprintf(stderr, "yoyo-winvideo: bad command \"%s\"\n", line);
     }
     if (r < 0) break;
+    // until a command comes, the timer is due, or the pointer wants another look
+    HANDLE hs[2] = {lineq_event, fine};
+    DWORD n = 1, until = soon ? 4 : 250;
+    if (timer_due > 0) {
+      double left = timer_due - now_ms();
+      if (left <= 0) continue;
+      if (fine) {
+        LARGE_INTEGER due;
+        due.QuadPart = -(LONGLONG)(left * 10000);
+        SetWaitableTimer(fine, &due, 0, NULL, NULL, FALSE);
+        n = 2;
+      } else if (left < until) {
+        until = (DWORD)left + 1;
+      }
+    }
+    WaitForMultipleObjects(n, hs, FALSE, until);
   }
 done:
+  if (hw_on) hw_close();
   if (enc) x264_encoder_close(enc);
   return 0;
 }

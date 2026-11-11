@@ -18,7 +18,8 @@ Swift Package, macOS 14+. Three targets:
   `run(_:options:)` / `parse` (see「Embedding the service」), `ScreenService(socketPath:remoteHome:watchInputElsewhere:)`
   with `start()` / `stop()` / `onFatal`, `ScreenPermissions` (preflight / request / System Settings URLs), `ScreenHost`
   (`appName` for error messages, `logName`, `logSink`, `onAudioServiceRestart`, `onAudioDeaf`, `onClipboardReceived`),
-  `ServerIdentity` (`/status`'s `app` / `version` / `build` / `api`), `LinkOptions` (the uu Link listener, 「uu Link」).
+  `ServerIdentity` (`/status`'s `app` / `version` / `build` / `api`), `LinkOptions` (the uu Link listener, 「uu Link」),
+  `ExternalDisplay` / `ExternalDisplays` (displays whose pictures the embedder supplies, 「External displays」).
   Its target is defined in the repository-root `Package.swift` (a product there, so another package can depend on it
   by git URL); this package uses it from there (`.package(name: "YoyoKit", path: "..")`). With `YoyoLink` in the root
   package (`../scripts/link-apple.sh build`, docs/LINK.md「构建」) it has the link listener, without it not.
@@ -155,6 +156,31 @@ the executable in an app bundle (`LSUIElement`; `NSScreenCaptureUsageDescription
 `NSAudioCaptureUsageDescription` in its Info.plist) and sign it with a stable identity, since TCC keys the grants by
 bundle id and designated requirement (see「Build」). The `/automation` capsule names whatever `label` the caller
 passes; nothing else the service shows names a product.
+
+### External displays
+
+An embedder can serve displays that are not WindowServer's — anything it has pictures of (a device's or a virtual
+machine's framebuffer, a canvas it draws). They are displays like the others on the wire: listed in `/status`'s
+`displays` (after WindowServer's, `main: false`, the `kind` and `name` the embedder gives), streamed by
+`GET /stream?display=<id>` and a link session's `video.open` (the same video loop: codecs, `maxWidth`, `fps`, acks, the
+link's rate control and recovery), a still by `GET /frame?display=<id>`.
+
+```swift
+let display = ExternalDisplay(id: 4_000_000_001, name: "Device", kind: "virtual", scale: 3)
+ExternalDisplays.add(display)        // false: the id is taken (another external display's, or one of WindowServer's)
+display.publish(pixelBuffer)         // the display's picture from now on (BGRA or anything VideoToolbox converts)
+display.changed()                    // a live surface was drawn into: the same buffer, new content
+ExternalDisplays.remove(id: display.id)   // its streams end; the id is unknown again
+```
+
+- A display is listed once it has a picture; its size is the buffer's (`width` / `height` in points = pixels /
+  `scale`). A stream is at most `maxWidth` wide and never larger than the buffer; its size is fixed while it runs.
+- The buffer may be a live surface: each encoded picture is a copy (scaled to the stream's size) taken at that
+  moment. Call `changed()` when it was drawn into, or nothing new is sent.
+- No Screen Recording, no GUI session: they are served whatever `/status`'s `ok` and `screenRecording` say. A
+  `status=1` stream gets one status part, `ready`, with `console: null`.
+- They take no input and have no pointer, windows, focus or console: `/input`, `/focus`, `/windows`, `/hit` with their
+  id answer 404 `unknown display`; `/frame` takes no `visible=` / `crop=` (400); `cursor=client` sends no cursor parts.
 
 ## Permissions
 

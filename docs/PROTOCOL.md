@@ -29,7 +29,7 @@ interface ScreenDisplay {
   scale: number;               // 每点像素
   main: boolean;
   asleep: boolean;
-  kind: "builtin" | "external"; // 开放集合，未知值按缺省
+  kind: "builtin" | "external"; // 开放集合，未知值按缺省；嵌入方自己的显示器（LOCAL-API.md「外部显示器」）是它给的词
   name?: string;               // 按 Mac 的语言：「内建视网膜显示器」「LG UltraFine」…
 }
 ```
@@ -629,7 +629,9 @@ PRIMARY**（同一内容：Ctrl+V / Shift+Insert 和鼠标中键贴出来的一�
 - **是谁**：`/status` 的 `app` 是 `"yoyo-windows"`，`platform` 是 **`"windows"`**（`ScreenPlatform` 是开放集合，客户端按「别的电脑」叫它：「桌面」
   「电脑」）；配对时 `welcome.server.platform`、账号声明的 `platform` 也是 `"windows"`。`version` 与 Linux 发布包的相同（同一份代码）。
 - **画面**：登录用户的桌面的主显示器（坐标 0,0 的那块），物理像素（按显示器 DPI 感知：150 % 缩放的 2560×1440 就是 2560×1440）。安全桌面
-  （UAC 的提示、锁屏、Ctrl+Alt+Del）截不到也操作不了：那时画面停在上一张，`phase` 仍是 `ready`。只有一块显示器。
+  （UAC 的提示、锁屏、Ctrl+Alt+Del）截不到也操作不了：那时画面停在上一张，`phase` 仍是 `ready`。只有一块显示器。流最多 60 帧每秒
+  （Linux 30）：有显卡编码器就由显卡编（H.264 High，BT.709 limited，同样的 Annex-B 访问单元），没有才用 x264；流开着时显示器不睡。
+  `GET /frame` 的一张（0.10.2 起）取自 GDI 的合成桌面，不依赖有没有新的一帧呈现：静止的桌面、没开着流时也是当前的画面。
 - **输入**：`cmd` 修饰键当 Ctrl 发；键名同 Linux（也认 `insert`）；`type` 的每个字符按 Unicode 直接打（不经键盘布局与输入法），所以中文、
   emoji 都一样快。**粘贴键是 Ctrl+V**（客户端在 `platform: "windows"` 时用它）。输入进不了以管理员身份运行的窗口，除非服务本身也以管理员
   身份运行（安装脚本在管理员安装时这样设）。
@@ -640,5 +642,6 @@ PRIMARY**（同一内容：Ctrl+V / Shift+Insert 和鼠标中键贴出来的一�
 - **窗口**：App 的身份是**程序名**（可执行文件名去掉 `.exe`：`chrome`、`Code`、`explorer`）；`pid` 是窗口所属进程。列表是 Z 序里看得见、
   没被隐藏（别的虚拟桌面、挂起的商店应用）、不是点击穿透（`WS_EX_TRANSPARENT` 的游戏浮层）的顶层窗口，外框按 DWM 的可见边框（不含看不见
   的缩放边）。桌面（`Progman` / `WorkerW`）是 `explorer` 的 `layer −1`，任务栏是 `explorer` 的 `layer 1`，菜单与提示 `layer 2`，置顶窗口 `layer 1`。
-  `focused` 是前台窗口的主人。
+  `focused` 是前台窗口的主人。0.10.2 起，指针穿得过去的窗口都不列（不只是带 `WS_EX_TRANSPARENT` 的：还有系统命中测试在它身上哪儿都
+  找不到它的分层浮层，例如盖住整屏的 NVIDIA Overlay；`windows/README.md`「辅助程序」）——`/hit` 答的是点击真正落到的窗口。
 - **自动化**：Esc 经低级键盘钩子看；本服务（与手机）的输入是注入的（`LLKHF_INJECTED`），不算。

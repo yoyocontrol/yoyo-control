@@ -67,7 +67,7 @@ curl -H "Authorization: Bearer $(cat ~/.yoyo-token)" http://127.0.0.1:7380/statu
   机器上别的用户读得到别人进程的 argv 和环境。每个请求都要 `Authorization: Bearer <token>`，否则 401。令牌在进程活着时不变：
   换令牌 = 重起进程。
 - 明文 HTTP/1.1：要经不可信的网络访问，放在 TLS / 隧道 / VPN 后面；或者用下面的「远程访问」（uu Link：加密、配对、中继）。
-- 环境变量：`YOYO_VIDEO_MAX_KBPS`（码率天花板）、`YOYO_LINUX_MAX_FPS`（缺省 30）、`YOYO_AUDIO`（`off` / `0` / `false` / `no`：没有声音，`/audio` 503 `audio off`）、
+- 环境变量：`YOYO_VIDEO_MAX_KBPS`（码率天花板）、`YOYO_LINUX_MAX_FPS`（缺省 30；Windows 上 60）、`YOYO_AUDIO`（`off` / `0` / `false` / `no`：没有声音，`/audio` 503 `audio off`）、
   `YOYO_X11VIDEO` / `YOYO_PA_OPUS` / `YOYO_X11CLIP` / `YOYO_X11WINDOWS`（辅助程序，缺省是 `server.mjs` 同目录下的）、`YOYO_XDOTOOL` / `YOYO_FFMPEG`（缺省在 `PATH` 里找）。
 - 就绪：stderr 出一行 `yoyo-linux <version> (api 1) listening on <地址>:<端口>, display <DISPLAY>`。SIGTERM / SIGINT 关掉所有流后退出。
 - JSON 的回答保持连接（keep-alive）：客户端每秒 30 个移动经转发方复用一个连接；流与 `/events` 照旧 `Connection: close`（Mac 版每个回答都是 close）。

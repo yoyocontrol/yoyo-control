@@ -200,6 +200,20 @@ uu Link 的 WebRTC 那一路（`LINK.md`「WebRTC」）：浏览器拨不了 QUI
 - 选项（`LinkOptions`）：`rtc`（默认开）、`rtcPort`（nil = Link 端口 + 1）、`stunServers`（默认空）；环境变量 `YOYO_LINK_RTC_PORT`
   （`off` 关掉）。
 
+## 外部显示器（嵌入方自己的画面）
+
+用 `YoyoServer` 库搭自己服务的程序，可以再提供不属于 WindowServer 的显示器：它手上有画面的任何东西（一台设备或虚拟机的帧缓冲、
+自己画的画布）。接口在库里（`ExternalDisplay` / `ExternalDisplays`，`mac/README.md`「External displays」），线上和别的显示器一样：
+
+- `/status` 的 `displays` 里排在 WindowServer 的后面：`main: false`，`kind` 和 `name` 是嵌入方给的（`kind` 是开放集合）。有了第一张画面才列出来。
+- `GET /stream?display=<id>`、Link 会话的 `video.open`：同一个视频循环（编码、`maxWidth`、`fps`、确认、Link 的码率和补救）。
+  画面不超过它自己的大小；`status=1` 只有一个状态分段：`ready`、`console: null`。
+- `GET /frame?display=<id>`：当前画面的 JPEG（不收 `visible=` / `crop=`，400）。
+- 不需要屏幕录制权限，也不需要图形登录会话。没有输入、指针、窗口、焦点、锁屏：`/input`、`/focus`、`/windows`、`/hit` 带它的 id 是
+  404 `unknown display`。
+
+Linux / Windows 版没有这个能力。
+
 ## 流的媒体类型
 
 `GET /stream` 和 `GET /audio` 的回答是同一种 multipart 分段格式（`PROTOCOL.md`「媒体类型」），只有一套名字：

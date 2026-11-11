@@ -41,7 +41,7 @@ import { drawboxes, hitAnswer, maskBoxes, parseCrop, parseHide, parseVisible, pi
 
 /** `/status.app` of this process: "yoyo-linux", or "yoyo-windows" on Windows (platform.mjs). */
 export const APP = hostPlatform().app;
-export const VERSION = "0.10.0";
+export const VERSION = "0.10.2";
 /** The Yoyo Control HTTP API version this speaks (`/status` `api`; +1 only on an incompatible change). */
 export const API = 1;
 /** The one display's id (`/status` displays, `/stream`, `/input`). */
@@ -123,7 +123,7 @@ export class YoyoLinux {
     this.xdotool = xdotool ?? (platform.input === "xdotool" ? "xdotool" : besideServer(platform.input));
     this.ffmpeg = ffmpeg ?? "ffmpeg";
     this.tuning = maxKbps ? limitedTuning(TUNING, Math.min(Math.max(maxKbps, 100), 100_000)) : TUNING;
-    this.maxFps = Math.min(Math.max(maxFps || 30, 1), TUNING.maxFPS);
+    this.maxFps = Math.min(Math.max(maxFps || platform.maxFps || 30, 1), TUNING.maxFPS);
     this.log = logLine;
     this.spawn = spawnFn;
     this.size = null;

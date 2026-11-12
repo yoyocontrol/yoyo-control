@@ -8,7 +8,7 @@
 //
 // With `--cursor client` the pointer is the client's to draw (the protocol's `cursor=client`): it is never drawn into
 // the pictures, its moves and shape changes are no picture change, and it is reported as 'P' records instead — where
-// it is (polled every 33 ms, sent only when it moved), and its shape (XFixes cursor notify; the pixels the first time
+// it is (polled every 8 ms — 120 a second, a ProMotion phone's rate —, sent only when it moved), and its shape (XFixes cursor notify; the pixels the first time
 // this process sees a cursor serial). A cursor that changes its serial more than 10 times a second (an animated busy
 // cursor) keeps its last reported shape until it has been still for 0.5 s.
 //
@@ -340,8 +340,9 @@ int main(int argc, char **argv) {
   struct pollfd fds[2] = {{.fd = 0, .events = POLLIN}, {.fd = ConnectionNumber(dpy), .events = POLLIN}};
   for (;;) {
     XFlush(dpy);
-    // the pointer is looked at every 33 ms (it moves without damage)
-    int r = poll(fds, 2, 33);
+    // the pointer is looked at at least every 8 ms (it moves without damage): 120 positions a second, as a 120 Hz
+    // phone draws them (at 33 ms, a move made in the machine stepped against 60 fps pictures)
+    int r = poll(fds, 2, 8);
     if (r < 0 && errno != EINTR) die("poll failed");
     drain_x();
     poll_pointer();

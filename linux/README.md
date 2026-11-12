@@ -281,10 +281,10 @@ gh release create linux-v0.8.0 --prerelease --target <commit> --title "yoyo-linu
 
 照 Yoyo Control 的 `VideoStreamLoop.swift` / `DisplayPointer.swift` / `StreamCursor.swift`：
 
-- 画面里不画指针，指针动了也不是画面变了（不重编码，refine 不被打断）。`yoyo-x11video --cursor client` 每 33 ms 看一次指针位置、变了才报一个 `'P'`；形状跟着
+- 画面里不画指针，指针动了也不是画面变了（不重编码，refine 不被打断）。`yoyo-x11video --cursor client` 每 8 ms 看一次指针位置（每秒 120 次）、变了才报一个 `'P'`；形状跟着
   XFixes 的 cursor notify 走，这个进程第一次见到一个 cursor serial 时带上它的像素（预乘 ARGB → 预乘 RGBA）。一秒内超过 10 个新 serial（动画光标）就只报位置、
   形状保持上一个，静下来 0.5 s 后再报（日志一次）。拿不到图（XFixes 给不出）时报「没有形状」：客户端用内置箭头。
-- 流里：第一个画面之前一个指针分段（带形状），之后位置 / 形状 / 可见性变化时再发，合并、至多 60 个/秒；不计入确认窗口、占 `X-Frame-Seq`；
+- 流里：第一个画面之前一个指针分段（带形状），之后位置 / 形状 / 可见性变化时再发，合并、至多 120 个/秒；不计入确认窗口、占 `X-Frame-Seq`；
   `Content-Type: application/vnd.yoyo-control.cursor+json`，`X-Frame-Kind: cursor`，`X-Frame-Time` 是发出的时刻。
   body `{ x, y, visible, shapeId, shape? }`：坐标归一化到屏幕（`x - hotX` 是形状图的左边），`shape { id, png, hotX, hotY, width, height }` 只在这条流还没发过这个
   `shapeId` 时带（每条流记 32 个，多了清空重来）；全透明的指针 `visible: false`。

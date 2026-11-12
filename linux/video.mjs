@@ -4,7 +4,7 @@
 // queueing delay steers the bit rate (flow.mjs); an unchanged picture gets sharper re-encodes (`refine`: 300 ms after
 // the change, then every 100 ms until two in a row add little, at most 20; flow.mjs RefineSchedule) and a keepalive
 // every 5 s. A stream without `cursor=client` has the pointer drawn into its pictures; one
-// with it gets cursor parts instead (cursor.mjs): one before the first picture, then on every change, at most 60 a
+// with it gets cursor parts instead (cursor.mjs): one before the first picture, then on every change, at most 120 a
 // second, outside the window — and a pointer move is never a picture change.
 import { spawn } from "node:child_process";
 import { CURSOR_MIN_INTERVAL, SENT_SHAPES_MAX, cursorBody } from "./cursor.mjs";

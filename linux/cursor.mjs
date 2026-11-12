@@ -9,8 +9,8 @@
 import { crc32 } from "node:zlib";
 import { builtinArrow, cursorPNG } from "./png.mjs";
 
-/** Cursor parts at most this often per stream (StreamTuning.cursorMinInterval). */
-export const CURSOR_MIN_INTERVAL = 1 / 60;
+/** Cursor parts at most this often per stream (StreamTuning.cursorMinInterval): 120 a second, the helpers' poll rate. */
+export const CURSOR_MIN_INTERVAL = 1 / 120;
 /** A stream resends a shape it sent once this many others came after it (ScreenCursorShapes.maxRemembered). */
 export const SENT_SHAPES_MAX = 32;
 /** Shapes (PNGs) kept, process-wide. */

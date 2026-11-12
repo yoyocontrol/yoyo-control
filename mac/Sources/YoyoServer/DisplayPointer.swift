@@ -11,7 +11,8 @@ import ImageIO
 //
 // Where the pointer is, normalized to the display (the space of `/input` x/y):
 //   - our own input: `/input` knows where it put the pointer as soon as it handled the request (`noteInput`);
-//   - someone at the Mac (or the system) moving it: `CGEvent(source: nil).location` polled every 50 ms; only a CHANGE
+//   - someone at the Mac (or the system) moving it: `CGEvent(source: nil).location` polled 120 times a second (a
+//     ProMotion phone's rate: at 20 a move seen from the phone stepped visibly against 60 fps pictures); only a CHANGE
 //     of that location moves the stream's pointer, so a location that doesn't follow our input (a background session)
 //     never pulls it back. Off this display: invisible.
 // Its shape: the system's current cursor (`NSCursor.currentSystem`, compared every 100 ms), else the built-in arrow.
@@ -191,9 +192,14 @@ final class DisplayPointerTracker: DisplayCursorFeed, @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var ticks = 0
 
+    /// How often the location is looked at: 120 Hz (a reading is a CGEvent made and dropped, a few µs).
+    static let defaultPollInterval: TimeInterval = 1.0 / 120
+    /// The shape every this many polls: 100 ms (it asks the main queue for `NSCursor.currentSystem`).
+    static let defaultShapeEvery = 12
+
     /// `pollInterval`: the location; the shape every `shapeEvery` polls (100 ms).
     init(display: CGDirectDisplayID, bounds: (@Sendable () -> CGRect)? = nil, probe: SystemPointerProbe = SystemPointer.shared,
-         pollInterval: TimeInterval = 0.05, shapeEvery: Int = 2) {
+         pollInterval: TimeInterval = DisplayPointerTracker.defaultPollInterval, shapeEvery: Int = DisplayPointerTracker.defaultShapeEvery) {
         self.display = display
         self.bounds = bounds ?? { CGDisplayBounds(display) }
         self.probe = probe
@@ -230,7 +236,7 @@ final class DisplayPointerTracker: DisplayCursorFeed, @unchecked Sendable {
         sample(shape: true)
         Self.registryLock.lock(); Self.live[ObjectIdentifier(self)] = Weak(tracker: self); Self.registryLock.unlock()
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .userInitiated))
-        t.schedule(deadline: .now() + pollInterval, repeating: pollInterval, leeway: .milliseconds(5))
+        t.schedule(deadline: .now() + pollInterval, repeating: pollInterval, leeway: .milliseconds(1))
         t.setEventHandler { [weak self] in self?.tick() }
         lock.lock(); timer = t; lock.unlock()
         t.resume()

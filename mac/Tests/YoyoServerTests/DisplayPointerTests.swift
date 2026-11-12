@@ -316,6 +316,34 @@ final class DisplayPointerTests: XCTestCase {
         XCTAssertTrue(t.current().cursor.visible)
     }
 
+    /// Someone at the Mac moving the mouse all the time (5 pt a reading: more than the 1.5 pt that is no news): the tracker follows it ~120 times a second (it was 20, which
+    /// a phone showed as steps against 60 fps pictures), and still looks at the shape only every 100 ms.
+    func testTrackerFollowsAMovingMouseAt120Hz() {
+        XCTAssertEqual(DisplayPointerTracker.defaultPollInterval, 1.0 / 120, accuracy: 1e-9)
+        XCTAssertEqual(DisplayPointerTracker.defaultPollInterval * Double(DisplayPointerTracker.defaultShapeEvery), 0.1, accuracy: 1e-9)
+        XCTAssertLessThanOrEqual(StreamTuning().cursorMinInterval, DisplayPointerTracker.defaultPollInterval)
+
+        final class Moving: SystemPointerProbe, @unchecked Sendable {
+            let lock = NSLock()
+            var x: CGFloat = 0
+            var shapeLooks = 0
+            func location() -> CGPoint? { lock.lock(); defer { lock.unlock() }; x += 5; return CGPoint(x: 10 + x.truncatingRemainder(dividingBy: 900), y: 100) }
+            func cursorImage() -> SystemCursorImage? { lock.lock(); shapeLooks += 1; lock.unlock(); return nil }
+        }
+        final class Count: @unchecked Sendable { let lock = NSLock(); var n = 0; func add() { lock.lock(); n += 1; lock.unlock() } }
+        let probe = Moving()
+        let bounds = CGRect(x: 0, y: 0, width: 1000, height: 500)
+        let t = DisplayPointerTracker(display: 4246, bounds: { bounds }, probe: probe)
+        let changes = Count()
+        t.observe { changes.add() }
+        t.start()
+        Thread.sleep(forTimeInterval: 1)
+        t.stop()
+        // ~120 in the second; a loaded machine's timer slips, so only well above the old 20
+        XCTAssertGreaterThan(changes.n, 80, "positions followed in 1 s")
+        XCTAssertLessThan(probe.shapeLooks, 15, "the shape still only every 100 ms")
+    }
+
     func testTrackerShapesFromTheSystemCursor() throws {
         let probe = FakePointerProbe()
         let bounds = CGRect(x: 0, y: 0, width: 1400, height: 1000)

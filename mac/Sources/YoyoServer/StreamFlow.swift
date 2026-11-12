@@ -164,8 +164,9 @@ struct StreamTuning: Sendable {
     /// A refine's temporary bit rate (`refineBitrate`): twice the target, at least this (bits/s), never past the
     /// profile's ceiling; none while the path is queueing.
     var refineMinBitrate = 4_000_000
-    /// Cursor parts at most this often (coalesced).
-    var cursorMinInterval: TimeInterval = 1.0 / 60
+    /// Cursor parts at most this often (coalesced): as often as the pointer is polled (`DisplayPointerTracker`), so a
+    /// 120 Hz phone draws every position (a part is ~100 bytes: 120 a second is ~12 KB/s).
+    var cursorMinInterval: TimeInterval = 1.0 / 120
     /// Consecutive encode failures before the stream ends (the client reopens).
     var maxEncodeFailures = 3
     /// The loop re-checks for a hung-up client at least this often.

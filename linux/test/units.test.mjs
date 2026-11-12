@@ -339,8 +339,13 @@ test("video helper timer: a hello with flag 1 keeps time — a precise wait is `
   const tick = () => new Promise((r) => setImmediate(r));
 
   const r = new RecordReader();
-  assert.deepEqual(r.feed(record("H", Buffer.from([5, 0, 3, 64, 1]))), [{ type: "H", width: 1280, height: 832, timer: true }]);
-  assert.deepEqual(r.feed(record("H", Buffer.from([5, 0, 3, 64]))), [{ type: "H", width: 1280, height: 832, timer: false }]);
+  assert.deepEqual(r.feed(record("H", Buffer.from([5, 0, 3, 64, 1]))), [{ type: "H", width: 1280, height: 832, timer: true, refs: false }]);
+  assert.deepEqual(r.feed(record("H", Buffer.from([5, 0, 3, 64]))), [{ type: "H", width: 1280, height: 832, timer: false, refs: false }]);
+  // flag 2: the helper keeps earlier pictures; its frames carry their number after the time
+  assert.deepEqual(r.feed(record("H", Buffer.from([5, 0, 3, 64, 2]))), [{ type: "H", width: 1280, height: 832, timer: false, refs: true }]);
+  const numbered = r.feed(frameRecord({ key: false, changed: true, time: 5, au: Buffer.from([0, 0, 1, 0x41, 9]), number: 77 }))[0];
+  assert.deepEqual([numbered.number, numbered.time, numbered.changed, [...numbered.au]], [77, 5, true, [0, 0, 1, 0x41, 9]]);
+  assert.equal(r.feed(frameRecord({ key: true, changed: true }))[0].number, null);
   assert.deepEqual(r.feed(record("T", id(7))), [{ type: "T", id: 7 }]);
 
   const a = open(Buffer.from([5, 0, 3, 64, 1]));

@@ -260,6 +260,10 @@ fn transport_config(role: Role, target: TargetBitrate) -> QuicTransportConfig {
         .datagram_receive_buffer_size(Some(4 << 20))
         .datagram_send_buffer_size(media::SEND_BUFFER)
         .congestion_controller_factory(Arc::new(MediaCcFactory::new(target)))
+        // one UDP datagram a send: the media layer paces what it sends, so batching several into one segmented
+        // send (GSO) saves nothing here — and a virtual network card that can't segment (a container's bridge,
+        // a VM's) loses the whole batch, which on a paced stream is exactly a burst's packets
+        .enable_segmentation_offload(false)
         .build()
 }
 

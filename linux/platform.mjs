@@ -16,10 +16,18 @@ export const PLATFORMS = Object.freeze({
     helpers: Object.freeze({ video: "yoyo-x11video", audio: "yoyo-pa-opus", clipboard: "yoyo-x11clip", windows: "yoyo-x11windows" }),
     /** The input program (`<it> -` reads xdotool lines): found in PATH. */
     input: "xdotool",
-    /** The most pictures a second a stream gets unless `maxFps` / YOYO_MAX_FPS says otherwise (x264 on the CPU). */
+    /**
+     * The most pictures a second a stream gets unless `maxFps` / YOYO_MAX_FPS says otherwise: x264 on the CPU, a few
+     * ms a picture over several cores — 60 where there are 8 to spare, else 30 (`maxFpsFor`).
+     */
     maxFps: 30,
+    maxFpsCores: Object.freeze({ cores: 8, fps: 60 }),
     /** GET /frame: ffmpeg's x11grab (`ffmpeg`), or the video helper's `--jpeg` (`helper`). */
     frame: "ffmpeg",
+    /** A link stream's pictures stay near their share of the rate (flow.mjs linkBufferKbit: x264's VBV buffer). */
+    boundedPictures: true,
+    /** A lost picture costs a small one (the helper keeps earlier pictures, x264enc.h), not a key frame: the link asks for one with every NACK. */
+    cheapRecovery: true,
     /** Where the display is, for the start-up line. */
     display: (env) => `display ${env.DISPLAY ?? "?"}`,
   }),
@@ -42,6 +50,12 @@ export function hostPlatform(env = process.env, os = process.platform) {
   const p = env.YOYO_PLATFORM;
   if (p && PLATFORMS[p]) return PLATFORMS[p];
   return os === "win32" ? PLATFORMS.windows : PLATFORMS.linux;
+}
+
+/** A platform's most pictures a second on a computer with `cores` processors to use. */
+export function maxFpsFor(platform, cores) {
+  const more = platform.maxFpsCores;
+  return more && cores >= more.cores ? more.fps : platform.maxFps;
 }
 
 /** A helper's default path: beside the server's files. */

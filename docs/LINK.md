@@ -266,7 +266,8 @@ Lan、`cellular` → Cellular，其余 Default）；QUIC 判定持续拥塞时�
 每个会话的每条路径都用 `MediaCc`：`cwnd = max(2 × target × srtt, 16 × MTU)`，`target` 是这个会话共享的目标码率（`TargetBitrate`：
 服务端是媒体层码率控制的 `TargetRate`，客户端是固定的 3.5 Mbps；所有路径读）。随机丢包不缩窗（FEC 管）；QUIC 判定持续拥塞时把目标降到下限（300 kbps，
 窗口随之到最小）并计数（`persistent_congestion_events`），码率控制据此从下限重来。pacing 用 QUIC 默认的（窗口 / srtt × 1.25）。
-这样 QUIC 不会成为卡住画面的那一环，排队由码率控制按延迟来防。
+这样 QUIC 不会成为卡住画面的那一环，排队由码率控制按延迟来防。一次只发一个 UDP 数据报（`enable_segmentation_offload(false)`）：媒体层本来就匀着发，
+把几个攒成一次分段发送（GSO）省不了什么；而不会分段的虚拟网卡（容器的网桥、虚拟机的）会把整批丢掉——匀速的流上那正好是一次突发的包。
 
 ## 守卫（服务端）
 
@@ -525,7 +526,10 @@ target/release/uu-link-probe dial-rtc http://127.0.0.1:47830/rtc <fingerprint> -
 UDP `--link-port`（缺省 47820），钥匙 `<home>/link-key`，认证、绑定客户端钥匙、`/status.link`、中继的 `link`、RPC 走远程路由表、
 控制消息、输入的拒绝代码都同 Mac。差别：
 
-- 只有 h264（x264）；没有长期参考：`recoveryNeeded` / `keyframeNeeded` / `keyframe` 都回关键帧，最多 500 ms 一个；不开 `recovery_on_nack`。
+- 只有 h264（x264）。恢复帧不靠长期参考，靠 x264 的 reference invalidation：辅助程序留着前面最多 16 幅画面，`recoveryNeeded` 来了就忘掉手机确认过的那幅
+  之后的所有画面，下一幅只引用那一幅，作为 `recovery` 帧发（`recovery_base` = 那一幅）；所以也开 `recovery_on_nack`。确认的那幅已经不在留着的里面、
+  或者手机还什么都没确认，才回关键帧；`keyframeNeeded` / `keyframe` 照旧回关键帧（上一个还在路上时不发下一个）。一幅画面不超过它那一份码率的几倍
+  （VBV 缓冲 = 8 幅的份）。细节在 `linux/README.md`「uu Link」。Windows 的辅助程序还是老规矩（恢复 = 关键帧，不开 `recovery_on_nack`）。
 - 公网：端口映射用 `@yoyocontrol/portmap`（UDP，选项同 TCP 那一份），映射到的地址和 `--advertise` 的地址都经 `add_external_addr` 进
   `direct`（容器里本机网卡的地址手机连不上）。
 - 还没有逐帧跟踪（`traceDirectory`）；视频每 10 s 一行 `link <设备>: video <id> stats: …`。
@@ -711,7 +715,7 @@ Rust 的运行时上跑，里面的 panic 变成 `LinkError.Internal`（发布�
 
 ### Node（`@yoyocontrol/link`）
 
-`bindEndpoint({ role, secretKey, port?, relays?, portmapper?, guard?, rtcPort?, rtcStunServers?, rtcExternalOnly? })` → `Endpoint`
+`bindEndpoint({ role, secretKey, port?, relays?, portmapper?, guard?, rtcPort?, rtcStunServers?, rtcExternalOnly?, bindIps? })` → `Endpoint`
 （`id`、`port`、`rtcPort`、`addRtcExternalAddr` / `removeRtcExternalAddr`、`dialRtc(signal, fingerprint, hello)`、`addrInfo()`、`watchAddr(cb)`、
 `binding(identityKey)`、`networkChanged(iface?)`、`dial(target, hello, { connectTimeoutMs })`、
 `listen({ server, features, authenticate, rpc, rpcBlockedPaths, maxRequestBody, identityKey })`、`close()`）；`Listener`（`accept()`，可
@@ -767,6 +771,13 @@ Rust 的运行时上跑，里面的 panic 变成 `LinkError.Internal`（发布�
 - `uu-link-probe serve [--port] [--key] [--token] [--bind <ip>] [--rtc …]` / `uu-link-probe dial <id> <ip:port> [--seconds 10]
   [--load-mbps 8] [--bind <ip>]`（WebRTC：`serve-rtc` / `dial-rtc <signal url> <fingerprint>`，「WebRTC」「拿浏览器试真的服务端」）：握手时间、RPC 往返和 8 MiB 下载、控制消息往返，然后同时跑 50 Hz 的数据报 ping
   （通道 14）和合成的数据报负载（通道 15），打印 `link:` 行和汇总。服务端默认不碰路由器（`--portmap` 才映射）。
+- `uu-link-probe watch <id> <ip:port> [--credential <text>] [--query <流的查询>] [--seconds 30] [--csv <file>] [--h264 <file>] [--bind <ip>]`：
+  一台没有屏幕的手机，接真的屏幕服务端（Mac 的、yoyo-linux）：按 `--credential` 开会话、`video.open`，每帧回「解码了」，每 5 s 一行 `link:`，最后汇总——各类帧数、
+  fps、变了的画面从截屏到到达的时间（服务端的墙钟对本机的，同一台机器上才准；`over best` 以最快的一帧当两边时钟的差）、最长的几段空白、丢了 / 跳过多少。
+  `--csv` 一帧一行，`--h264` 把交给解码器的访问单元原样写成一个 Annex-B 文件（解码器放得出来的话，画面坏就是流坏）。
+  yoyo-linux 在一台 Mac 上整条跑：`YOYO_VIDEO_HELPER=<linux/test/synthvideo> YOYO_LINK_NATIVE=<.node> node linux/server.mjs --host 127.0.0.1 --port 7390
+  --link on --link-home <dir> --link-bind 127.0.0.1 --link-rtc-port off`（令牌经 stdin；另起一个程序握着 `GET /link/authority`、对每个 `auth` 回 `ok`），
+  netem 在 `[::1]` 上收，`watch … --bind ::1`。
 - 同一台机器上不用容器也行：让客户端只能经 netem 到服务端——服务端只绑 IPv4 回环，netem 在 IPv6 回环上收，客户端只绑 `::1`
   （它拿到服务端的 `127.0.0.1` 也发不过去）。Mac 服务端的 Link 测试这样跑：
 

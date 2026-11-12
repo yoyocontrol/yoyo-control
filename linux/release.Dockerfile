@@ -31,7 +31,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends gcc libc6-dev libx11-dev libxext-dev libxdamage-dev libxfixes-dev libxi-dev libx264-dev \
       libpulse-dev libopus-dev binutils \
  && rm -rf /var/lib/apt/lists/*
-COPY x11video.c pa-opus.c x11clip.c x11windows.c /src/
+COPY x11video.c x264enc.h videoio.h pa-opus.c x11clip.c x11windows.c /src/
 RUN mkdir /pkg \
  && gcc -O2 -Wall -Wextra -Werror -o /pkg/yoyo-x11video /src/x11video.c -lX11 -lXext -lXdamage -lXfixes -lx264 \
  && gcc -O2 -Wall -Wextra -Werror -o /pkg/yoyo-pa-opus /src/pa-opus.c -lpulse-simple -lpulse -lopus -lm -lpthread \

@@ -41,6 +41,8 @@ export class VideoHelper {
     this.size = null;
     /** The helper answers `T <ms> <id>` with a 'T' record (its hello's flag). */
     this.timer = false;
+    /** The helper keeps earlier pictures (its hello's flag): `forget` works, its frames carry their `number`. */
+    this.refs = false;
     this.timerId = 0;
     /** Waits a 'T' record ends: a wait()'s (also in `waiters`) or a pause()'s. */
     this.timed = new Set();
@@ -90,6 +92,7 @@ export class VideoHelper {
     if (r.type === "H") {
       this.size = [r.width, r.height];
       this.timer = !!r.timer;
+      this.refs = !!r.refs;
       if (!this.cursor || this.pointerSeen) this.readyResolve(this.size);
     } else if (r.type === "P") {
       this.onPointer?.(r);
@@ -117,6 +120,15 @@ export class VideoHelper {
       const tail = buf != null ? ` ${Math.round(buf)}` : "";
       this.child.stdin.write(`E ${key ? 1 : 0} ${Math.round(kbps)} ${crf}${tail}\n`);
     });
+  }
+
+  /**
+   * The pictures numbered `from` and later never reached the viewer (`refs` helpers): the next picture references the
+   * newest kept one before `from` — a key frame when the helper keeps none that old any more.
+   */
+  forget(from) {
+    if (this.exited || !this.refs) return;
+    this.child.stdin.write(`I ${Math.max(0, Math.round(from))}\n`);
   }
 
   /**

@@ -4,6 +4,8 @@
 // no B-frames, no lookahead, no reordering, no delay. The server decides when to encode (pace, flow-control window,
 // refine, keepalive: README.md「视频流」); this program only reports changes and encodes on command.
 //
+// The encoder is x264enc.h (the rate, and recovery from a lost picture without a key frame), the records videoio.h.
+//
 // With `--cursor client` the pointer is the client's to draw (the protocol's `cursor=client`): it is never drawn into
 // the pictures, its moves and shape changes are no picture change, and it is reported as 'P' records instead — where
 // it is (polled every 33 ms, sent only when it moved), and its shape (XFixes cursor notify; the pixels the first time
@@ -15,15 +17,18 @@
 //
 // stdin, one command per line:
 //   E <key 0|1> <kbps> [<crf> [<buf>]]   grab and encode now: quality-targeted (x264's CRF, default 23) under a cap
-//                                 of kbps over 1 s (VBV); a refine asks for a lower crf and a higher cap. buf: the VBV
-//                                 buffer in kbit (default kbps): kbps per --fps pictures may be scaled up for fewer
-//                                 pictures (the link's frame-rate cap) while a key frame still fits ~1 s of real rate
+//                                 of kbps (VBV); a refine asks for a lower crf and a higher cap. buf: the VBV buffer
+//                                 in kbit (default kbps, one second): what one picture may take at most, so the
+//                                 server gives a few pictures' worth (kbps / --fps is one picture's share)
+//   I <n>                         the pictures numbered n and later never reached the viewer: the next picture
+//                                 references the newest kept one before n (a key frame when none is kept any more)
 //   Q                             quit (stdin's end too)
 // stdout, records: one type byte, a 4-byte big-endian payload length, the payload:
-//   'H' hello, once at start: u16 BE width, u16 BE height (even: an odd edge is left out)
+//   'H' hello, once at start: u16 BE width, u16 BE height (even: an odd edge is left out), u8 flags (2 = earlier
+//       pictures are kept: `I` works, 'F' records carry their number)
 //   'C' the screen (or the pointer) changed since the last grab; once per change until the next E
-//   'F' a frame: u8 flags (1 = key, 2 = the picture changed since the previous grab), f64 LE capture time (ms since
-//       1970), then the access unit
+//   'F' a frame: u8 flags (1 = key, 2 = the picture changed since the previous grab, 4 = its number follows the
+//       time), f64 LE capture time (ms since 1970), u32 BE picture number (0, 1, …: one per E), then the access unit
 //   'S' skipped: the encoder gave no picture for that E (rate control)
 //   'P' the pointer (--cursor client only; one right after the hello, then on every move or shape change): i16 BE x,
 //       i16 BE y (pixels), u32 BE cursor serial, u16 BE xhot, yhot, width, height, u8 flags (1 = visible, 2 = the
@@ -40,14 +45,14 @@
 #include <string.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
-#include <sys/time.h>
 #include <unistd.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/XShm.h>
 #include <X11/extensions/Xdamage.h>
 #include <X11/extensions/Xfixes.h>
-#include <x264.h>
+#include "videoio.h"
+#include "x264enc.h"
 
 static Display *dpy;
 static Window root;
@@ -60,15 +65,6 @@ static int dirty = 1;              // changed since the last grab
 static int told = 0;               // a 'C' went out for this change
 static int ptr_x = -1, ptr_y = -1; // the pointer at the last grab / look
 static uint8_t *yuv;               // I420, width x height
-static x264_t *enc;
-static x264_param_t par;
-static int cur_kbps = 0;
-static int cur_buf = 0;
-static float cur_crf = 0;
-static int64_t pts = 0;
-static const char *preset = "superfast";
-static int threads = 0;
-static int fps = 30;
 static int client_cursor = 0;      // --cursor client: the pointer as 'P' records, never in the picture
 // the pointer last reported ('P'): its shape (serial, hotspot, size, visible, no image) and position
 static struct {
@@ -89,56 +85,12 @@ static void die(const char *what) {
   exit(1);
 }
 
-static double now_ms(void) {
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
-}
-
-static void write_all(const void *p, size_t n) {
-  const uint8_t *b = p;
-  while (n) {
-    ssize_t w = write(1, b, n);
-    if (w < 0) {
-      if (errno == EINTR) continue;
-      exit(0);  // the server went away
-    }
-    b += w;
-    n -= (size_t)w;
-  }
-}
-
-static void record(char type, const void *a, size_t an, const void *b, size_t bn) {
-  uint8_t head[5];
-  uint32_t len = (uint32_t)(an + bn);
-  head[0] = (uint8_t)type;
-  head[1] = (uint8_t)(len >> 24);
-  head[2] = (uint8_t)(len >> 16);
-  head[3] = (uint8_t)(len >> 8);
-  head[4] = (uint8_t)len;
-  write_all(head, 5);
-  if (an) write_all(a, an);
-  if (bn) write_all(b, bn);
-}
-
 static void mark_dirty(void) {
   dirty = 1;
   if (!told) {
     told = 1;
     record('C', NULL, 0, NULL, 0);
   }
-}
-
-static void put16(uint8_t *p, int v) {
-  p[0] = (uint8_t)((unsigned)v >> 8);
-  p[1] = (uint8_t)v;
-}
-
-static void put32(uint8_t *p, uint32_t v) {
-  p[0] = (uint8_t)(v >> 24);
-  p[1] = (uint8_t)(v >> 16);
-  p[2] = (uint8_t)(v >> 8);
-  p[3] = (uint8_t)v;
 }
 
 // One 'P' record: the pointer as `cur` has it, with `rgba` (w × h × 4) when given.
@@ -290,33 +242,6 @@ static void poll_pointer(void) {
   }
 }
 
-// BGRX → I420, BT.709 limited range (the VUI says so); chroma from each 2x2 block's sum.
-static void convert(void) {
-  const uint8_t *src = (const uint8_t *)img->data;
-  int stride = img->bytes_per_line;
-  uint8_t *Y = yuv, *U = yuv + width * height, *V = U + (width / 2) * (height / 2);
-  for (int y = 0; y < height; y += 2) {
-    const uint8_t *r0 = src + (size_t)y * stride, *r1 = r0 + stride;
-    uint8_t *y0 = Y + (size_t)y * width, *y1 = y0 + width;
-    uint8_t *u = U + (size_t)(y / 2) * (width / 2), *v = V + (size_t)(y / 2) * (width / 2);
-    for (int x = 0; x < width; x += 2) {
-      int b00 = r0[x * 4], g00 = r0[x * 4 + 1], R00 = r0[x * 4 + 2];
-      int b01 = r0[x * 4 + 4], g01 = r0[x * 4 + 5], R01 = r0[x * 4 + 6];
-      int b10 = r1[x * 4], g10 = r1[x * 4 + 1], R10 = r1[x * 4 + 2];
-      int b11 = r1[x * 4 + 4], g11 = r1[x * 4 + 5], R11 = r1[x * 4 + 6];
-      // Y = 16 + (47 R + 157 G + 16 B) / 256: 0.2126, 0.7152, 0.0722 scaled to 219 levels
-      y0[x] = (uint8_t)(16 + ((47 * R00 + 157 * g00 + 16 * b00 + 128) >> 8));
-      y0[x + 1] = (uint8_t)(16 + ((47 * R01 + 157 * g01 + 16 * b01 + 128) >> 8));
-      y1[x] = (uint8_t)(16 + ((47 * R10 + 157 * g10 + 16 * b10 + 128) >> 8));
-      y1[x + 1] = (uint8_t)(16 + ((47 * R11 + 157 * g11 + 16 * b11 + 128) >> 8));
-      int R = R00 + R01 + R10 + R11, G = g00 + g01 + g10 + g11, B = b00 + b01 + b10 + b11;
-      // Cb = 128 + (-26 R - 87 G + 112 B) / 256, Cr = 128 + (112 R - 102 G - 10 B) / 256, on the 4-pixel sums
-      u[x / 2] = (uint8_t)(128 + ((-26 * R - 87 * G + 112 * B + 512) >> 10));
-      v[x / 2] = (uint8_t)(128 + ((112 * R - 102 * G - 10 * B + 512) >> 10));
-    }
-  }
-}
-
 // The pointer drawn over the grabbed picture (premultiplied ARGB, one pixel per unsigned long).
 static void draw_pointer(void) {
   XFixesCursorImage *ci = XFixesGetCursorImage(dpy);
@@ -343,63 +268,8 @@ static void draw_pointer(void) {
   XFree(ci);
 }
 
-static void open_encoder(int kbps, int buf, float crf) {
-  if (x264_param_default_preset(&par, preset, "zerolatency") < 0) die("unknown x264 preset");
-  par.i_width = width;
-  par.i_height = height;
-  par.i_csp = X264_CSP_I420;
-  par.i_threads = threads;
-  // constant-rate input as far as x264 knows: VFR input costs a picture of delay (it needs the next picture's time)
-  par.b_vfr_input = 0;
-  par.i_fps_num = (uint32_t)fps;
-  par.i_fps_den = 1;
-  par.i_bframe = 0;
-  par.i_keyint_max = X264_KEYINT_MAX_INFINITE;  // key frames only when asked (the server keeps a 60 s floor)
-  par.i_scenecut_threshold = 0;
-  par.b_repeat_headers = 1;  // SPS + PPS in front of every IDR
-  par.b_annexb = 1;
-  par.b_aud = 0;
-  par.i_log_level = X264_LOG_WARNING;
-  par.vui.i_colorprim = 1;  // BT.709
-  par.vui.i_transfer = 1;
-  par.vui.i_colmatrix = 1;
-  par.vui.b_fullrange = 0;
-  // quality-targeted, capped: pictures come only when the screen changes, so an average-rate target would starve a
-  // still screen's few pictures; the cap (kbps over 1 s) is what the server's flow control steers
-  par.rc.i_rc_method = X264_RC_CRF;
-  par.rc.f_rf_constant = crf;
-  par.rc.i_vbv_max_bitrate = kbps;
-  par.rc.i_vbv_buffer_size = buf;
-  if (x264_param_apply_profile(&par, "high") < 0) die("x264 profile");
-  enc = x264_encoder_open(&par);
-  if (!enc) die("x264_encoder_open failed");
-  if (x264_encoder_maximum_delayed_frames(enc) != 0) die("x264 would delay pictures");
-  cur_kbps = kbps;
-  cur_buf = buf;
-  cur_crf = crf;
-}
-
-static void set_rate(int kbps, int buf, float crf) {
-  if (kbps == cur_kbps && buf == cur_buf && crf == cur_crf) return;
-  par.rc.f_rf_constant = crf;
-  par.rc.i_vbv_max_bitrate = kbps;
-  par.rc.i_vbv_buffer_size = buf;
-  if (x264_encoder_reconfig(enc, &par) < 0) fprintf(stderr, "yoyo-x11video: rate %d kbps crf %.1f refused\n", kbps, crf);
-  cur_kbps = kbps;
-  cur_buf = buf;
-  cur_crf = crf;
-}
-
-// buf: the VBV buffer (kbit; <= 0: kbps, 1 s): kbps may be the per-picture rate scaled for fewer pictures than --fps
-// (the link's frame-rate cap), while a key frame should still fit about 1 s of the real rate
+// Grab the screen and encode it (x264enc.h enc_frame: `buf` the VBV buffer in kbit).
 static void encode(int key, int kbps, float crf, int buf) {
-  if (kbps < 100) kbps = 100;
-  if (kbps > 100000) kbps = 100000;
-  if (buf <= 0 || buf > kbps) buf = kbps;
-  if (buf < 100) buf = 100;
-  if (!(crf >= 0 && crf <= 51)) crf = 23;
-  if (!enc) open_encoder(kbps, buf, crf);
-  else set_rate(kbps, buf, crf);
   drain_x();
   int changed = dirty;
   double at = now_ms();
@@ -409,42 +279,27 @@ static void encode(int key, int kbps, float crf, int buf) {
   told = 0;
   if (!XShmGetImage(dpy, root, img, 0, 0, AllPlanes)) die("XShmGetImage failed");
   if (!client_cursor) draw_pointer();
-  convert();
-  x264_picture_t in, out;
-  x264_picture_init(&in);
-  in.img.i_csp = X264_CSP_I420;
-  in.img.i_plane = 3;
-  in.img.plane[0] = yuv;
-  in.img.plane[1] = yuv + width * height;
-  in.img.plane[2] = in.img.plane[1] + (width / 2) * (height / 2);
-  in.img.i_stride[0] = width;
-  in.img.i_stride[1] = in.img.i_stride[2] = width / 2;
-  in.i_type = key ? X264_TYPE_IDR : X264_TYPE_AUTO;
-  in.i_pts = pts++;
-  x264_nal_t *nals;
-  int n;
-  int size = x264_encoder_encode(enc, &nals, &n, &in, &out);
-  if (size < 0) die("x264_encoder_encode failed");
+  enc_convert((const uint8_t *)img->data, img->bytes_per_line, yuv);
+  const uint8_t *au = NULL;
+  int is_key = 0;
+  int64_t number = 0;
+  int size = enc_frame(yuv, key, kbps, crf, buf, &au, &is_key, &number);
   if (size == 0) {
     record('S', NULL, 0, NULL, 0);
     return;
   }
-  uint8_t head[9];
-  head[0] = (uint8_t)((out.b_keyframe ? 1 : 0) | (changed ? 2 : 0));
-  memcpy(head + 1, &at, 8);  // little-endian on every target this runs on (x86-64, arm64)
-  // the NAL payloads are contiguous in x264's buffer: one access unit
-  record('F', head, sizeof head, nals[0].p_payload, (size_t)size);
+  record_frame(is_key, changed, at, number, au, (size_t)size);
 }
 
 int main(int argc, char **argv) {
   for (int i = 1; i < argc; i++) {
-    if (!strcmp(argv[i], "--preset") && i + 1 < argc) preset = argv[++i];
-    else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
-    else if (!strcmp(argv[i], "--fps") && i + 1 < argc) fps = atoi(argv[++i]);
+    if (!strcmp(argv[i], "--preset") && i + 1 < argc) enc_preset = argv[++i];
+    else if (!strcmp(argv[i], "--threads") && i + 1 < argc) enc_threads = atoi(argv[++i]);
+    else if (!strcmp(argv[i], "--fps") && i + 1 < argc) enc_fps = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--cursor") && i + 1 < argc && !strcmp(argv[i + 1], "client")) client_cursor = 1, i++;
     else die("usage: yoyo-x11video [--preset <x264 preset>] [--threads <n>] [--fps <n>] [--cursor client]");
   }
-  if (fps < 1 || fps > 60) die("--fps must be 1…60");
+  if (enc_fps < 1 || enc_fps > 60) die("--fps must be 1…60");
   signal(SIGPIPE, SIG_IGN);  // a write to a server that went away: EPIPE, an exit(0), not a signal
   dpy = XOpenDisplay(NULL);
   if (!dpy) die("cannot open the display ($DISPLAY / $XAUTHORITY)");
@@ -472,8 +327,9 @@ int main(int argc, char **argv) {
   XFixesSelectCursorInput(dpy, root, XFixesDisplayCursorNotifyMask);
   yuv = malloc((size_t)width * height * 3 / 2);
   if (!yuv) die("out of memory");
-  uint8_t hello[4] = {(uint8_t)(width >> 8), (uint8_t)width, (uint8_t)(height >> 8), (uint8_t)height};
-  record('H', hello, 4, NULL, 0);
+  enc_width = width;
+  enc_height = height;
+  record_hello(width, height, enc_kept_for(width, height) > 1 ? HELLO_REFS : 0);
   // the pointer before any picture (the client draws it from the first part on)
   if (client_cursor) read_shape();
   record('C', NULL, 0, NULL, 0);
@@ -498,8 +354,10 @@ int main(int argc, char **argv) {
         *nl = 0;
         int key = 0, kbps = 0, buf = 0;
         float crf = 23;
+        long long from = -1;
         if (line[0] == 'Q') goto done;
         if (line[0] == 'E' && sscanf(line + 1, "%d %d %f %d", &key, &kbps, &crf, &buf) >= 2) encode(key, kbps, crf, buf);
+        else if (line[0] == 'I' && sscanf(line + 1, "%lld", &from) == 1) enc_forget(from);
         else fprintf(stderr, "yoyo-x11video: bad command \"%s\"\n", line);
         size_t used = (size_t)(nl - line) + 1;
         memmove(line, nl + 1, have - used);

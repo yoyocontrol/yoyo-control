@@ -202,9 +202,11 @@ test("video: opened, a key frame first, another on request; the pointer; closed"
     const f2 = await nextEvent(s, "frame");
     assert.equal(f2.frame.meta.kind, "delta");
     // the 3.5 Mbps start caps the frame rate at 30 (frameRateCap): x264, started at --fps 60, gets twice the rate per
-    // picture, its buffer the real rate (a key frame no bigger than before)
+    // picture, its buffer 8 pictures' shares of the real rate (flow.mjs linkBufferKbit) — the key frame half of that
     const e2 = fake.state.encodes.at(-1);
-    assert.ok(e2.buf > 0 && Math.abs(e2.kbps - 2 * e2.buf) <= 1, JSON.stringify(e2));
+    assert.ok(Math.abs(e2.buf - (e2.kbps / 2 / 30) * 8) <= 1, JSON.stringify(e2));
+    const e1 = fake.state.encodes.find((e) => e.key);
+    assert.ok(Math.abs(e1.buf - (e1.kbps / 2 / 30) * 4) <= 1, JSON.stringify(e1));
     await sleep(600);
     await s.sendControl({ t: "keyframe", id: 1 });
     await until(() => fake.state.encodes.slice(-3).some((e) => e.key));

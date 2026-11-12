@@ -52,7 +52,21 @@ export const TUNING = Object.freeze({
   refineMinKbps: 4000,
   maxEncodeFailures: 3,
   keyFloor: 60,
+  // a link stream's pictures (link.mjs): the encoder's VBV buffer in pictures' shares of the rate (linkBufferKbit)
+  linkBufferPictures: 8,
 });
+
+/**
+ * The VBV buffer (kbit) of a link stream's encoder at `kbps` and `fps` pictures a second: `linkBufferPictures` of one
+ * picture's share. What it holds is what one picture may take — x264 gives a picture at most half of a buffer this
+ * size — so after a pause a changed picture gets about four shares, the ones after it less, and none is so large that
+ * the link (which releases what it is given at about the rate) is still sending it several pictures later. With the
+ * one-second buffer this replaced, a new window was a picture of up to half a second's bits: half a second late on any
+ * path, and at a low rate late past the viewer's patience (lost, asked for again, lost again).
+ */
+export function linkBufferKbit(t, kbps, fps) {
+  return Math.max(1, Math.round((kbps / Math.max(fps, 1)) * t.linkBufferPictures));
+}
 
 /** The tuning with a ceiling (YOYO_VIDEO_MAX_KBPS, or a stream's `maxKbps`): the start and floor follow it down. */
 export function limitedTuning(t, kbps, fromRequest = false) {

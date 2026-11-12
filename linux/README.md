@@ -28,6 +28,7 @@
 | `input.mjs` | `/input` 的校验与到 xdotool 命令的映射、滚动的节奏与惯性（纯逻辑） |
 | `wire.mjs` | 媒体类型、分段字节、`yoyo-x11video` 的记录格式 |
 | `x11video.c` | `yoyo-x11video`：XDamage + 指针轮询报「变了」，收到命令才 MIT-SHM 截屏、画上指针（XFixes）、BGRX → I420（BT.709 limited）、x264 编一帧；`--cursor client` 时指针不画、改报 `'P'` 记录 |
+| `x264enc.h`、`videoio.h` | `yoyo-x11video` 的编码器（x264：码率、一幅画面最多多大、留着前面的画面好在丢帧后不靠关键帧接上）和它写给服务端的记录；`test/synthvideo.c` 用同一份 |
 | `pa-opus.c` | `yoyo-pa-opus`：录 PulseAudio 的一个源（默认 sink 的 monitor），libopus 编 20 ms 一包，时间戳照 `AudioTimeline` |
 | `x11clip.c` | `yoyo-x11clip`：XFixes 报 CLIPBOARD 换了拥有者 → 取 TARGETS 与内容（INCR）；写入时拥有 CLIPBOARD 与 PRIMARY |
 | `x11windows.c` | `yoyo-x11windows`：一次性，按叠放次序列出根窗口下看得见的窗口（WM_CLASS、`_NET_WM_PID`、窗口类型与状态、外框）和 `_NET_ACTIVE_WINDOW`，一个 JSON；`--esc`：常驻，XInput 2 的原始按键里不是 XTEST 来的 Esc 报一行 |
@@ -129,7 +130,7 @@ node server.mjs account --remote ~/.yoyo-remote       # 在不在 Yoyo Control �
 
 远程访问的门（上面）。手机经 UDP / QUIC 连上来，画面经 Link 的媒体层（FEC、NACK、按延迟调码率）走。实现在 `link.mjs`。
 
-- UDP `--link-port`（缺省 47820），`0.0.0.0` 和 `[::]`。
+- UDP `--link-port`（缺省 47820），`0.0.0.0` 和 `[::]`；主人模式下 `--link-bind <ip,…>` 只绑这些本机地址。
 - 中继：`--link-relay <url,…|off>`（`YOYO_LINK_RELAYS` 同），缺省没有（服务端不带任何中继，`docs/LINK.md`「端点、地址、路径」）：
   给了的话直连不上的手机经它进来，打洞也靠它；不给或 `off` 就只有直连。
 - 信令服务：`--signal <url|off>`（`YOYO_SIGNAL_URL` 同），缺省没有（浏览器的 WebRTC 配对、按指纹查绑定都要它）。
@@ -143,8 +144,19 @@ node server.mjs account --remote ~/.yoyo-remote       # 在不在 Yoyo Control �
   `YOYO_LINUX_MAX_FPS`）、refine（同下「视频流」；临时码率另外不超过目标 × `fps` × 0.1 s，refine 加起来不超过媒体层的目标）、5 s 保活；
   `can_send_frame` 关着时这张先不编；码率跟媒体层的 `encoderBps`（`maxKbps`、`YOYO_VIDEO_MAX_KBPS` 是天花板）；帧率不超过媒体层按码率定的
   上限（`frameRateCap`：低码率下帧少些、每帧清楚些，`docs/LINK.md`「帧率上限」），x264 按 `--fps` 记每帧的预算，所以上限低时给它
-  `encoderBps × fps / 上限`，VBV 缓冲仍是 1 s 的真实码率（`E` 命令的第 4 个数，旧的辅助程序不认就照旧）。x264 没有长期参考：手机要恢复帧（`recoveryNeeded`）或关键帧时都发关键帧，最多 500 ms 一个。`cursor=client`：位置走指针数据报，
-  形状是 `cursor.shape` 控制消息（每个形状一次）。每 10 s 一行 `link <设备>: video <id> stats: …`（含 `held` = Link 的队列或帧率上限挡着的次数和时间、`fps cap`）。
+  `encoderBps × fps / 上限`。`cursor=client`：位置走指针数据报，
+  形状是 `cursor.shape` 控制消息（每个形状一次）。每 10 s 一行 `link <设备>: video <id> stats: …`（含 `held` = Link 的队列或帧率上限挡着的次数和时间、`fps cap`、
+  `largest` = 这 10 s 里最大的一幅、`recoveries N (M without a key frame)`）。
+- 一幅画面多大（Linux，`platform.mjs` 的 `boundedPictures`）：Link 把交给它的东西按码率匀着放出去，所以一幅画面比它那一份（码率 ÷ 帧率）大十倍，
+  就晚到十帧——以前 VBV 缓冲是 1 s 的码率，换个窗口就是一幅半秒才到的画面；码率低时它在手机等的 1 s 里到不了，被判丢、再要、再丢。现在缓冲是
+  8 幅画面的份（`flow.mjs` 的 `linkBufferKbit`，`E` 命令的第 4 个数）：x264 让一幅画面最多用缓冲里现有的一半，停了一会儿之后变的那幅约 4 份、接着的更少；
+  关键帧会用掉整个缓冲，所以给它一半；手机没确认的关键帧之后再发的，每个再减半（到八分之一为止：刚开始码率是猜的，比它慢得多的路上第一个关键帧到不了）。没有按钟点发的关键帧（Link 要么送到每一幅，要么说丢了哪幅）。
+- 丢了一幅（Linux，`cheapRecovery`）：`yoyo-x11video` 留着前面的画面（最多 16 幅，按分辨率，`x264enc.h`），`recoveryNeeded` 来了就告诉它「手机确认过的那幅之后的都不算」
+  （`I <编号>`，x264 的 reference invalidation），下一幅只引用那一幅，作为 `recovery` 帧（`recoveryBase`）发出去：一幅普通大小的画面，不是关键帧。所以 NACK 一来就要
+  （`recoveryOnNack`，同 Mac）。只有这些时候才发关键帧：流开始、手机的解码器要（`keyframeNeeded`）、手机还什么都没确认、确认的那幅比留着的还旧、辅助程序不留画面
+  （Windows 的）；上一个关键帧还在路上时不发下一个（`keyTransit`：它过 Link 要的时间的两倍 + 0.2 s，至少 500 ms——早发的那个会在手机上把前一个顶掉）。
+  Link 没收下的一幅（队列满）同样只是让下一幅跳过它。
+- 帧率：`fps` 夹到 `YOYO_MAX_FPS`，缺省有 8 个处理器可用时 60，否则 30（`platform.mjs` 的 `maxFpsFor`）。
 - 声音：`audio.open` 订阅同一份采集，每个 Opus 包 → `send_audio`；开不了时 `audio.error`（503）。
 - 输入：媒体层的输入事件按顺序进 `/input` 的处理（控制权、坐标），被拒 → `input.rejected`（`code` 同 `docs/LINK.md`）。`control.take` /
   `control.release` = `POST /control`，每次变化所有会话收到 `control`。
@@ -200,7 +212,11 @@ cd linux && node --test test/
 ./vendor.sh --check        # vendor/ 和 packages/ 现在编出来的一样（改了 packages/remote、portmap 或 link 就 ./vendor.sh 再提交）
 ```
 
-不需要 X、xdotool、ffmpeg：`test/fakes.mjs` 假扮这些进程（以及四个辅助程序的记录格式），macOS 上也能跑。`test/link.test.mjs` 用真的
+不需要 X、xdotool、ffmpeg：`test/fakes.mjs` 假扮这些进程（以及四个辅助程序的记录格式），macOS 上也能跑。`test/x264enc.test.mjs` 是真的 x264：
+它编 `test/synthvideo.c`（没有屏幕的 `yoyo-x11video`：同样的命令、记录和编码器，画面是造出来的一页「文字」——静止、打字、滚动、换页、一块动的画面），
+查一幅画面最多多大、「忘掉」几幅之后的那幅不是关键帧，而且把那几幅从流里剪掉后解出来的画面和整条流一模一样（ffmpeg 自己的解码器，Mac 上再过一遍
+VideoToolbox）；没有 C 编译器 / libx264 就跳过，没有 ffmpeg 跳过解码那两条。`test/link-video.test.mjs` 是一条 Link 视频流的循环（假会话 + 假辅助程序）：缓冲给多少、丢帧后引用哪一幅、什么时候才发关键帧。
+`synthvideo` 也能顶替真的辅助程序把整条链路在一台 Mac 上跑起来（`YOYO_VIDEO_HELPER=<它> node server.mjs --link on …`，另一头 `uu-link-probe watch`，中间 `uu-link-netem`：`docs/LINK.md`「Testing」）。`test/link.test.mjs` 用真的
 Link 客户端连（要原生插件：仓库里 `cd link && cargo build -p uu-link-node` 编出的 debug 版自动找到，或设 `YOYO_LINK_NATIVE`；没有就跳过）。
 
 ## 发布
@@ -255,7 +271,7 @@ gh release create linux-v0.8.0 --prerelease --target <commit> --title "yoyo-linu
 - 分段头：`Content-Type: video/h264`、`Content-Length`、`X-Frame-Width` / `X-Frame-Height`、`X-Frame-Seq`、`X-Frame-Time`（截屏时的墙钟 ms）、`X-Frame-Kind`
   （`key` / `delta` / `refine` / `keepalive` / `status`）、`X-Stream-Codec: h264`。每个 `key` 分段以 SPS、PPS 开头（4 字节起始码）。
 
-`yoyo-x11video` 的接口（stdin 命令一行一个、stdout 二进制记录）见 `x11video.c` 开头。
+`yoyo-x11video` 的接口（stdin 命令一行一个、stdout 二进制记录）见 `x11video.c` 开头（编码器在 `x264enc.h`，记录在 `videoio.h`）。
 
 ## 指针（`cursor=client`）
 

@@ -7,6 +7,8 @@
 //!     uu-link-probe dial <id> <ip:port>[,<ip:port>…] [--token <t>] [--seconds 10] [--load-mbps 8] [--video]
 //!             [--speed-test [ms]] [--relay <url>] [--bind <ip>]
 //!     uu-link-probe dial-rtc <http://127.0.0.1:47830/rtc> <fingerprint> [same options as dial]
+//!     uu-link-probe watch <id> <ip:port>[,<ip:port>…] [--credential <text>] [--query <stream query>] [--seconds 30]
+//!             [--csv <file>] [--h264 <file>] [--relay <url>] [--bind <ip>]
 //!
 //! `serve` prints its id and addresses and answers: RPC `/echo` (the body back) and `/bytes?n=` (n bytes streamed),
 //! control `ping` → `pong`, datagram channel 14 echoed, channel 15 counted (the load), `video.open` → synthetic
@@ -21,7 +23,15 @@
 //! measures the handshake, RPC and control round trips, then for `--seconds`: a 50 Hz datagram ping (channel 14) and
 //! a synthetic `--load-mbps` stream of 1150-byte datagrams (channel 15) at once; it prints the session's `link:` lines
 //! and a summary. `--speed-test [ms]` runs only the speed test (the
-//! server's session sends the filler; docs/LINK.md「测速」) and prints its report. `dial-rtc` does the same over WebRTC, signaled through `serve --signal`. Both ends print their logs
+//! server's session sends the filler; docs/LINK.md「测速」) and prints its report. `watch` is a phone without a
+//! screen, for a real screen server (the Mac's, yoyo-linux): it opens the session with `--credential` as the hello's
+//! credential (default `Bearer probe`), the video stream with `--query` (a `/stream` query, default
+//! `fps=60&cursor=client`), answers every frame as decoded and for `--seconds` prints the session's `link:` line
+//! every 5 s; then a summary — frames by kind, the fps, each frame's capture → arrival time (`e2e`: the server's
+//! wall clock against this machine's, so only as good as the two clocks agree; `over best` takes the fastest frame
+//! as the clocks' offset), the longest gaps between frames, what was lost / skipped. `--csv` writes one line per
+//! frame (and per lost / skipped one), `--h264` the access units as they were handed out (an Annex-B file a decoder
+//! plays: a broken picture there is a broken stream). `dial-rtc` does the same over WebRTC, signaled through `serve --signal`. Both ends print their logs
 //! to stderr.
 
 use std::{
@@ -59,7 +69,8 @@ fn usage() -> ! {
          \x20             [--screen-clip <file>]\n\
          \x20      uu-link-probe serve-rtc [serve options]\n\
          \x20      uu-link-probe dial <id> <ip:port>[,…] [--token <t>] [--seconds 10] [--load-mbps 8] [--video] [--speed-test [ms]] [--relay <url>] [--bind <ip>]\n\
-         \x20      uu-link-probe dial-rtc <signal url> <fingerprint> [--token <t>] [--seconds 10] [--load-mbps 8] [--video] [--bind <ip>]"
+         \x20      uu-link-probe dial-rtc <signal url> <fingerprint> [--token <t>] [--seconds 10] [--load-mbps 8] [--video] [--bind <ip>]\n\
+         \x20      uu-link-probe watch <id> <ip:port>[,…] [--credential <text>] [--query <stream query>] [--seconds 30] [--csv <file>] [--h264 <file>] [--relay <url>] [--bind <ip>]"
     );
     exit(2)
 }
@@ -111,6 +122,7 @@ async fn main() {
         }
         Some("dial") => dial(&args[1..]).await,
         Some("dial-rtc") => dial_rtc(&args[1..]).await,
+        Some("watch") => watch(&args[1..]).await,
         _ => usage(),
     }
 }
@@ -836,6 +848,202 @@ async fn clip_video(s: Session, id: u8, clip: Arc<Clip>, playing: Arc<AtomicU64>
             }
         }
     }
+}
+
+// MARK: watch
+
+/// `watch`: a phone without a screen on a real screen server (see the top of this file).
+async fn watch(args: &[String]) {
+    use std::io::Write;
+    if args.len() < 2 {
+        usage();
+    }
+    let id = args[0].clone();
+    let direct: Vec<String> = args[1].split(',').filter(|a| !a.is_empty()).map(String::from).collect();
+    let credential = flag(args, "--credential").unwrap_or_else(|| "Bearer probe".into());
+    let query = flag(args, "--query").unwrap_or_else(|| "fps=60&cursor=client".into());
+    let seconds: f64 = flag(args, "--seconds").map(|v| v.parse().unwrap_or_else(|_| usage())).unwrap_or(30.0);
+    let relays: Vec<String> = flag(args, "--relay").into_iter().collect();
+    let mut csv = flag(args, "--csv").map(|f| std::io::BufWriter::new(std::fs::File::create(f).expect("--csv")));
+    let mut h264 = flag(args, "--h264").map(|f| std::io::BufWriter::new(std::fs::File::create(f).expect("--h264")));
+
+    let mut cfg = EndpointConfig::client(generate_link_key());
+    cfg.relays = relays.clone();
+    cfg.bind_ips = bind_ips(args);
+    let ep = Endpoint::bind(cfg).await.unwrap();
+    let hello = Hello {
+        credential,
+        device: uu_link::Device { id: "probe-watch".into(), name: "uu-link-probe".into() },
+        app: uu_link::AppInfo { name: "uu-link-probe".into(), version: env!("CARGO_PKG_VERSION").into() },
+        features: vec![],
+    };
+    let t0 = Instant::now();
+    let s = match ep.dial(&DialTarget { id, relays, direct }, &hello, &DialOptions::default()).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("probe: {e}");
+            exit(1)
+        }
+    };
+    println!("session ({}): {:.1} ms to welcome, path {:?}", s.transport(), t0.elapsed().as_secs_f64() * 1e3, s.path());
+    s.open_video(1);
+    s.send_control(&json!({"t": "video.open", "id": 1, "query": query})).await.unwrap();
+    // the control stream: what the server says about the stream
+    {
+        let s = s.clone();
+        tokio::spawn(async move {
+            while let Some(m) = s.recv_control().await {
+                match m["t"].as_str() {
+                    Some("cursor.shape") | Some("control") | Some("video.status") => {}
+                    _ => println!("control: {m}"),
+                }
+            }
+        });
+    }
+    if let Some(c) = csv.as_mut() {
+        writeln!(
+            c,
+            "frame,fate,kind,bytes,capture_us,arrival_us,e2e_ms,gap_ms,first_ms,complete_ms,shards,fec,retx,nacks"
+        )
+        .unwrap();
+    }
+    struct Seen {
+        kind: u8,
+        bytes: usize,
+        e2e_ms: f64,
+        gap_ms: f64,
+        at: f64,
+    }
+    let mut seen: Vec<Seen> = Vec::new();
+    let (mut lost, mut skipped) = (0u64, 0u64);
+    let mut last_at: Option<Instant> = None;
+    let start = Instant::now();
+    let until = start + Duration::from_secs_f64(seconds);
+    let mut lines = tokio::time::interval(Duration::from_secs(5));
+    lines.tick().await;
+    let mut traces = tokio::time::interval(Duration::from_millis(200));
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(until.into()) => break,
+            _ = lines.tick() => println!("link: {}", s.stats().line()),
+            _ = traces.tick() => {
+                for t in s.take_rx_traces().unwrap_or_default() {
+                    match t.fate {
+                        uu_link::media::RxFate::Delivered => {}
+                        uu_link::media::RxFate::Lost => lost += 1,
+                        uu_link::media::RxFate::Skipped => skipped += 1,
+                    }
+                    if let Some(c) = csv.as_mut() {
+                        let ms = |m: Option<uu_link::media::Micros>| m.map_or(String::new(), |m| format!("{:.1}", m.0 as f64 / 1e3));
+                        writeln!(
+                            c,
+                            "{},{:?},{},{},{},,,,{},{},{},{},{},{}",
+                            t.frame,
+                            t.fate,
+                            t.kind.map_or(String::new(), |k| k.to_string()),
+                            t.au_bytes,
+                            t.capture_us.map_or(String::new(), |c| c.to_string()),
+                            ms(t.first_arrival),
+                            ms(t.completed_at),
+                            t.shards,
+                            t.fec,
+                            t.retx,
+                            t.nack_items
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+            ev = s.recv_client_event() => match ev {
+                Some(uu_link::media::ClientEvent::Frame(f)) => {
+                    let now = Instant::now();
+                    let wall = micros_now();
+                    let e2e_ms = (wall as f64 - f.meta.capture_us as f64) / 1e3;
+                    let gap_ms = last_at.map_or(0.0, |t| (now - t).as_secs_f64() * 1e3);
+                    last_at = Some(now);
+                    let _ = s.frame_decoded(f.stream, f.frame, true);
+                    if let Some(h) = h264.as_mut() {
+                        h.write_all(&f.au).unwrap();
+                    }
+                    if let Some(c) = csv.as_mut() {
+                        writeln!(c, "{},Shown,{},{},{},{},{:.1},{:.1},,,,,,", f.frame, f.meta.kind as u8, f.au.len(), f.meta.capture_us, wall, e2e_ms, gap_ms).unwrap();
+                    }
+                    seen.push(Seen { kind: f.meta.kind as u8, bytes: f.au.len(), e2e_ms, gap_ms, at: (now - start).as_secs_f64() });
+                }
+                Some(_) => {}
+                None => {
+                    println!("the session ended: {:?}", s.close_info());
+                    break;
+                }
+            },
+        }
+    }
+    println!("link: {}", s.stats().line());
+    if let Some(p) = s.peer_stats() {
+        println!("link[server]: {}", p.line());
+    }
+    s.send_control(&json!({"t": "video.close", "id": 1})).await.ok();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    s.close(uu_link::CloseCode::Normal, "done").await;
+    ep.close().await;
+    if let Some(mut c) = csv {
+        c.flush().unwrap();
+    }
+    if let Some(mut h) = h264 {
+        h.flush().unwrap();
+    }
+
+    let took = start.elapsed().as_secs_f64();
+    let count = |k: u8| seen.iter().filter(|f| f.kind == k).count();
+    let bytes: usize = seen.iter().map(|f| f.bytes).sum();
+    println!(
+        "watch: {} frames in {:.1} s ({:.1} fps): {} delta, {} key, {} refine, {} keepalive, {} recovery; {} lost, {} skipped; {:.2} Mbps of video",
+        seen.len(),
+        took,
+        seen.len() as f64 / took,
+        count(0),
+        count(1),
+        count(2),
+        count(3),
+        count(4),
+        lost,
+        skipped,
+        bytes as f64 * 8.0 / took / 1e6
+    );
+    // pictures that changed (delta, key, recovery): how long from the grab to this end
+    let mut live: Vec<f64> = seen.iter().filter(|f| matches!(f.kind, 0 | 1 | 4)).map(|f| f.e2e_ms).collect();
+    if !live.is_empty() {
+        let best = live.iter().cloned().fold(f64::MAX, f64::min);
+        println!(
+            "watch: capture → arrival of changed pictures: best {:.1} ms (the clocks' offset is in it); over best p50 {:.1} p90 {:.1} p99 {:.1} max {:.1} ms",
+            best,
+            pct(&mut live, 0.5) - best,
+            pct(&mut live, 0.9) - best,
+            pct(&mut live, 0.99) - best,
+            live.last().copied().unwrap_or(best) - best
+        );
+        let mut sizes: Vec<f64> = seen.iter().filter(|f| f.kind == 0).map(|f| f.bytes as f64).collect();
+        let mut keys: Vec<f64> = seen.iter().filter(|f| f.kind == 1).map(|f| f.bytes as f64).collect();
+        println!(
+            "watch: delta bytes p50 {:.0} p90 {:.0} p99 {:.0} max {:.0}; key bytes p50 {:.0} max {:.0}",
+            pct(&mut sizes, 0.5),
+            pct(&mut sizes, 0.9),
+            pct(&mut sizes, 0.99),
+            sizes.last().copied().unwrap_or(0.0),
+            pct(&mut keys, 0.5),
+            keys.last().copied().unwrap_or(0.0)
+        );
+    }
+    // the longest waits for a changed picture while pictures were changing (a wait that ends in a keepalive or
+    // follows one is a still screen)
+    let mut gaps: Vec<(f64, f64)> = seen
+        .windows(2)
+        .filter(|w| matches!(w[1].kind, 0 | 1 | 4) && w[0].kind != 3)
+        .map(|w| (w[1].gap_ms, w[1].at))
+        .collect();
+    gaps.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    let top: Vec<String> = gaps.iter().take(8).map(|g| format!("{:.0} ms @{:.1}s", g.0, g.1)).collect();
+    println!("watch: longest gaps before a changed picture: {}", top.join(", "));
 }
 
 fn micros_now() -> u64 {

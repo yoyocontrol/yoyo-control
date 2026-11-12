@@ -152,6 +152,8 @@ export interface EndpointConfig {
   rtcStunServers?: string[];
   /** rtc answers offer only the external addresses (`addRtcExternalAddr`, STUN), not the interfaces'. */
   rtcExternalOnly?: boolean;
+  /** Only these local addresses (default: every interface, IPv4 and IPv6). */
+  bindIps?: string[];
 }
 
 export type AddrInfo = NativeAddrInfo;

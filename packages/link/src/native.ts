@@ -169,6 +169,7 @@ export interface NativeAddon {
     rtcPort?: number;
     rtcStunServers?: string[];
     rtcExternalOnly?: boolean;
+    bindIps?: string[];
   }): Promise<NativeEndpoint>;
 }
 

@@ -10,7 +10,11 @@
 //   the pairing code being shown (pairs, binds the key, hands the token back in `welcome.principal`).
 // - The router maps the UDP port (remote.mjs, with its port-mapping options); the mapped address and the `--advertise`
 //   ones go to the endpoint as external addresses (a container's own addresses are not where a phone reaches it).
-// - x264 has no long-term references: a recovery request is answered with a key frame, at most one per 500 ms.
+// - A lost picture costs a small one, not a key frame: the video helper keeps earlier pictures (x264enc.h), so a
+//   recovery request is answered with a picture that references the newest one the phone confirmed (`recovery`,
+//   `recoveryBase`). A key frame only at the start, when the phone's decoder asks for one, or when the confirmed
+//   picture is older than the helper keeps (at most one per 500 ms). A helper without that (the hello's `refs`)
+//   answers every recovery request with a key frame.
 // - Needs the native addon (vendor/link/uu-link.linux-<arch>-gnu.node in the release tar, or YOYO_LINK_NATIVE): without
 //   it the server runs as before, without the link (one log line).
 // - Authority mode (headless, no `--remote`: `--link on --link-home <dir>`): one local program holding the token decides
@@ -24,7 +28,7 @@
 import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import { CURSOR_MIN_INTERVAL, SENT_SHAPES_MAX } from "./cursor.mjs";
-import { RefineSchedule, TUNING, limitedTuning, liveBudget, parsePlayoutReport, playoutLine, refineKbps } from "./flow.mjs";
+import { RefineSchedule, TUNING, limitedTuning, linkBufferKbit, liveBudget, parsePlayoutReport, playoutLine, refineKbps } from "./flow.mjs";
 import { InputError } from "./input.mjs";
 import { AUDIO, audioCookie } from "./audio.mjs";
 import { CRF } from "./video.mjs";
@@ -46,6 +50,18 @@ export function onPort(addr, port) {
 }
 /** The fewest seconds between two key frames asked for by the phone (recovery, a decoder that lost its way). */
 export const KEY_MIN_INTERVAL = 0.5;
+/**
+ * How long a key frame of `bytes` is on its way at `kbps` before another may follow (seconds, at least
+ * KEY_MIN_INTERVAL): twice what the link takes to release it, and the phone's patience for its last packets. A second
+ * key frame sent sooner overtakes the first on the phone — which then waits for the second, just as long.
+ */
+export function keyTransit(bytes, kbps) {
+  return Math.max(KEY_MIN_INTERVAL, (2 * bytes * 8) / (Math.max(kbps, 1) * 1000) + 0.2);
+}
+/** The fewest seconds between two recovery pictures (a request repeated before the first answer reached the phone). */
+export const RECOVERY_MIN_INTERVAL = 0.05;
+/** How many sent pictures' numbers a stream remembers (the helper keeps at most 16 pictures). */
+const NUMBERS_KEPT = 128;
 /** How often a full link queue is looked at again while it holds a picture back. */
 const HELD_POLL_MS = 4;
 const STATS_EVERY = 10;
@@ -91,7 +107,7 @@ export function streamId(v) {
  * URLs published in the binding (empty: direct only, and no hole punching, which needs a relay on both ends).
  */
 export class LinkServer {
-  constructor({ L, svc, remote = null, authority = null, home, serverId, name, port = DEFAULT_LINK_PORT, relays = [], rtcPort = defaultRtcPort(port), stun = [], advertise = [], exempt = [], log = () => {}, clock = monotonic }) {
+  constructor({ L, svc, remote = null, authority = null, home, serverId, name, port = DEFAULT_LINK_PORT, relays = [], rtcPort = defaultRtcPort(port), stun = [], advertise = [], exempt = [], bind = [], log = () => {}, clock = monotonic }) {
     this.L = L;
     this.svc = svc;
     this.remote = remote;
@@ -109,6 +125,8 @@ export class LinkServer {
     this.advertiseHosts = advertise;
     this.advertise = advertise.map((a) => withPort(a, port));
     this.exempt = exempt;
+    /** Only these local addresses (empty: every interface). */
+    this.bind = bind;
     this.log = log;
     this.clock = clock;
     this.ep = null;
@@ -137,6 +155,7 @@ export class LinkServer {
       relays: this.relays,
       portmapper: false,
       guard: { exempt: this.exempt },
+      ...(this.bind.length ? { bindIps: this.bind } : {}),
       ...(this.rtcPort === null ? {} : { rtcPort: this.rtcPort, rtcStunServers: this.stun }),
     });
     const { x963Private } = await import("./vendor/remote/index.js");
@@ -162,6 +181,9 @@ export class LinkServer {
     const listener = this.ep.listen({
       server: this.remote ? { id: this.remote.settings.serverId, name: this.remote.name, platform: this.svc.platform?.id ?? "linux" } : { id: this.serverId, name: this.name, platform: this.svc.platform?.id ?? "linux" },
       features: ["screen", "audio", "cursor", "input"],
+      // a NACK asks for a recovery picture at once where one is cheap (the helper keeps earlier pictures): when the
+      // retransmit fails too, the picture that mends the stream is already on its way
+      recoveryOnNack: this.svc.platform?.cheapRecovery === true,
       authenticate: (r) => this.authenticate(r),
       rpc: (session, req, body, res) => this.rpc(session, req, body, res),
       identityKey,
@@ -713,7 +735,10 @@ class LinkPeer {
             for (const v of this.videos.values()) v.setBitrate(e.encoderBps);
             break;
           case "recoveryNeeded":
-            this.videos.get(e.stream)?.keyNeeded(true);
+            this.videos.get(e.stream)?.recoveryNeeded(e.lastDelivered ?? null);
+            break;
+          case "frameDelivered":
+            this.videos.get(e.stream)?.delivered(e.frame);
             break;
           case "keyframeNeeded":
             this.videos.get(e.stream)?.keyNeeded();
@@ -722,7 +747,6 @@ class LinkPeer {
             this.inputs = this.inputs.then(() => this.input(e.input));
             break;
           default:
-          // frameDelivered: nothing to confirm without long-term references
         }
       }
     } catch {}
@@ -832,9 +856,15 @@ class LinkPeer {
  * a key frame is due), at most `fps`; refines and keepalives while it is still; the link's media layer says when the
  * queue takes another picture (`canSendFrame`), at which rate (`encoderBps`) and at most how many a second
  * (`frameRateCap`: fewer, sharper frames at a low rate). x264 budgets per frame at the `--fps` it was started with, so
- * under a lower cap it gets the rate scaled up by `fps / cap`: each of the fewer frames gets the bits.
+ * under a lower cap it gets the rate scaled up by `fps / cap`: each of the fewer frames gets the bits. No picture is
+ * much larger than its share of the rate (flow.mjs linkBufferKbit), so none is still on its way pictures later.
+ *
+ * A picture the phone lost: the next one references the newest picture the phone confirmed (`recoveryNeeded` says
+ * which; the helper forgets everything after it), sent as a `recovery` frame — when the helper keeps earlier pictures
+ * and still has that one; else a key frame. No key frames by the clock: the link delivers every picture or says which
+ * it lost.
  */
-class LinkVideo {
+export class LinkVideo {
   constructor({ peer, id, o }) {
     this.peer = peer;
     this.session = peer.session;
@@ -845,6 +875,16 @@ class LinkVideo {
     this.needKey = true;
     this.recoveries = 0;
     this.keyRequests = 0;
+    /** Recovery requests answered with a picture that references an earlier one (the rest got a key frame). */
+    this.mended = 0;
+    /** Sent pictures: the link's frame number → the helper's picture number (the newest NUMBERS_KEPT). */
+    this.numbers = new Map();
+    /** The newest frame the phone confirmed, the newest key frame sent, and the frame a recovery picture is due for. */
+    this.confirmed = 0;
+    this.keyFrame = 0;
+    this.recoverBase = null;
+    /** Key frames sent since the phone last confirmed a picture: each next one is given half the bytes (a path too slow for the first). */
+    this.keysUnconfirmed = 0;
     this.helper = null;
     const base = peer.svc.tuning ?? TUNING;
     this.t = o.maxKbps != null ? limitedTuning(base, o.maxKbps, true) : base;
@@ -859,11 +899,29 @@ class LinkVideo {
     this.kbps = this.clampKbps(bps / 1000);
   }
 
-  /** The phone needs a key frame (`recovery`: it asked for a recovery frame; x264 answers both with a key frame). */
-  keyNeeded(recovery = false) {
-    if (recovery) this.recoveries++;
-    else this.keyRequests++;
+  /** The phone's decoder needs a key frame. */
+  keyNeeded() {
+    this.keyRequests++;
     this.needKey = true;
+    this.helper?.wake();
+  }
+
+  /** The phone decoded `frame` (the newest so far). */
+  delivered(frame) {
+    if (frame > this.confirmed) this.confirmed = frame;
+    if (frame >= this.keyFrame) this.keysUnconfirmed = 0;
+  }
+
+  /**
+   * The phone lost a picture (`lastDelivered`: the newest it confirmed, as the link has it): the next picture
+   * references that one, when the helper still can — it keeps earlier pictures, this one is among those sent since
+   * the last key frame — else a key frame.
+   */
+  recoveryNeeded(lastDelivered) {
+    this.recoveries++;
+    const base = Math.max(lastDelivered ?? 0, this.confirmed);
+    if (this.helper?.refs && base > 0 && base >= this.keyFrame && this.numbers.has(base)) this.recoverBase = base;
+    else this.needKey = true;
     this.helper?.wake();
   }
 
@@ -921,23 +979,26 @@ class LinkVideo {
     let lastPictureAt = -Infinity;
     let lastPictureStart = -Infinity;
     let lastKeyAt = -Infinity;
+    /** No key frame before this: the previous one is still on its way (keyTransit). */
+    let keyHoldUntil = -Infinity;
+    let lastRecoveryAt = -Infinity;
     const refine = new RefineSchedule(t);
     let seenToken = -1;
     let heldSince = null;
     let sentCursor = null;
     let lastCursorAt = -Infinity;
     const sentShapes = new Set();
-    const win = { live: 0, refines: 0, keepalives: 0, keys: 0, drops: 0, held: 0, heldMs: 0, encodeMs: [], bytes: 0, start: clock() };
+    const win = { live: 0, refines: 0, keepalives: 0, keys: 0, drops: 0, held: 0, heldMs: 0, encodeMs: [], bytes: 0, largest: 0, start: clock() };
 
     const stats = (now) => {
       const seconds = now - win.start;
       if (seconds < STATS_EVERY) return;
       const pics = win.live + win.refines + win.keepalives;
       const mean = win.encodeMs.length ? win.encodeMs.reduce((a, b) => a + b, 0) / win.encodeMs.length : 0;
-      let line = `stats: last ${seconds.toFixed(1)} s sent ${(pics / seconds).toFixed(1)} pics/s (live ${win.live} refine ${win.refines} keepalive ${win.keepalives} key ${win.keys} dropped ${win.drops}); encode ${mean.toFixed(1)}/${Math.max(0, ...win.encodeMs).toFixed(1)} ms (mean/max); held ${win.held} (${Math.round(win.heldMs)} ms); h264 ${size[0]}px ${this.kbps}kbps ${Math.round(win.bytes / seconds / 1024)}KB/s; fps cap ${fps}; link target ${(s.targetBitrate / 1e6).toFixed(1)} Mbps recoveries ${this.recoveries} key requests ${this.keyRequests}`;
+      let line = `stats: last ${seconds.toFixed(1)} s sent ${(pics / seconds).toFixed(1)} pics/s (live ${win.live} refine ${win.refines} keepalive ${win.keepalives} key ${win.keys} dropped ${win.drops}); encode ${mean.toFixed(1)}/${Math.max(0, ...win.encodeMs).toFixed(1)} ms (mean/max); held ${win.held} (${Math.round(win.heldMs)} ms); h264 ${size[0]}px ${this.kbps}kbps ${Math.round(win.bytes / seconds / 1024)}KB/s, largest ${Math.round(win.largest / 1024)} KB; fps cap ${fps}; link target ${(s.targetBitrate / 1e6).toFixed(1)} Mbps recoveries ${this.recoveries} (${this.mended} without a key frame) key requests ${this.keyRequests}`;
       if (this.peer.report) line += `; phone ${playoutLine(this.peer.report)}`;
       this.log(line);
-      Object.assign(win, { live: 0, refines: 0, keepalives: 0, keys: 0, drops: 0, held: 0, heldMs: 0, encodeMs: [], bytes: 0, start: now });
+      Object.assign(win, { live: 0, refines: 0, keepalives: 0, keys: 0, drops: 0, held: 0, heldMs: 0, encodeMs: [], bytes: 0, largest: 0, start: now });
     };
 
     while (!this.closed && !helper.exited && !s.isClosed) {
@@ -967,17 +1028,23 @@ class LinkVideo {
       }
       // 2. pictures: a change (or a key frame due), else a refine, else a keepalive
       const changed = token !== seenToken;
-      const keyAllowed = now - lastKeyAt >= KEY_MIN_INTERVAL;
-      const wantKey = (this.needKey && keyAllowed) || now - lastKeyAt >= t.keyFloor;
+      const keyAllowed = now >= keyHoldUntil;
+      const wantKey = this.needKey && keyAllowed;
+      // a recovery picture (a key frame that is due answers the request too)
+      if (this.needKey) this.recoverBase = null;
+      const recoveryAllowed = now - lastRecoveryAt >= RECOVERY_MIN_INTERVAL;
+      const wantRecovery = this.recoverBase !== null && recoveryAllowed;
       let want = null;
-      if (changed || wantKey) want = "live";
+      if (changed || wantKey || wantRecovery) want = "live";
       else if (refine.isDue(now)) want = "refine";
       else if (shown && now - lastPictureAt >= t.keepalive) want = "keepalive";
-      if (this.needKey && !keyAllowed) deadline = Math.min(deadline, lastKeyAt + KEY_MIN_INTERVAL);
+      if (this.needKey && !keyAllowed) deadline = Math.min(deadline, keyHoldUntil);
+      if (this.recoverBase !== null && !recoveryAllowed) deadline = Math.min(deadline, lastRecoveryAt + RECOVERY_MIN_INTERVAL);
 
       if (want) {
         const gap = interval - (now - lastPictureStart);
-        if (want === "live" && gap > 0) {
+        // (a recovery picture doesn't wait for the pace: the phone shows nothing until it comes)
+        if (want === "live" && gap > 0 && !wantRecovery && !wantKey) {
           await helper.wait(helper.changeToken, Math.min(gap, Math.max(0.001, deadline - now)) * 1000);
           continue;
         }
@@ -1000,8 +1067,20 @@ class LinkVideo {
         const rate = want === "refine" ? refineKbps(t, { kbps: this.kbps, ceiling: t.maxKbps, linkFps: this.o.fps }) : kbps;
         const start = clock();
         seenToken = helper.changeToken;
-        // the buffer stays ~1 s of the real rate: a key frame mustn't grow with the per-picture scaling
-        const buf = want === "refine" || kbps === this.kbps ? null : this.kbps;
+        // what one picture may take: a few pictures' shares of the real rate (not of the per-picture scaling). A key
+        // frame takes the whole buffer where another picture takes half: it gets half the buffer. (A platform whose
+        // encoders haven't been tried with that keeps a second of the real rate.)
+        // A key frame after one the phone never confirmed: half of the last one's, down to an eighth — at the start
+        // the rate is a guess, and on a path far below it the first key frame doesn't arrive in the phone's patience.
+        const share = wantKey ? 2 << Math.min(this.keysUnconfirmed, 3) : 1;
+        const buf = this.peer.svc.platform?.boundedPictures === true ? Math.ceil(linkBufferKbit(t, this.kbps, fps) / share) : want === "refine" || kbps === this.kbps ? null : this.kbps;
+        // the picture the phone lost and everything after it are no references any more
+        let base = null;
+        if (!wantKey && wantRecovery) {
+          base = this.recoverBase;
+          helper.forget(this.numbers.get(base) + 1);
+        }
+        this.recoverBase = null;
         const r = await helper.encode(wantKey, rate, want === "refine" ? CRF.refine : CRF.live, buf);
         now = clock();
         if (r === null) break;
@@ -1009,27 +1088,49 @@ class LinkVideo {
           win.drops++;
           lastPictureAt = now;
           lastPictureStart = now;
+          // the recovery picture is still owed
+          if (base !== null && this.recoverBase === null) this.recoverBase = base;
           // a skipped refine: one fewer left, and the picture is not settled yet
           if (want === "refine") refine.noteRefined(now, null, liveBudget(kbps, this.o.fps));
           continue;
         }
         win.encodeMs.push((now - start) * 1000);
-        const kind = r.key ? "key" : r.changed ? "delta" : want === "refine" ? "refine" : want === "keepalive" ? "keepalive" : "delta";
+        // (the helper answers with a key frame by itself when it keeps nothing as old as the base any more)
+        const kind = r.key ? "key" : base !== null ? "recovery" : r.changed ? "delta" : want === "refine" ? "refine" : want === "keepalive" ? "keepalive" : "delta";
+        let frame;
         try {
-          s.sendFrame(this.id, { codec: "h264", kind, width: size[0], height: size[1], captureUs: Math.round(r.time * 1000) }, r.au);
+          frame = s.sendFrame(this.id, { codec: "h264", kind, width: size[0], height: size[1], captureUs: Math.round(r.time * 1000), ...(kind === "recovery" ? { recoveryBase: base } : {}) }, r.au);
         } catch (err) {
           if (s.isClosed) break;
           // not sent: the next picture can't reference it
-          this.log(`a picture was not sent (${err.message}); a key frame next`);
-          this.needKey = true;
+          if (helper.refs && r.number !== null && !r.key) {
+            this.log(`a picture was not sent (${err.message}); the next one skips it`);
+            helper.forget(r.number);
+            if (base !== null && this.recoverBase === null) this.recoverBase = base;
+          } else {
+            this.log(`a picture was not sent (${err.message}); a key frame next`);
+            this.needKey = true;
+          }
           continue;
         }
+        if (r.number !== null) {
+          this.numbers.set(frame, r.number);
+          if (this.numbers.size > NUMBERS_KEPT) this.numbers.delete(this.numbers.keys().next().value);
+        }
+        if (kind === "recovery") {
+          this.mended++;
+          lastRecoveryAt = now;
+        }
         win.bytes += r.au.length;
+        win.largest = Math.max(win.largest, r.au.length);
         lastPictureAt = now;
         lastPictureStart = start;
         if (r.key) {
           this.needKey = false;
+          this.keyFrame = frame;
+          this.keysUnconfirmed++;
           lastKeyAt = now;
+          keyHoldUntil = now + keyTransit(r.au.length, this.kbps);
           win.keys++;
         }
         if (r.changed) win.live++;
@@ -1043,7 +1144,7 @@ class LinkVideo {
         continue;
       }
       now = clock();
-      if (shown) deadline = Math.min(deadline, lastPictureAt + t.keepalive, lastKeyAt + t.keyFloor);
+      if (shown) deadline = Math.min(deadline, lastPictureAt + t.keepalive);
       if (refine.dueAt != null) deadline = Math.min(deadline, refine.dueAt);
       await helper.wait(token, Math.max(2, (deadline - now) * 1000));
     }

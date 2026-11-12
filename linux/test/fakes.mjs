@@ -16,10 +16,11 @@ export const PPS = Buffer.from([0, 0, 0, 1, 0x68, 0xee, 0x3c]);
 export const IDR = Buffer.from([0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00]);
 export const P = Buffer.from([0, 0, 0, 1, 0x41, 0x9a, 0x02]);
 
-export function frameRecord({ key, changed, time = Date.now(), au }) {
-  const head = Buffer.alloc(9);
-  head[0] = (key ? 1 : 0) | (changed ? 2 : 0);
+export function frameRecord({ key, changed, time = Date.now(), au, number = null }) {
+  const head = Buffer.alloc(number === null ? 9 : 13);
+  head[0] = (key ? 1 : 0) | (changed ? 2 : 0) | (number === null ? 0 : 4);
   head.writeDoubleLE(time, 1);
+  if (number !== null) head.writeUInt32BE(number, 9);
   return record("F", Buffer.concat([head, au ?? (key ? Buffer.concat([SPS, PPS, IDR]) : P)]));
 }
 
@@ -170,12 +171,14 @@ export function fakeProcess(onLine = () => {}) {
 /**
  * spawn() for YoyoLinux: the video helper (hello 1280 x 832, a change, a frame per E — a key when asked), xdotool
  * (its lines kept in `xdotool`), ffmpeg (a 4-byte "JPEG"). `screenChanges(n)` makes the running helpers report a change.
+ * `state.refs = true`: the next helpers keep earlier pictures as yoyo-x11video does (the hello's flag, numbered frames,
+ * `I <n>` kept in `forgets`; a picture after forgetting more than the 16 kept is a key frame).
  */
 export function fakeSpawn({ width = 1280, height = 832 } = {}) {
   // `size`: what the next helper's hello says; `noDisplay`: the next helpers can't open it (exit 1 before the hello);
   // `ffmpegMs`: how long a frame capture takes (`ffmpegRunning` / `ffmpegMax`: at once, now / at most)
   // `pointer`: the pointer the next cursor helpers report first (their 'P' after the hello)
-  const state = { xdotool: [], xdotools: [], helpers: [], encodes: [], ffmpegArgs: [], size: [width, height], noDisplay: false, ffmpegMs: 0, ffmpegRunning: 0, ffmpegMax: 0, audioSpawns: [], audioHelpers: [], audioFails: false, clipHelpers: [], clipWrites: [], clipPng: null, clipStart: null, clipRefuse: false, windows: { screen: [width, height], active: 0, windows: [] }, windowsRuns: 0, windowsFail: false, escWatches: [], escFails: false, pointer: { x: 640, y: 416, serial: 7, xhot: 1, yhot: 2, w: 4, h: 4 } };
+  const state = { xdotool: [], xdotools: [], helpers: [], encodes: [], ffmpegArgs: [], size: [width, height], noDisplay: false, ffmpegMs: 0, ffmpegRunning: 0, ffmpegMax: 0, audioSpawns: [], audioHelpers: [], audioFails: false, clipHelpers: [], clipWrites: [], clipPng: null, clipStart: null, clipRefuse: false, windows: { screen: [width, height], active: 0, windows: [] }, windowsRuns: 0, windowsFail: false, escWatches: [], escFails: false, refs: false, forgets: [], pointer: { x: 640, y: 416, serial: 7, xhot: 1, yhot: 2, w: 4, h: 4 } };
   const spawn = (path, args) => {
     if (path.endsWith("yoyo-x11video") && state.noDisplay) {
       const p = fakeProcess();
@@ -189,19 +192,33 @@ export function fakeSpawn({ width = 1280, height = 832 } = {}) {
     if (path.endsWith("yoyo-x11video")) {
       const p = fakeProcess((line, proc) => {
         if (line === "Q") return proc.exit(0);
-        // E <key> <kbps> <crf> [<buf>] (buf: the VBV buffer when kbps is scaled up for the frame-rate cap)
+        const forget = /^I (\d+)$/.exec(line);
+        if (forget && proc.refs) {
+          state.forgets.push(Number(forget[1]));
+          // nothing kept is as old as the picture before it: a key frame next
+          if (proc.number - Number(forget[1]) >= 16) proc.keyNext = true;
+          return;
+        }
+        // E <key> <kbps> <crf> [<buf>] (buf: the VBV buffer in kbit)
         const m = /^E (\d) (\d+) ([\d.]+)(?: (\d+))?$/.exec(line);
         if (!m) return;
-        state.encodes.push({ key: m[1] === "1", kbps: Number(m[2]), crf: Number(m[3]), buf: m[4] != null ? Number(m[4]) : null });
-        proc.stdout.write(frameRecord({ key: m[1] === "1", changed: proc.dirty }));
+        const key = m[1] === "1" || proc.keyNext;
+        proc.keyNext = false;
+        state.encodes.push({ key, kbps: Number(m[2]), crf: Number(m[3]), buf: m[4] != null ? Number(m[4]) : null });
+        proc.stdout.write(frameRecord({ key, changed: proc.dirty, number: proc.refs ? proc.number : null }));
+        proc.number++;
         proc.dirty = false;
       });
       p.args = args;
       p.dirty = true;
+      p.refs = state.refs;
+      p.number = 0;
+      p.keyNext = false;
       p.cursor = args.includes("--cursor");
-      const hello = Buffer.alloc(4);
+      const hello = Buffer.alloc(p.refs ? 5 : 4);
       hello.writeUInt16BE(state.size[0], 0);
       hello.writeUInt16BE(state.size[1], 2);
+      if (p.refs) hello[4] = 2;
       setImmediate(() => {
         p.stdout.write(record("H", hello));
         // the pointer right after the hello (its pixels: the first time this helper sees the serial)

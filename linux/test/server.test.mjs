@@ -14,7 +14,7 @@ import { fakeSpawn, parseParts } from "./fakes.mjs";
 const TOKEN = "f".repeat(64);
 const fake = fakeSpawn();
 const lines = [];
-const svc = new YoyoLinux({ token: TOKEN, name: "Desktop", spawnFn: fake.spawn, logLine: (l) => lines.push(l), audioLingerMs: 150 });
+const svc = new YoyoLinux({ token: TOKEN, name: "Desktop", spawnFn: fake.spawn, logLine: (l) => lines.push(l), audioLingerMs: 150, maxFps: 30 });
 let port;
 
 before(async () => {

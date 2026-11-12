@@ -11,7 +11,8 @@
 //   DISPLAY=:0 node server.mjs --remote <home> [--advertise ip[:port],…] [--direct on|off]
 //                              [--link-port 47820]   # uu Link (UDP, link.mjs): remote access's door
 //                              [--link-rtc-port 47821|off] [--link-stun host:port,…]   # its WebRTC socket (POST /link/rtc)
-//   DISPLAY=:0 node server.mjs --host … --port … --link on --link-home <dir> [--link-port 47820] [--advertise ip[:port],…] < token
+//   DISPLAY=:0 node server.mjs --host … --port … --link on --link-home <dir> [--link-port 47820] [--advertise ip[:port],…]
+//                              [--link-bind ip,…] < token
 //                              # uu Link without remote access: the token's holder is its authority (/link/*, link.mjs)
 //   node server.mjs pair --remote <home>        # a pairing link (and a QR code with qrencode); also devices, remove <id>, disconnect, account [leave]
 //
@@ -24,10 +25,10 @@ import { spawn } from "node:child_process";
 import { timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { networkInterfaces } from "node:os";
+import { availableParallelism, networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { besideServer, hostPlatform } from "./platform.mjs";
+import { besideServer, hostPlatform, maxFpsFor } from "./platform.mjs";
 import { AUDIO, AudioCapture, audioCookie, audioPart } from "./audio.mjs";
 import { Automation, parseAutomation } from "./automation.mjs";
 import { Clipboard, sendClipboardFile } from "./clipboard.mjs";
@@ -41,7 +42,7 @@ import { drawboxes, hitAnswer, maskBoxes, parseCrop, parseHide, parseVisible, pi
 
 /** `/status.app` of this process: "yoyo-linux", or "yoyo-windows" on Windows (platform.mjs). */
 export const APP = hostPlatform().app;
-export const VERSION = "0.10.2";
+export const VERSION = "0.11.0";
 /** The Yoyo Control HTTP API version this speaks (`/status` `api`; +1 only on an incompatible change). */
 export const API = 1;
 /** The one display's id (`/status` displays, `/stream`, `/input`). */
@@ -123,7 +124,7 @@ export class YoyoLinux {
     this.xdotool = xdotool ?? (platform.input === "xdotool" ? "xdotool" : besideServer(platform.input));
     this.ffmpeg = ffmpeg ?? "ffmpeg";
     this.tuning = maxKbps ? limitedTuning(TUNING, Math.min(Math.max(maxKbps, 100), 100_000)) : TUNING;
-    this.maxFps = Math.min(Math.max(maxFps || platform.maxFps || 30, 1), TUNING.maxFPS);
+    this.maxFps = Math.min(Math.max(maxFps || maxFpsFor(platform, availableParallelism()) || 30, 1), TUNING.maxFPS);
     this.log = logLine;
     this.spawn = spawnFn;
     this.size = null;
@@ -951,6 +952,7 @@ export async function startHeadlessLink(svc, argv, { log: logLine = log } = {}) 
     port,
     advertise: list(arg(argv, "--advertise")),
     exempt: list(arg(argv, "--exempt")),
+    bind: list(arg(argv, "--link-bind")),
     log: logLine,
   });
   try {

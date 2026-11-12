@@ -159,6 +159,8 @@ pub struct EndpointConfig {
     pub rtc_stun_servers: Option<Vec<String>>,
     /// rtc answers offer only the external addresses (`addRtcExternalAddr`, STUN), not the interfaces'.
     pub rtc_external_only: Option<bool>,
+    /// Only these local addresses (default: every interface, IPv4 and IPv6).
+    pub bind_ips: Option<Vec<String>>,
 }
 
 #[napi(object)]
@@ -333,6 +335,12 @@ pub async fn bind_endpoint(config: EndpointConfig) -> Result<LinkEndpoint> {
     cfg.port = port;
     cfg.relays = config.relays.unwrap_or_default();
     cfg.portmapper = config.portmapper;
+    cfg.bind_ips = config
+        .bind_ips
+        .unwrap_or_default()
+        .iter()
+        .map(|s| s.parse::<IpAddr>().map_err(|_| invalid(format!("bindIps: {s}"))))
+        .collect::<Result<Vec<_>>>()?;
     if let Some(p) = config.rtc_port {
         let port = u16::try_from(p).map_err(|_| invalid(format!("rtcPort {p}")))?;
         cfg.rtc = Some(core::RtcConfig {

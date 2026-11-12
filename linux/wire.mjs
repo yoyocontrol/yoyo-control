@@ -37,7 +37,8 @@ export function streamPart({ boundary, contentType, body, size, seq, time, kind,
 /**
  * yoyo-x11video's records, from its stdout in chunks split anywhere: `{ type: "H", width, height, timer }` (`timer`:
  * the helper keeps time for the server — `T <ms> <id>` on its stdin, a `{ type: "T", id }` back; yoyo-winvideo), `{ type: "C" }`,
- * `{ type: "F", key, changed, time, au }`, `{ type: "S" }`, `{ type: "P", x, y, serial, xhot, yhot, w, h, visible,
+ * `{ type: "F", key, changed, time, number, au }` (`number`: the picture's, from a helper that keeps earlier pictures —
+ * the hello's `refs` — else null), `{ type: "S" }`, `{ type: "P", x, y, serial, xhot, yhot, w, h, visible,
  * none, pixels? }` (the pointer, `--cursor client`; `pixels`: premultiplied RGBA). A record larger than `max` is a
  * broken helper: throws.
  */
@@ -57,11 +58,16 @@ export class RecordReader {
       const type = String.fromCharCode(this.buf[0]);
       const body = this.buf.subarray(5, 5 + len);
       this.buf = this.buf.subarray(5 + len);
-      if (type === "H" && len >= 4) out.push({ type, width: body.readUInt16BE(0), height: body.readUInt16BE(2), timer: len >= 5 && (body[4] & 1) !== 0 });
+      if (type === "H" && len >= 4) {
+        const flags = len >= 5 ? body[4] : 0;
+        out.push({ type, width: body.readUInt16BE(0), height: body.readUInt16BE(2), timer: (flags & 1) !== 0, refs: (flags & 2) !== 0 });
+      }
       else if (type === "C" || type === "S") out.push({ type });
       else if (type === "T" && len >= 4) out.push({ type, id: body.readUInt32BE(0) });
       else if (type === "F" && len > 9) {
-        out.push({ type, key: (body[0] & 1) !== 0, changed: (body[0] & 2) !== 0, time: body.readDoubleLE(1), au: Buffer.from(body.subarray(9)) });
+        // flag 4: the picture's number (the helper's count of E commands) after the time
+        const numbered = (body[0] & 4) !== 0 && len > 13;
+        out.push({ type, key: (body[0] & 1) !== 0, changed: (body[0] & 2) !== 0, time: body.readDoubleLE(1), number: numbered ? body.readUInt32BE(9) : null, au: Buffer.from(body.subarray(numbered ? 13 : 9)) });
       } else if (type === "P" && len >= 17) {
         const flags = body[16];
         const p = {

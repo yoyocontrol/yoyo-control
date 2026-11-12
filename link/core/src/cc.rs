@@ -38,6 +38,8 @@ struct TargetInner {
     media: Option<uu_link_media::TargetRate>,
     floor_bps: AtomicU64,
     persistent_congestion: AtomicU64,
+    /// The lowest `now − sent` among the packets acked since it was last taken (µs; `u64::MAX`: none).
+    rtt_floor_us: AtomicU64,
 }
 
 impl Default for TargetBitrate {
@@ -53,6 +55,7 @@ impl TargetBitrate {
             media: None,
             floor_bps: AtomicU64::new(FLOOR_TARGET_BPS),
             persistent_congestion: AtomicU64::new(0),
+            rtt_floor_us: AtomicU64::new(u64::MAX),
         }))
     }
 
@@ -63,6 +66,7 @@ impl TargetBitrate {
             media: Some(rate),
             floor_bps: AtomicU64::new(FLOOR_TARGET_BPS),
             persistent_congestion: AtomicU64::new(0),
+            rtt_floor_us: AtomicU64::new(u64::MAX),
         }))
     }
 
@@ -95,6 +99,19 @@ impl TargetBitrate {
     /// How many times a path saw persistent congestion (the rate controller restarts from the floor when it grows).
     pub fn persistent_congestion_events(&self) -> u64 {
         self.0.persistent_congestion.load(Ordering::Relaxed)
+    }
+
+    /// The lowest round trip among the packets acked since the last call (any path's; the selected one carries the
+    /// traffic), `now − sent` as the acks came in: the peer's ack delay is in it, and left out again by taking the
+    /// lowest. None: nothing was acked. The media layer's rate controller tells a queue from clocks running at
+    /// different rates with it (`uu_link_media::RateConfig::rtt_queue_slack`).
+    pub fn take_rtt_floor(&self) -> Option<Duration> {
+        let us = self.0.rtt_floor_us.swap(u64::MAX, Ordering::Relaxed);
+        (us != u64::MAX).then(|| Duration::from_micros(us))
+    }
+
+    fn on_round_trip(&self, rtt: Duration) {
+        self.0.rtt_floor_us.fetch_min((rtt.as_micros() as u64).min(u64::MAX - 1), Ordering::Relaxed);
     }
 
     fn on_persistent_congestion(&self) {
@@ -147,8 +164,9 @@ impl MediaCc {
 }
 
 impl Controller for MediaCc {
-    fn on_ack(&mut self, _now: Instant, _sent: Instant, _bytes: u64, _pn: u64, _app_limited: bool, rtt: &RttEstimator) {
+    fn on_ack(&mut self, now: Instant, sent: Instant, _bytes: u64, _pn: u64, _app_limited: bool, rtt: &RttEstimator) {
         self.srtt = rtt.get();
+        self.target.on_round_trip(now.saturating_duration_since(sent));
     }
 
     fn on_congestion_event(
@@ -196,6 +214,23 @@ impl Controller for MediaCc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_round_trip_floor_is_the_lowest_ack_since_it_was_taken() {
+        // what `MediaCc::on_ack` reports (`now − sent`; noq's `RttEstimator` can't be built here)
+        let target = TargetBitrate::new(DEFAULT_TARGET_BPS);
+        assert_eq!(target.take_rtt_floor(), None);
+        for ms in [30, 25, 6, 28] {
+            target.on_round_trip(Duration::from_millis(ms));
+        }
+        assert_eq!(target.take_rtt_floor(), Some(Duration::from_millis(6)));
+        assert_eq!(target.take_rtt_floor(), None);
+        // every path's controller reports into the session's one target
+        let other_path = target.clone();
+        other_path.on_round_trip(Duration::from_millis(40));
+        target.on_round_trip(Duration::from_millis(9));
+        assert_eq!(target.take_rtt_floor(), Some(Duration::from_millis(9)));
+    }
 
     impl MediaCcFactory {
         fn into_arc_build(self) -> Box<dyn Controller> {

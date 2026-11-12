@@ -162,6 +162,10 @@ node server.mjs account --remote ~/.yoyo-remote       # 在不在 Yoyo Control �
   `control.release` = `POST /control`，每次变化所有会话收到 `control`。
 - RPC：别的请求（`/status`、`/events`、剪贴板…）经同一张远程路由表进现有路由，流式的照样流式。
 - 日志：Link 核心的 `link[server]:` / `link[phone]:` 每 10 s 一行、会话开关、路径变化，都进 stderr。还没有 Mac 那样的逐帧跟踪文件。
+- 这台机器的时钟：`link: this computer's clock ran 4.2 % slow …` = 系统时钟正被对时服务大幅拉着走（正常的修正远不到 0.1 %）。
+  最常见的是两个对时服务管同一个时钟，比如 WSL2 里开着 systemd 时 `systemd-timesyncd` 和 WSL 自己的 `chronyd`
+  （`sudo systemctl disable --now systemd-timesyncd`，WSL 本来就跟着主机走）。码率控制不会因此把码率砍到底（`docs/LINK.md`「媒体」），
+  但帧和声音的时间戳也跟着偏，时钟还是该修。容器用的是主机内核的时钟：要在主机上修。
 - 浏览器（`docs/LINK.md`「WebRTC」）：同一个监听另开一个 WebRTC 的 UDP 端口（`--link-rtc-port`，缺省 Link 端口 + 1，`off` 关掉；
   `YOYO_LINK_RTC_PORT` 同），`--advertise` 的主机也在这个端口上给出，路由器同样映射它（外网端口记在 `rtcPublicPort`）；`--link-stun host:port`
   让答复多一个 STUN 问来的公网地址。offer 经令牌监听上的 `POST /link/rtc` 进来（`docs/LOCAL-API.md`「浏览器的 Link」），会话和手机的一样

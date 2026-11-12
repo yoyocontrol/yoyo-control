@@ -42,7 +42,7 @@ import { drawboxes, hitAnswer, maskBoxes, parseCrop, parseHide, parseVisible, pi
 
 /** `/status.app` of this process: "yoyo-linux", or "yoyo-windows" on Windows (platform.mjs). */
 export const APP = hostPlatform().app;
-export const VERSION = "0.11.0";
+export const VERSION = "0.11.1";
 /** The Yoyo Control HTTP API version this speaks (`/status` `api`; +1 only on an incompatible change). */
 export const API = 1;
 /** The one display's id (`/status` displays, `/stream`, `/input`). */

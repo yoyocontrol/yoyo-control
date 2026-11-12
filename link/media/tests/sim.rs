@@ -296,3 +296,68 @@ fn long_bottleneck_still_backs_off() {
         }
     }
 }
+
+/// A virtual machine's clock being slewed (two time services fighting over it, as measured on a WSL2 host): the
+/// client's clock runs 4–7 % fast against the server's for seconds at a time, then 2 % slow.
+fn slewed(mut s: Scenario) -> Scenario {
+    let secs = Micros::from_secs;
+    s.client_clock = vec![(secs(4), 1.072), (secs(8), 1.057), (secs(8), 1.038), (secs(3), 0.978), (secs(4), 1.042)];
+    s
+}
+
+#[test]
+fn clocks_at_different_rates_do_not_cut_the_rate() {
+    // a clean LAN: nothing to cut for
+    let mut s = slewed(scrolling(LinkProfile::lan(), 31));
+    s.duration = Micros::from_secs(40);
+    let r = run(&s);
+    show(&r);
+    integrity(&r);
+    // what one-way delay alone makes of it: 50 ms a second of "queue", the rate at the floor within seconds
+    let mut blind = s.clone();
+    blind.rtt_floor = false;
+    let b = run(&blind);
+    show(&b);
+    assert!(b.rate_settled_mbps < 1.0, "without round trips the slew reads as a queue: {b:?}");
+    // the same path with one clock
+    let mut steady = s.clone();
+    steady.client_clock.clear();
+    let st = run(&steady);
+    show(&st);
+    assert_eq!(r.rate_decreases.0, 0, "{:?}", r.rate_decreases);
+    assert!(
+        r.rate_settled_mbps > 0.9 * st.rate_settled_mbps,
+        "{:.2} against {:.2}",
+        r.rate_settled_mbps,
+        st.rate_settled_mbps
+    );
+    assert!(r.fps_shown > 0.95 * st.fps_shown, "{:.1} against {:.1} fps", r.fps_shown, st.fps_shown);
+}
+
+#[test]
+fn a_real_bottleneck_is_still_found_with_clocks_at_different_rates() {
+    // 6 Mbps under a 60 fps scroll: the queue is in the round trip too
+    let p = LinkProfile::lan().with_rate("lan 6M", 6_000_000);
+    let mut s = slewed(scrolling(p.clone(), 32));
+    s.duration = Micros::from_secs(40);
+    let r = run(&s);
+    show(&r);
+    integrity(&r);
+    let mut steady = scrolling(p, 32);
+    steady.duration = s.duration;
+    let st = run(&steady);
+    show(&st);
+    assert!(r.rate_settled_mbps < 6.0, "above the bottleneck: {:.2} Mbps", r.rate_settled_mbps);
+    assert!(
+        r.rate_settled_mbps > 0.6 * st.rate_settled_mbps,
+        "{:.2} against {:.2}",
+        r.rate_settled_mbps,
+        st.rate_settled_mbps
+    );
+    assert!(
+        r.queue_p95_after5_ms < st.queue_p95_after5_ms + 40.0,
+        "queue {:.0} against {:.0} ms",
+        r.queue_p95_after5_ms,
+        st.queue_p95_after5_ms
+    );
+}

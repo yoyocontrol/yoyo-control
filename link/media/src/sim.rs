@@ -693,6 +693,11 @@ pub struct Scenario {
     /// The sender asks for a recovery frame with every NACK ([`crate::VideoSendConfig::recovery_on_nack`]);
     /// off by default, like the crate.
     pub recovery_on_nack: bool,
+    /// The client's clock against the server's: `(for this long, at this rate)` stretches, repeated (empty: the
+    /// same clock). A virtual machine whose clock is being slewed runs several percent off for seconds at a time.
+    pub client_clock: Vec<(Micros, f64)>,
+    /// The transport reports its acks' round trips ([`ServerMedia::set_rtt_floor`]): QUIC does.
+    pub rtt_floor: bool,
 }
 
 impl Scenario {
@@ -705,7 +710,58 @@ impl Scenario {
             content: Content::Mixed,
             network,
             recovery_on_nack: false,
+            client_clock: Vec::new(),
+            rtt_floor: true,
         }
+    }
+}
+
+/// The client's clock in a run: the simulation's time through [`Scenario::client_clock`]'s stretches.
+struct ClientClock {
+    stretches: Vec<(Micros, f64)>,
+    next: usize,
+    /// Where the current stretch began (true, client), its rate and its end (true).
+    from: (Micros, Micros),
+    rate: f64,
+    until: Micros,
+}
+
+impl ClientClock {
+    fn new(stretches: &[(Micros, f64)], start: Micros) -> ClientClock {
+        let until = if stretches.is_empty() { Micros(u64::MAX) } else { start };
+        ClientClock { stretches: stretches.to_vec(), next: 0, from: (start, start), rate: 1.0, until }
+    }
+
+    fn advance(&mut self, now: Micros) {
+        while now >= self.until {
+            let at = self.until;
+            self.from = (at, self.at(at));
+            let (len, rate) = self.stretches[self.next % self.stretches.len()];
+            self.next += 1;
+            self.rate = rate;
+            self.until = at + len;
+        }
+    }
+
+    fn at(&self, now: Micros) -> Micros {
+        self.from.1 + (now - self.from.0).mul_f64(self.rate)
+    }
+
+    /// The client's time at `now` (calls go forward in time).
+    fn now(&mut self, now: Micros) -> Micros {
+        self.advance(now);
+        self.at(now)
+    }
+
+    /// The simulation's time of the client's `t` (a timer; within the current stretch).
+    fn true_time(&self, t: Micros) -> Micros {
+        if self.stretches.is_empty() {
+            return t;
+        }
+        if t <= self.from.1 {
+            return self.from.0;
+        }
+        self.from.0 + (t - self.from.1).mul_f64(1.0 / self.rate) + Micros(1)
     }
 }
 
@@ -864,6 +920,7 @@ pub fn run(s: &Scenario) -> Report {
     server.open_audio(1);
     client.open_audio(1);
     server.set_network(now, s.network);
+    let mut clock = ClientClock::new(&s.client_clock, start);
     let mut down = Link::new(s.profile.clone(), s.seed.wrapping_mul(31).wrapping_add(1), start);
     let mut up = Link::new(s.profile.clone(), s.seed.wrapping_mul(31).wrapping_add(2), start);
     let mut pacer = QuicPacer::new(start);
@@ -890,6 +947,8 @@ pub fn run(s: &Scenario) -> Report {
     let base_rtt = s.profile.delay + s.profile.delay;
     let mut srtt = base_rtt;
     let mut next_rtt = start;
+    let mut next_floor = start + Micros::from_millis(25);
+    let mut acks: std::collections::BinaryHeap<std::cmp::Reverse<(Micros, Micros)>> = Default::default();
     let mut next_audio = start;
     let mut next_input = start + Micros::from_millis(100);
     let mut next_cursor = start;
@@ -929,11 +988,12 @@ pub fn run(s: &Scenario) -> Report {
         let target = server.target_rate().bps();
         // the timers as armed now (sans-IO convention: fire handle_timeout when they pass)
         let server_timer = server.poll_timeout(now);
-        let client_timer = client.poll_timeout(now);
+        let client_timer = client.poll_timeout(clock.now(now)).map(|t| clock.true_time(t));
         let mut t = end;
         for c in [
             Some(enc.next_due),
             Some(next_rtt),
+            s.rtt_floor.then_some(next_floor),
             Some(next_audio),
             Some(next_input),
             Some(next_cursor),
@@ -963,7 +1023,7 @@ pub fn run(s: &Scenario) -> Report {
 
         // arrivals
         while let Some(d) = down.poll(now) {
-            let _ = client.handle_datagram(now, &d);
+            let _ = client.handle_datagram(clock.now(now), &d);
         }
         while let Some(d) = up.poll(now) {
             let _ = server.handle_datagram(now, &d);
@@ -971,18 +1031,32 @@ pub fn run(s: &Scenario) -> Report {
         if server_timer.is_some_and(|t| t <= now) || server.poll_timeout(now).is_some_and(|t| t <= now) {
             server.handle_timeout(now);
         }
-        if client_timer.is_some_and(|t| t <= now) || client.poll_timeout(now).is_some_and(|t| t <= now) {
-            client.handle_timeout(now);
+        let cnow = clock.now(now);
+        if client_timer.is_some_and(|t| t <= now) || client.poll_timeout(cnow).is_some_and(|t| t <= cnow) {
+            client.handle_timeout(cnow);
         }
 
         // transport RTT (QUIC-like smoothed): both paths + the downlink queue
+        // the acks' own round trips (`now − sent` of every acked datagram): the lowest of those that came back
+        // since, handed over every 25 ms (in a session: with each feedback datagram)
+        if s.rtt_floor && now >= next_floor {
+            next_floor = now + Micros::from_millis(25);
+            let mut floor: Option<Micros> = None;
+            while acks.peek().is_some_and(|a| a.0.0 <= now) {
+                let rtt = acks.pop().unwrap().0.1;
+                floor = Some(floor.map_or(rtt, |f| f.min(rtt)));
+            }
+            if let Some(f) = floor {
+                server.set_rtt_floor(now, f);
+            }
+        }
         if now >= next_rtt {
             next_rtt = now + Micros::from_millis(50);
             let sample =
                 down.path_delay(now) + up.path_delay(now) + down.queue_delay(now) + s.profile.jitter.mul_f64(1.0 / 3.0);
             srtt = Micros(srtt.0 - srtt.0 / 8 + sample.0 / 8);
             server.set_rtt(now, srtt);
-            client.set_rtt(now, srtt);
+            client.set_rtt(cnow, srtt);
         }
         if now >= next_rate_sample {
             next_rate_sample = now + Micros::from_millis(100);
@@ -1046,7 +1120,9 @@ pub fn run(s: &Scenario) -> Report {
                         gaps_ms.push((now - at).as_millis_f64());
                     }
                     last_shown = Some((f.frame, now));
-                    latencies.push((f.delivered_at - info.at).as_millis_f64());
+                    // `delivered_at` is on the client's clock
+                    let delivered = if s.client_clock.is_empty() { f.delivered_at } else { now };
+                    latencies.push((delivered - info.at).as_millis_f64());
                     if info.scroll {
                         scroll_kbit.push(info.bytes as f64 * 8.0 / 1000.0);
                     }
@@ -1109,7 +1185,7 @@ pub fn run(s: &Scenario) -> Report {
                         }
                     }
                 };
-                match client.send_input(now, kind, json) {
+                match client.send_input(cnow, kind, json) {
                     Ok(seq) => {
                         truth.sent_at.insert(seq, (now, path, kind));
                         if kind == InputKind::Discrete {
@@ -1141,12 +1217,18 @@ pub fn run(s: &Scenario) -> Report {
         while let Some(d) = pacer.poll(now, target, srtt) {
             let size = d.len();
             let acked = match down.send(now, d) {
-                Some(arrival) => arrival + s.profile.delay + Micros::from_millis(5),
+                Some(arrival) => {
+                    let acked = arrival + s.profile.delay + Micros::from_millis(5);
+                    if s.rtt_floor {
+                        acks.push(std::cmp::Reverse((acked, acked - now)));
+                    }
+                    acked
+                }
                 None => now + srtt.mul_f64(1.125),
             };
             pacer.sent(size + s.profile.overhead, acked);
         }
-        while let Some(d) = client.poll_transmit(now) {
+        while let Some(d) = client.poll_transmit(cnow) {
             up_bytes += (d.len() + s.profile.overhead) as u64;
             up.send(now, d);
         }
@@ -1163,7 +1245,7 @@ pub fn run(s: &Scenario) -> Report {
         .filter(|t| t.0 >= enc.stop_at - Micros::from_secs(10) && t.0 < enc.stop_at)
         .map(|t| t.1 as f64)
         .collect();
-    let cs = client.stats(now);
+    let cs = client.stats(clock.now(now));
     let rx = client.video_stats(1).unwrap_or_default();
     let tx = server.video_stats(1).unwrap_or_default();
     let cap = s.profile.rate_bps.unwrap_or(u64::MAX);

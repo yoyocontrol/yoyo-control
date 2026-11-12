@@ -166,6 +166,14 @@ impl ServerMedia {
         self.rate.set_rtt(rtt);
     }
 
+    /// Optional: the lowest round trip among the transport's acks since the last call (QUIC's `now − sent` of every
+    /// acked packet; every 100 ms or so, only when there were acks). It bounds the queue the rate controller reads
+    /// from one-way delays, which two clocks running at different rates fake ([`RateConfig::rtt_queue_slack`]).
+    /// Not for a round trip probed now and then (ICE's).
+    pub fn set_rtt_floor(&mut self, now: Micros, rtt: Micros) {
+        self.rate.set_rtt_floor(now, rtt);
+    }
+
     /// The client's network profile (path class + interface + Low Data Mode).
     pub fn set_network(&mut self, now: Micros, profile: NetworkProfile) {
         self.rate.set_profile(now, profile);

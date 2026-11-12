@@ -152,6 +152,18 @@ pub struct RateConfig {
     /// too. The path's jitter — the median spread of one-way delays within 100 ms over `base_window`, which a
     /// queue building over seconds hardly widens — raises both thresholds to `jitter_queue ×` it.
     pub jitter_queue: f64,
+    /// One-way delay is read off two clocks, the sender's and the receiver's. When they run at different rates
+    /// (a virtual machine's clock being slewed: several percent, changing every few seconds) it grows by tens of ms
+    /// a second with no queue at all — and a controller that believes it cuts the rate to the floor on an empty
+    /// path. A queue on the way there is in every round trip as well, and the round trip is measured on one clock:
+    /// with round-trip floors ([`RateController::set_rtt_floor`]) the round trip has room for a queue of its lowest
+    /// floor of the last `rtt_queue_window` above its lowest of `base_window`, plus `rtt_queue_slack` (or how far
+    /// the floors usually sit above their lowest, if that is more). One-way delays claiming more than
+    /// `rtt_queue_margin` beyond that are the clocks: the standing queue is then what the round trip says. Within
+    /// the margin the one-way delays stand as they are, so a path with steady clocks is read as before.
+    pub rtt_queue_slack: Micros,
+    pub rtt_queue_margin: Micros,
+    pub rtt_queue_window: Micros,
 }
 
 impl Default for RateConfig {
@@ -203,6 +215,9 @@ impl Default for RateConfig {
             standing_queue: Micros::from_millis(30),
             standing_hold: Micros::from_millis(250),
             jitter_queue: 1.5,
+            rtt_queue_slack: Micros::from_millis(5),
+            rtt_queue_margin: Micros::from_millis(10),
+            rtt_queue_window: Micros::from_millis(100),
         }
     }
 }
@@ -468,6 +483,9 @@ pub struct RateController {
     trend: Trendline,
     capacity: LinkCapacity,
     rtt: Micros,
+    /// Round-trip floors over `base_window`: (when, the lowest round trip of the acks since the one before), on
+    /// the sender's clock.
+    rtts: VecDeque<(Micros, Micros)>,
     last_update: Option<Micros>,
     last_decrease: Option<Micros>,
     last_key: Option<Micros>,
@@ -524,6 +542,7 @@ impl RateController {
             inter: InterArrival::default(),
             capacity: LinkCapacity::default(),
             rtt: Micros::from_millis(100),
+            rtts: VecDeque::new(),
             last_update: None,
             last_decrease: None,
             last_key: None,
@@ -613,6 +632,18 @@ impl RateController {
 
     pub fn set_rtt(&mut self, rtt: Micros) {
         self.rtt = rtt.max(Micros(1000));
+    }
+
+    /// A round-trip floor: the lowest round trip among the transport's acks since the last call (QUIC's
+    /// `now − sent` of every acked packet; before each feedback, when there were acks). The lowest of a stretch
+    /// leaves delayed acks out and follows a queue within that stretch, which a smoothed round trip does not. It
+    /// tells a queue from clocks running at different rates ([`RateConfig::rtt_queue_slack`]). Not for a round
+    /// trip probed now and then (ICE's): a stale value would hide a real queue.
+    pub fn set_rtt_floor(&mut self, now: Micros, rtt: Micros) {
+        self.rtts.push_back((now, rtt));
+        while self.rtts.front().is_some_and(|r| now - r.0 > self.cfg.base_window) {
+            self.rtts.pop_front();
+        }
     }
 
     /// A (new) network profile; a lower cap steps the rate down at once.
@@ -866,12 +897,38 @@ impl RateController {
         rate.max(1.1 * self.target) as u64
     }
 
-    /// The standing queue: lowest one-way delay over the last `queue_window` − lowest over `base_window`.
+    /// The standing queue: lowest one-way delay over the last `queue_window` − lowest over `base_window`; what the
+    /// round trip has room for instead, when the one-way delays claim clearly more ([`RateConfig::rtt_queue_slack`]).
     pub fn queue_delay(&self) -> Option<Micros> {
+        let q = self.owd_queue()?;
+        // the one-way delays claim clearly more than the round trip has room for: the clocks, not a queue
+        Some(self.rtt_queue().filter(|&r| q > r + self.cfg.rtt_queue_margin).unwrap_or(q))
+    }
+
+    /// The standing queue as the one-way delays have it (two clocks).
+    fn owd_queue(&self) -> Option<Micros> {
         let newest = self.owd.back()?.0;
         let base = self.owd.iter().map(|b| b.1).min()?;
         let recent = self.owd.iter().rev().take_while(|b| newest - b.0 < self.cfg.queue_window).map(|b| b.1).min()?;
         Some(Micros((recent - base).max(0) as u64))
+    }
+
+    /// The most the round trip (one clock) allows the standing queue to be: the lowest floor of the last
+    /// `rtt_queue_window` − the lowest of `base_window`, plus a slack — `rtt_queue_slack`, or how far the floors
+    /// usually sit above their lowest (their median: on a path whose delay wanders the lowest round trip is rarer
+    /// than the lowest one-way delay, both directions have to be at their best at once). None without round-trip
+    /// floors, or when the newest is older than a second.
+    fn rtt_queue(&self) -> Option<Micros> {
+        let at = self.rtts.back()?.0;
+        if self.last_update.is_some_and(|t| t > at + Micros::from_secs(1)) {
+            return None;
+        }
+        let recent = self.rtts.iter().rev().take_while(|r| at - r.0 < self.cfg.rtt_queue_window).map(|r| r.1).min()?;
+        let mut floors: Vec<Micros> = self.rtts.iter().map(|r| r.1).collect();
+        let mid = floors.len() / 2;
+        let median = *floors.select_nth_unstable(mid).1;
+        let base = *floors.iter().min()?;
+        Some(recent - base + self.cfg.rtt_queue_slack.max(median - base))
     }
 
     fn content_limited(&mut self, now: Micros) -> bool {
@@ -1318,6 +1375,92 @@ mod tests {
         let cap = c.capacity_bps().unwrap();
         assert!(cap > 1_600_000 && cap <= 2_100_000, "{cap}");
         assert!(min_after_burst >= 1_450_000, "{min_after_burst}");
+    }
+
+    /// 8 s of an empty path whose receiver clock runs 5 % fast: one-way delay grows 50 ms a second. Feedback
+    /// comes back 40 ms after each send; `floor`: the acks' round trip, if the transport reports it.
+    fn slewed(c: &mut RateController, floor: Option<Micros>) {
+        let (mut t, mut tseq) = (Micros::ZERO, 0);
+        while t < ms(8000) {
+            let delay = ms(20) + t.mul_f64(0.05);
+            let mut r = Vec::new();
+            for _ in 0..9 {
+                c.on_sent(t, 1200);
+                r.push(PacketResult { tseq, send_time: t, size: 1200, arrival: Some(t + delay) });
+                tseq += 1;
+            }
+            if let Some(f) = floor {
+                c.set_rtt_floor(t + ms(40), f);
+            }
+            c.on_feedback(t + ms(40), &r);
+            t += ms(25);
+        }
+    }
+
+    #[test]
+    fn clocks_at_different_rates_are_not_a_queue() {
+        // one-way delay alone: a queue growing without end, the rate at the floor
+        let mut blind = RateController::new(RateConfig::default());
+        blind.set_rtt(ms(40));
+        slewed(&mut blind, None);
+        assert!(blind.decreases().0 >= 3, "{:?}", blind.decreases());
+        assert!(blind.target_bps() < 1_000_000, "{}", blind.target_bps());
+        // the round trip never moved: no queue, no decrease
+        let mut c = RateController::new(RateConfig::default());
+        c.set_rtt(ms(40));
+        slewed(&mut c, Some(ms(40)));
+        assert_eq!(c.decreases().0, 0, "{:?}", c.decreases());
+        assert!(c.target_bps() >= 3_500_000, "{}", c.target_bps());
+        assert!(c.queue_delay().unwrap() <= ms(5), "{:?}", c.queue_delay());
+    }
+
+    /// 1 s clean at 20 ms one way, then 2 s at a flat 70 ms while sending at the target; `floor(t)`: the acks'
+    /// round trip at `t`, if reported then.
+    fn full_queue(c: &mut RateController, floor: impl Fn(Micros) -> Option<Micros>) {
+        let (mut t, mut tseq) = (Micros::ZERO, 0);
+        while t < ms(3000) {
+            let delay = if t < ms(1000) { ms(20) } else { ms(70) };
+            let mut r = Vec::new();
+            for _ in 0..9 {
+                c.on_sent(t, 1200);
+                r.push(PacketResult { tseq, send_time: t, size: 1200, arrival: Some(t + delay) });
+                tseq += 1;
+            }
+            if let Some(f) = floor(t) {
+                c.set_rtt_floor(t + delay, f);
+            }
+            c.on_feedback(t + delay, &r);
+            t += ms(25);
+        }
+    }
+
+    #[test]
+    fn a_queue_the_round_trip_has_too_is_a_queue() {
+        let mut c = RateController::new(RateConfig::default());
+        c.set_rtt(ms(80));
+        full_queue(&mut c, |t| Some(if t < ms(1000) { ms(40) } else { ms(90) }));
+        assert!(c.decreases().0 >= 1, "{:?}", c.decreases());
+        assert!(c.queue_delay().unwrap() >= ms(45));
+    }
+
+    #[test]
+    fn a_wandering_round_trip_leaves_the_queue_as_read() {
+        // the way back wanders between 20 and 50 ms with no pattern; the queue's 50 ms come on top
+        let mut c = RateController::new(RateConfig::default());
+        c.set_rtt(ms(80));
+        full_queue(&mut c, |t| Some(ms(40 + (t.0 / 25_000 * 7) % 31 + if t < ms(1000) { 0 } else { 50 })));
+        assert!(c.decreases().0 >= 1, "{:?}", c.decreases());
+        assert!(c.queue_delay().unwrap() >= ms(45));
+    }
+
+    #[test]
+    fn round_trips_gone_stale_say_nothing() {
+        // floors for the first half second only (the acks stopped coming through this path's reports)
+        let mut c = RateController::new(RateConfig::default());
+        c.set_rtt(ms(80));
+        full_queue(&mut c, |t| (t < ms(500)).then_some(ms(40)));
+        assert!(c.decreases().0 >= 1, "{:?}", c.decreases());
+        assert!(c.queue_delay().unwrap() >= ms(45));
     }
 
     #[test]

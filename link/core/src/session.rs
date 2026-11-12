@@ -767,7 +767,7 @@ async fn datagram_reader(s: Arc<Inner>) {
         match datagram::parse_header(&d) {
             Some(1..=5) => {
                 s.mux.counters.received.fetch_add(1, Ordering::Relaxed);
-                if !s.media.handle_datagram(&d) {
+                if !s.media.handle_datagram(&d, || s.target.take_rtt_floor()) {
                     s.mux.counters.drop_one();
                 }
             }
@@ -793,6 +793,8 @@ async fn monitor(s: Arc<Inner>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_stats = Instant::now();
     let mut last_log = Instant::now();
+    let mut clock = crate::clock::SlewWatch::default();
+    clock.check();
     let mut congestion_seen = 0;
     let closed = conn.closed();
     tokio::pin!(closed);
@@ -828,6 +830,7 @@ async fn monitor(s: Arc<Inner>) {
                 if now.duration_since(last_log) >= LOG_EVERY {
                     last_log = now;
                     s.log_stats();
+                    clock.check();
                 }
             }
         }

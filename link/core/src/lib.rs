@@ -7,6 +7,7 @@
 
 pub mod binding;
 pub mod cc;
+mod clock;
 pub mod datagram;
 pub mod endpoint;
 pub mod error;

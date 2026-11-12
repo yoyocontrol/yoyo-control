@@ -6,7 +6,7 @@
 use std::{
     sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -43,7 +43,50 @@ pub(crate) struct Driver {
     used: AtomicBool,
     /// The speed test running on this session (docs/LINK.md「测速」). Lock order: the engine, then this.
     pub(crate) probe: Mutex<Option<probe::Slot>>,
+    /// When the server's engine last got a round-trip floor (the driver's clock, µs).
+    floor_at: AtomicU64,
+    /// A test's clock ([`TEST_CLOCK`]).
+    slew: Option<Slew>,
 }
+
+/// A test hook (docs/LINK.md「测试工具」): `UU_LINK_TEST_CLOCK=4:1.07,8:1.04,3:0.98` runs the media clock of every
+/// session of this process at those rates for that many seconds each, in turn and over again — a virtual machine's
+/// clock being slewed, which the other side's rate controller has to tell from a queue.
+const TEST_CLOCK: &str = "UU_LINK_TEST_CLOCK";
+
+/// `(seconds, rate)` stretches, repeated.
+struct Slew(Vec<(f64, f64)>);
+
+impl Slew {
+    fn from_env() -> Option<Slew> {
+        let v = std::env::var(TEST_CLOCK).ok()?;
+        let stretches: Vec<(f64, f64)> = v
+            .split(',')
+            .filter_map(|s| {
+                let (len, rate) = s.split_once(':')?;
+                Some((len.trim().parse().ok()?, rate.trim().parse().ok()?))
+            })
+            .filter(|&(len, rate): &(f64, f64)| len > 0.0 && rate > 0.1 && rate < 10.0)
+            .collect();
+        (!stretches.is_empty()).then_some(Slew(stretches))
+    }
+
+    /// The clock's time after `real` seconds.
+    fn at(&self, real: f64) -> f64 {
+        let (cycle, cycle_clock) = self.0.iter().fold((0.0, 0.0), |a, s| (a.0 + s.0, a.1 + s.0 * s.1));
+        let mut left = real % cycle;
+        let mut t = (real / cycle).floor() * cycle_clock;
+        for &(len, rate) in &self.0 {
+            t += left.min(len) * rate;
+            left -= left.min(len);
+        }
+        t
+    }
+}
+
+/// The transport's ack round trips go to the server's engine as the lowest of a stretch at least this long (a
+/// delayed ack is rarely the only one in 20 ms of traffic).
+const RTT_FLOOR_EVERY: Micros = Micros::from_millis(20);
 
 impl Driver {
     pub(crate) fn new(engine: Engine) -> Driver {
@@ -59,15 +102,25 @@ impl Driver {
             client_rx: tokio::sync::Mutex::new(client_rx),
             used: AtomicBool::new(false),
             probe: Mutex::new(None),
+            floor_at: AtomicU64::new(0),
+            slew: Slew::from_env(),
         }
     }
 
     pub(crate) fn now(&self) -> Micros {
-        Micros(self.epoch.elapsed().as_micros() as u64)
+        let real = self.epoch.elapsed();
+        match &self.slew {
+            Some(s) => Micros((s.at(real.as_secs_f64()) * 1e6) as u64),
+            None => Micros(real.as_micros() as u64),
+        }
     }
 
     fn instant(&self, t: Micros) -> Instant {
-        self.epoch + Duration::from_micros(t.0)
+        match &self.slew {
+            // early rather than late (the loop asks again): the fastest rate a test may give
+            Some(_) => Instant::now() + Duration::from_micros(t.0.saturating_sub(self.now().0) / 10),
+            None => self.epoch + Duration::from_micros(t.0),
+        }
     }
 
     /// Runs `f` on the engine, then wakes the driver (there may be datagrams or events now).
@@ -95,10 +148,21 @@ impl Driver {
     }
 
     /// A datagram of channels 1–5 from the peer. False when the engine refused it (malformed / wrong channel).
-    pub(crate) fn handle_datagram(&self, d: &[u8]) -> bool {
+    /// `rtt_floor`: the transport's lowest ack round trip since it was last taken (QUIC's; asked for when a floor is
+    /// due, `RTT_FLOOR_EVERY`) — given to the server's engine first, so the feedback in `d` is read with it.
+    pub(crate) fn handle_datagram(&self, d: &[u8], rtt_floor: impl FnOnce() -> Option<Duration>) -> bool {
         self.used.store(true, Ordering::Relaxed);
         self.with(|e, now| match e {
-            Engine::Server(s) => s.handle_datagram(now, d).is_ok(),
+            Engine::Server(s) => {
+                let last = self.floor_at.load(Ordering::Relaxed);
+                if now.0 >= last + RTT_FLOOR_EVERY.0
+                    && let Some(f) = rtt_floor()
+                {
+                    self.floor_at.store(now.0, Ordering::Relaxed);
+                    s.set_rtt_floor(now, Micros(f.as_micros() as u64));
+                }
+                s.handle_datagram(now, d).is_ok()
+            }
             Engine::Client(c) => c.handle_datagram(now, d).is_ok(),
         })
     }

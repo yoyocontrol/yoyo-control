@@ -904,6 +904,9 @@ pub async fn bind_endpoint(config: EndpointConfig) -> Result<Arc<LinkEndpoint>> 
             cooldown: Duration::from_millis(g.cooldown_ms),
             max_sessions: g.max_sessions as usize,
             max_unauthenticated: g.max_unauthenticated as usize,
+            // (not a setting of the bindings: the core's default, 2 per address)
+            max_unauthenticated_per_ip: core::GuardConfig::default().max_unauthenticated_per_ip,
+            max_handshaking: core::GuardConfig::default().max_handshaking,
             exempt,
             exempt_loopback: true,
         };

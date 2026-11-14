@@ -439,7 +439,7 @@ async fn media() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guard() {
     let guard =
-        GuardConfig { max_unauthenticated: 2, failure_limit: 2, exempt_loopback: false, ..GuardConfig::default() };
+        GuardConfig { max_unauthenticated: 2, failure_limit: 1, exempt_loopback: false, ..GuardConfig::default() };
     let s = server(guard).await;
     let offer = |n: u8| {
         // an offer from a client that will never connect: its own SDP is enough
@@ -462,18 +462,35 @@ async fn guard() {
             r.err().unwrap()
         }
     };
-    // two pending offers fill the unauthenticated slots
+    // two pending offers fill the WebRTC pool (checked, under their signaling request's address)
     assert!(matches!(offer(1).await, LinkError::Connect(_)));
     assert!(matches!(offer(1).await, LinkError::Connect(_)));
     assert_eq!(s.ep.guard().counts(), (2, 2));
+    // a third is refused (Busy): an offer is never sent away (it waits seconds for ICE, DTLS and SCTP)
     match offer(2).await {
         LinkError::Denied { code: DenyCode::Busy, .. } => {}
         other => panic!("{other:?}"),
     }
-    // they time out (no ICE within 10 s): two failures for 198.51.100.1, which is now blocked
+    assert_eq!(s.ep.guard().counts(), (2, 2));
+    // QUIC still gets in: offers have their own pool
+    let quic =
+        uu_link::DialTarget { id: s.ep.id(), relays: vec![], direct: vec![format!("127.0.0.1:{}", s.ep.port())] };
+    let q = client().await.dial(&quic, &hello("good-q", "q"), &DialOptions::default()).await;
+    assert!(q.is_ok(), "{q:?}");
+    let qs = tokio::time::timeout(Duration::from_secs(5), s.listener.accept()).await.unwrap().unwrap();
+    drop((q, qs));
+    // the two time out (no ICE within 10 s): a WebRTC failure each, and with a limit of 1 198.51.100.1 is blocked —
+    // for WebRTC only
     tokio::time::sleep(Duration::from_millis(10_800)).await;
     assert_eq!(s.ep.guard().counts(), (0, 0));
-    assert!(s.ep.guard().is_blocked("198.51.100.1".parse().unwrap()));
+    let g = s.ep.guard();
+    let one: IpAddr = "198.51.100.1".parse().unwrap();
+    assert!(g.is_blocked_as(uu_link::guard::Kind::WebRtc, &g.source_of(one)));
+    assert!(!g.is_blocked(one), "QUIC from it is not blocked");
+    assert!(
+        !g.is_blocked_as(uu_link::guard::Kind::WebRtc, &g.source_of("198.51.100.2".parse().unwrap())),
+        "refused: no failure"
+    );
     match offer(1).await {
         LinkError::Denied { code: DenyCode::RateLimited, .. } => {}
         other => panic!("{other:?}"),

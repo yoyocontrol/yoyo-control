@@ -363,6 +363,9 @@ pub async fn bind_endpoint(config: EndpointConfig) -> Result<LinkEndpoint> {
             cooldown: g.cooldown_ms.map(|m| Duration::from_millis(m as u64)).unwrap_or(d.cooldown),
             max_sessions: g.max_sessions.map(|m| m as usize).unwrap_or(d.max_sessions),
             max_unauthenticated: g.max_unauthenticated.map(|m| m as usize).unwrap_or(d.max_unauthenticated),
+            // (not a setting of the bindings: the core's default, 2 per address)
+            max_unauthenticated_per_ip: core::GuardConfig::default().max_unauthenticated_per_ip,
+            max_handshaking: core::GuardConfig::default().max_handshaking,
             exempt,
             exempt_loopback: true,
         };

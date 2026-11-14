@@ -38,6 +38,12 @@ impl Authenticator for Tokens {
         let Some(token) = r.hello.credential.strip_prefix("Bearer ") else {
             return AuthDecision::Deny { code: DenyCode::Unauthorized, message: "no token".into() };
         };
+        // `good-slow…`: an authenticator that takes its time (a server asking its owner)
+        if token.starts_with("good-slower") {
+            tokio::time::sleep(Duration::from_millis(5000)).await;
+        } else if token.starts_with("good-slow") {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
         if !token.starts_with("good") {
             return AuthDecision::Deny { code: DenyCode::Unauthorized, message: "unknown token".into() };
         }
@@ -359,50 +365,310 @@ async fn guard_limits() {
     let mut s = server(guard, Duration::from_millis(1500)).await;
     let quick = DialOptions { connect_timeout: Duration::from_secs(2), ..DialOptions::default() };
 
-    // two connections that never say hello fill the unauthenticated slots: a third connection is refused
+    // two connections past their handshake that never say hello hold this address's share and the pool: a new one
+    // makes room (the oldest is sent away, with Busy) instead of being refused
     let raw1 = raw_connect(&s).await.unwrap();
-    let raw2 = raw_connect(&s).await.unwrap();
+    let _raw2 = raw_connect(&s).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(s.ep.guard().counts(), (2, 2));
-    let refused = client().await.dial(&target(&s), &hello("good-g0", "g0"), &quick).await;
-    assert!(refused.is_err(), "{refused:?}");
-    // the silent ones are closed with code 4 after the hello timeout (two failures)
-    let closed = raw1.closed().await;
-    assert!(
-        matches!(&closed, iroh::endpoint::ConnectionError::ApplicationClosed(c) if c.error_code.into_inner() == 4),
-        "{closed:?}"
-    );
-    let _ = raw2.closed().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(s.ep.guard().counts(), (0, 0));
+    let a = dial(&s, "good-g0", "g0").await.unwrap();
+    let srv_a = s.sessions.recv().await.unwrap();
+    assert_busy(raw1.closed().await);
+    // being sent away counts as nothing: no block
+    assert!(!s.ep.guard().is_blocked("127.0.0.1".parse().unwrap()));
 
-    // at most 3 sessions
-    let a = dial(&s, "good-g1", "g1").await.unwrap();
-    let b = dial(&s, "good-g2", "g2").await.unwrap();
-    let c = dial(&s, "good-g3", "g3").await.unwrap();
-    let srv: Vec<Session> =
-        vec![s.sessions.recv().await.unwrap(), s.sessions.recv().await.unwrap(), s.sessions.recv().await.unwrap()];
-    assert_eq!(s.ep.guard().counts(), (3, 0));
-    let full = client().await.dial(&target(&s), &hello("good-g4", "g4"), &quick).await;
-    assert!(full.is_err(), "{full:?}");
-    drop((a, b, c));
-    for x in &srv {
-        x.closed().await;
+    // at most 3 sessions (one is `a`; the other raw one still waits for its hello)
+    let b = dial(&s, "good-g1", "g1").await.unwrap();
+    let srv_b = s.sessions.recv().await.unwrap();
+    drop((a, b, srv_a, srv_b));
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+
+    // failures after the handshake (the address is proven) — the raw one's hello timeout, denied hellos — reach the
+    // limit of 3: 127.0.0.1 is blocked, and then ignored
+    let lo: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    for i in 0..3 {
+        if s.ep.guard().is_blocked(lo) {
+            break;
+        }
+        let denied = dial(&s, "bad", &format!("bad{i}")).await;
+        assert!(matches!(denied, Err(LinkError::Denied { .. })), "{denied:?}");
     }
-    drop(srv);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(s.ep.guard().counts(), (0, 0));
-
-    // two failures so far + one denied hello = 3: 127.0.0.1 is blocked before any handshake
-    let denied = dial(&s, "bad", "g5").await;
-    assert!(matches!(denied, Err(LinkError::Denied { .. })));
-    assert!(s.ep.guard().is_blocked("127.0.0.1".parse().unwrap()));
+    assert!(s.ep.guard().is_blocked(lo));
     let blocked = client().await.dial(&target(&s), &hello("good-g6", "g6"), &quick).await;
     assert!(blocked.is_err(), "{blocked:?}");
 }
 
+/// One address keeping connections waiting for their hello (never failing) fills the pool: another address still
+/// gets in (the oldest waiting one is sent away, with Busy), and so does a newcomer of its own (its own oldest goes).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_address_cannot_shut_out_another() {
+    // (a failure limit of 1: being sent away counting as a failure would block at once)
+    let guard =
+        GuardConfig { exempt_loopback: false, max_unauthenticated: 2, failure_limit: 1, ..GuardConfig::default() };
+    let mut s = server(guard, Duration::from_millis(5000)).await;
+    let Some(v6port) = s.ep.bound_sockets().iter().find(|a| a.is_ipv6()).map(|a| a.port()) else {
+        eprintln!("no IPv6 socket here: skipped");
+        return;
+    };
+    let raw1 = raw_connect(&s).await.unwrap();
+    let raw2 = raw_connect(&s).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(s.ep.guard().pools(), (0, 2), "the pool is full");
+    // the same address: in, by sending its own oldest away
+    let same = dial(&s, "good-h0", "h0").await;
+    assert!(same.is_ok(), "{same:?}");
+    let _s0 = s.sessions.recv().await.unwrap();
+    assert_busy(raw1.closed().await);
+    let raw3 = raw_connect(&s).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(s.ep.guard().pools(), (0, 2), "full again");
+    let v6 = DialTarget { id: s.ep.id(), relays: vec![], direct: vec![format!("[::1]:{v6port}")] };
+    let quick = DialOptions { connect_timeout: Duration::from_secs(2), ..DialOptions::default() };
+    let other = client().await.dial(&v6, &hello("good-h1", "h1"), &quick).await;
+    assert!(other.is_ok(), "{other:?}");
+    let _s1 = s.sessions.recv().await.unwrap();
+    // it sent the oldest waiting one away
+    assert_busy(raw2.closed().await);
+    assert!(raw3.close_reason().is_none());
+    // and none of that counted
+    assert!(!s.ep.guard().is_blocked("127.0.0.1".parse().unwrap()) && !s.ep.guard().is_blocked("::1".parse().unwrap()));
+}
+
+/// A client given two addresses of the server (a LAN one and a Tailscale one, say) sends its first packet to both:
+/// it connects, and the stray copy holds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_with_two_addresses_connects() {
+    let guard = GuardConfig { exempt_loopback: false, ..GuardConfig::default() };
+    let mut s = server(guard, Duration::from_millis(3000)).await;
+    let Some(v6port) = s.ep.bound_sockets().iter().find(|a| a.is_ipv6()).map(|a| a.port()) else {
+        eprintln!("no IPv6 socket here: skipped");
+        return;
+    };
+    let both = DialTarget {
+        id: s.ep.id(),
+        relays: vec![],
+        direct: vec![format!("127.0.0.1:{}", s.ep.port()), format!("[::1]:{v6port}")],
+    };
+    let sess = client().await.dial(&both, &hello("good-d0", "d0"), &DialOptions::default()).await;
+    assert!(sess.is_ok(), "{sess:?}");
+    let _srv = s.sessions.recv().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (_, pending) = s.ep.guard().counts();
+    assert!(pending <= 1, "no strays left waiting (pending {pending})");
+}
+
+/// A connection the guard sent away: closed with Busy.
+fn assert_busy(e: iroh::endpoint::ConnectionError) {
+    match &e {
+        iroh::endpoint::ConnectionError::ApplicationClosed(c) => {
+            assert_eq!(u64::from(c.error_code), CloseCode::Busy.code(), "{e:?}")
+        }
+        _ => panic!("not closed with Busy: {e:?}"),
+    }
+}
+
+/// A connection that has sent its hello and waits on a slow authenticator is never sent away: connections of
+/// another address that never say hello fill the pool one after another, and the full pool sends the oldest of
+/// those away each time, never the older one in the authenticator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_in_the_authenticator_stays() {
+    let guard = GuardConfig { exempt_loopback: false, max_unauthenticated: 2, ..GuardConfig::default() };
+    let mut s = server(guard, Duration::from_millis(5000)).await;
+    let Some(v6port) = s.ep.bound_sockets().iter().find(|a| a.is_ipv6()).map(|a| a.port()) else {
+        eprintln!("no IPv6 socket here: skipped");
+        return;
+    };
+    let ep = s.ep.clone();
+    let slow = tokio::spawn(async move {
+        let t = DialTarget { id: ep.id(), relays: vec![], direct: vec![format!("127.0.0.1:{}", ep.port())] };
+        client().await.dial(&t, &hello("good-slow-1", "slow1"), &DialOptions::default()).await
+    });
+    // it is in the authenticator now (for 1.5 s)
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.ep.guard().pools(), (0, 1));
+    assert_eq!(s.tokens.asked.lock().unwrap().len(), 1);
+    let mut raws = Vec::new();
+    for _ in 0..4 {
+        raws.push(raw_connect_to(&s, format!("[::1]:{v6port}")).await.unwrap());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // (all of that while the slow one was still waiting on its authenticator)
+    assert!(!slow.is_finished(), "the slow one is still in the authenticator");
+    assert_eq!(s.ep.guard().pools(), (0, 2));
+    for r in &raws[..3] {
+        assert_busy(r.closed().await);
+    }
+    assert!(raws[3].close_reason().is_none());
+    let sess = slow.await.unwrap();
+    assert!(sess.is_ok(), "{sess:?}");
+    let _srv = s.sessions.recv().await.unwrap();
+}
+
+/// A client that goes away while the (slow) authenticator still thinks frees its place at once, not only when the
+/// authenticator answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_gone_in_the_authenticator_frees_its_place() {
+    let guard = GuardConfig { exempt_loopback: false, ..GuardConfig::default() };
+    let s = server(guard, Duration::from_millis(5000)).await;
+    let c = client().await;
+    let t0 = std::time::Instant::now();
+    let dialing = {
+        let (c, t) = (c.clone(), target(&s));
+        tokio::spawn(async move { c.dial(&t, &hello("good-slower-2", "slow2"), &DialOptions::default()).await })
+    };
+    // it gives up in the authenticator: the dial dropped, its endpoint closed
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(s.tokens.asked.lock().unwrap().len(), 1, "it reached the authenticator");
+    assert_eq!(s.ep.guard().pools(), (0, 1));
+    dialing.abort();
+    c.close().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(t0.elapsed() < Duration::from_millis(4500), "still within the authenticator's 5 s");
+    assert_eq!(s.ep.guard().counts(), (0, 0), "its place is free");
+}
+
+/// A handshake pool kept full of handshakes that never finish (their packets go nowhere), refreshed all along: a real
+/// client still completes its handshake and its hello.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_gets_through_a_flood_of_handshakes() {
+    let guard = GuardConfig { exempt_loopback: false, max_handshaking: 4, ..GuardConfig::default() };
+    let mut s = server(guard, Duration::from_millis(5000)).await;
+    // a one-way relay: what a client sends reaches the server, nothing comes back
+    let sink = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let sink_addr = sink.local_addr().unwrap();
+    let fwd = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_addr: std::net::SocketAddr = format!("127.0.0.1:{}", s.ep.port()).parse().unwrap();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        while let Ok((n, _)) = sink.recv_from(&mut buf).await {
+            let _ = fwd.send_to(&buf[..n], server_addr).await;
+        }
+    });
+    let id = iroh::PublicKey::from_bytes(&uu_link::binding::parse_endpoint_id(&s.ep.id()).unwrap()).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flood = {
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            let ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
+                .await
+                .unwrap();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let ep = ep.clone();
+                let addr = iroh::EndpointAddr::from_parts(id, [iroh::TransportAddr::Ip(sink_addr)]);
+                tokio::spawn(async move {
+                    let _ = tokio::time::timeout(Duration::from_secs(8), ep.connect(addr, uu_link::ALPN)).await;
+                });
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            ep
+        })
+    };
+    // the pool fills
+    let mut full = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if s.ep.guard().pools().0 == 4 {
+            full = true;
+            break;
+        }
+    }
+    assert!(full, "the handshake pool filled: {:?}", s.ep.guard().pools());
+    let sess = dial(&s, "good-f0", "f0").await;
+    assert!(sess.is_ok(), "{sess:?}");
+    let _srv = s.sessions.recv().await.unwrap();
+    assert!(s.ep.guard().pools().0 >= 3, "and the flood went on all along: {:?}", s.ep.guard().pools());
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(flood.await.unwrap());
+}
+
+/// A relay on 127.0.0.1 (plain http): its URL.
+async fn relay() -> (iroh_relay::server::Server, String) {
+    let mut config = iroh_relay::server::testing::server_config();
+    config.quic = None;
+    if let Some(r) = config.relay.as_mut() {
+        r.tls = None;
+    }
+    let server = iroh_relay::server::Server::spawn(config).await.unwrap();
+    let url = format!("http://{}", server.http_addr().unwrap());
+    (server, url)
+}
+
+/// Through a relay, failures count by the client's endpoint id: its id is blocked (refused right after the
+/// handshake), no address is, and another id still gets in. And a client whose address is blocked still connects
+/// through the relay: the straight copy of its first packet is ignored, not refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relayed_failures_count_by_endpoint_id() {
+    let (_relay, url) = relay().await;
+    let mut cfg = EndpointConfig::server(generate_link_key(), 0);
+    cfg.portmapper = Some(false);
+    cfg.relays = vec![url.clone()];
+    cfg.guard = GuardConfig { failure_limit: 3, exempt_loopback: false, ..GuardConfig::default() };
+    let ep = Endpoint::bind(cfg).await.unwrap();
+    let tokens = Arc::new(Tokens::default());
+    let opts = ServerOptions::new(
+        ServerInfo { id: "srv-1".into(), name: "Test Mac".into(), platform: "macos".into() },
+        tokens.clone(),
+    );
+    let listener = ep.listen(opts).unwrap();
+    // (sessions kept: one dropped would close at once)
+    tokio::spawn(async move {
+        let mut kept = Vec::new();
+        while let Some(s) = listener.accept().await {
+            kept.push(s);
+        }
+    });
+    let relayed = DialTarget { id: ep.id(), relays: vec![url.clone()], direct: vec![] };
+    let client_with = |key: [u8; 32]| {
+        let url = url.clone();
+        async move {
+            let mut c = EndpointConfig::client(key);
+            c.relays = vec![url];
+            Endpoint::bind(c).await.unwrap()
+        }
+    };
+
+    let key = generate_link_key();
+    let c = client_with(key).await;
+    let peer = uu_link::guard::Source::Peer(uu_link::binding::parse_endpoint_id(&c.id()).unwrap().to_vec());
+    for i in 0..3 {
+        let r = c.dial(&relayed, &hello("bad", &format!("r{i}")), &DialOptions::default()).await;
+        assert!(matches!(r, Err(LinkError::Denied { code: DenyCode::Unauthorized, .. })), "{r:?}");
+    }
+    assert!(ep.guard().is_blocked_as(uu_link::guard::Kind::Quic, &peer), "its endpoint id is blocked");
+    assert!(!ep.guard().is_blocked("127.0.0.1".parse().unwrap()), "no address is");
+    let r = client_with(key).await.dial(&relayed, &hello("good-r", "r"), &DialOptions::default()).await;
+    assert!(matches!(r, Err(LinkError::Denied { code: DenyCode::RateLimited, .. })), "{r:?}");
+    let other =
+        client_with(generate_link_key()).await.dial(&relayed, &hello("good-o", "o"), &DialOptions::default()).await;
+    assert!(other.is_ok(), "another id gets in: {other:?}");
+
+    // 127.0.0.1 blocked (failures over the direct path)…
+    let direct = DialTarget { id: ep.id(), relays: vec![], direct: vec![format!("127.0.0.1:{}", ep.port())] };
+    let lo: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    for i in 0..3 {
+        if ep.guard().is_blocked(lo) {
+            break;
+        }
+        let r = client().await.dial(&direct, &hello("bad", &format!("d{i}")), &DialOptions::default()).await;
+        assert!(matches!(r, Err(LinkError::Denied { code: DenyCode::Unauthorized, .. })), "{r:?}");
+    }
+    assert!(ep.guard().is_blocked(lo));
+    // …a client given both ways still connects, through the relay
+    let both = DialTarget { id: ep.id(), relays: vec![url.clone()], direct: vec![format!("127.0.0.1:{}", ep.port())] };
+    let sess = client_with(generate_link_key()).await.dial(&both, &hello("good-b", "b"), &DialOptions::default()).await;
+    assert!(sess.is_ok(), "{sess:?}");
+}
+
 /// A QUIC connection with the link's ALPN that never opens the control stream.
 async fn raw_connect(s: &Server) -> Result<iroh::endpoint::Connection, String> {
+    raw_connect_to(s, format!("127.0.0.1:{}", s.ep.port())).await
+}
+
+/// The same, to `addr` (`ip:port`).
+async fn raw_connect_to(s: &Server, addr: String) -> Result<iroh::endpoint::Connection, String> {
     let ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
         .clear_address_lookup()
@@ -410,10 +676,7 @@ async fn raw_connect(s: &Server) -> Result<iroh::endpoint::Connection, String> {
         .await
         .map_err(|e| e.to_string())?;
     let id = iroh::PublicKey::from_bytes(&uu_link::binding::parse_endpoint_id(&s.ep.id()).unwrap()).unwrap();
-    let addr = iroh::EndpointAddr::from_parts(
-        id,
-        [iroh::TransportAddr::Ip(format!("127.0.0.1:{}", s.ep.port()).parse().unwrap())],
-    );
+    let addr = iroh::EndpointAddr::from_parts(id, [iroh::TransportAddr::Ip(addr.parse().unwrap())]);
     let conn = ep.connect(addr, uu_link::ALPN).await.map_err(|e| e.to_string())?;
     // keep the endpoint alive as long as the connection
     std::mem::forget(ep);

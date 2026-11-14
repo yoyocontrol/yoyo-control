@@ -69,7 +69,7 @@ for addon in "$work"/addons/*.node; do
   cp "$root/LICENSE" "$root/NOTICE" "$stage/" 2>/dev/null || cp "$root/LICENSE" "$stage/"
   find "$stage" -type d -exec chmod 755 {} + && find "$stage" -type f -exec chmod 644 {} +
   (cd "$stage" && find . -type f | LC_ALL=C sort | sed 's|^\./||' > "$work/files-$sys" \
-    && COPYFILE_DISABLE=1 tar --uid 0 --gid 0 --uname root --gname root -cf - -T "$work/files-$sys" | gzip -9n > "$out/uu-link-node-$version-$sys.tgz")
+    && COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --uid 0 --gid 0 --uname root --gname root -cf - -T "$work/files-$sys" | gzip -9n > "$out/uu-link-node-$version-$sys.tgz")
 done
 (cd "$out" && shasum -a 256 uu-link-node-*.tgz > SHA256SUMS && cat SHA256SUMS)
 rm -rf "$work"

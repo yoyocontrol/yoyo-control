@@ -194,8 +194,8 @@ uu Link 的 WebRTC 那一路（`LINK.md`「WebRTC」）：浏览器拨不了 QUI
 
 - 请求体 = 浏览器的 offer JSON（`{"v":1,"offer":"<SDP>","device":{"id","name"}}`，≤ 64 KiB），回答 200 = answer JSON
   （`{"v":1,"answer","fingerprint","binding","sig"}`），原样交回浏览器；会话之后在 WebRTC 上自己连、`hello`。
-- 404：Link 没在跑，或 WebRTC 关着（`LinkOptions.rtc`）；400：offer 不对；429：来源被守卫冷却；503：会话或还没认证的会话满了
-  （同时最多 4 个没 `welcome` 的，含 QUIC 的）；504：15 s 没答。错误体是 `{ error }`。
+- 404：Link 没在跑，或 WebRTC 关着（`LinkOptions.rtc`）；400：offer 不对；429：来源被守卫冷却；503：会话满了
+  （没认证的连接满了不拒新来的，请走最老的，见 LINK.md「守卫」）；504：15 s 没答。错误体是 `{ error }`。
 - `/status.link.rtc = { port, direct? }`：WebRTC 的 UDP 端口（默认 Link 端口 + 1，即 47821）和路由器给它的映射（有时）。
 - 选项（`LinkOptions`）：`rtc`（默认开）、`rtcPort`（nil = Link 端口 + 1）、`stunServers`（默认空）；环境变量 `YOYO_LINK_RTC_PORT`
   （`off` 关掉）。

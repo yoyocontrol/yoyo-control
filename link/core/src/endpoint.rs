@@ -33,7 +33,7 @@ use crate::{
     cc::{DEFAULT_TARGET_BPS, MediaCcFactory, TargetBitrate},
     error::{CloseCode, DenyCode, LinkError, Result},
     framing::{self, MAX_CONTROL_FRAME},
-    guard::{Guard, GuardConfig, Permit, Refusal},
+    guard::{Guard, GuardConfig, Kind as GuardKind, Permit, Refusal, Source as GuardSource, Way},
     log::{debug, info, warn},
     media,
     path::{self, Iface, PathKind},
@@ -45,7 +45,7 @@ use crate::{
 
 pub const KEEP_ALIVE: Duration = Duration::from_secs(5);
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(20);
-/// A client has this long after the handshake to send `hello`.
+/// A client has this long after the handshake to send `hello` (it sends it at once).
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// The QUIC handshake of an incoming connection.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -749,10 +749,10 @@ impl Listener {
         if let Some(secret) = &offer.restart {
             return restart_rtc(a, &hub, identity.as_ref(), &offer, secret, source);
         }
-        let permit = a.ep.inner.guard.admit(source).map_err(|r| match r {
-            Refusal::Blocked => LinkError::Denied { code: DenyCode::RateLimited, message: "blocked".into() },
-            _ => LinkError::Denied { code: DenyCode::Busy, message: "too many sessions".into() },
-        })?;
+        // a source blocked for WebRTC is refused before anything else
+        if source.is_some_and(|ip| a.ep.inner.guard.is_blocked_as(GuardKind::WebRtc, &a.ep.inner.guard.source_of(ip))) {
+            return Err(LinkError::Denied { code: DenyCode::RateLimited, message: "blocked".into() });
+        }
         let client_fp = rtc::sdp_fingerprint(&offer.offer)
             .ok_or_else(|| LinkError::InvalidArgument("offer without a sha-256 DTLS fingerprint".into()))?;
         let (usable, remote_candidates) = rtc::usable_sdp(&offer.offer);
@@ -767,6 +767,13 @@ impl Listener {
         let binding = binding::sign_binding_with(identity.as_ref(), &a.ep.public_key())?;
         let answer_sdp = rtc::with_nat64(&rtc::filter_candidates(&answer.to_sdp_string(), |a| hub.announces(a)));
         let mut signed = rtc::sign_answer(identity.as_ref(), binding, &offer.offer, answer_sdp, fingerprint)?;
+        // the offer is a sound one: now its place, in the WebRTC pool, under the signaling request's address (a real
+        // one — it came over TCP; none: not counted per source)
+        let counted = source.map_or(GuardSource::Exempt, |ip| a.ep.inner.guard.source_of(ip));
+        let permit = a.ep.inner.guard.admit_offer(source, counted).map_err(|r| match r {
+            Refusal::Blocked => LinkError::Denied { code: DenyCode::RateLimited, message: "blocked".into() },
+            _ => LinkError::Denied { code: DenyCode::Busy, message: "too many sessions".into() },
+        })?;
         let peer = rtc::Peer::start(hub, Side::Server, r, remote_candidates, format!("dtls-{client_fp}"));
         peer.open_negotiated();
         if let Some(rk) = offer.rk.as_deref().filter(|k| valid_restart_key(k)) {
@@ -792,7 +799,8 @@ fn restart_rtc(
     secret: &str,
     source: Option<IpAddr>,
 ) -> Result<String> {
-    if source.is_some_and(|ip| a.ep.inner.guard.is_blocked(ip)) {
+    let counted = source.map_or(GuardSource::Exempt, |ip| a.ep.inner.guard.source_of(ip));
+    if a.ep.inner.guard.is_blocked_as(GuardKind::WebRtc, &counted) {
         return Err(LinkError::Denied { code: DenyCode::RateLimited, message: "blocked".into() });
     }
     let key = (secret.len() <= MAX_RESTART_SECRET).then(|| rtc::restart_key(secret));
@@ -800,7 +808,7 @@ fn restart_rtc(
         key.and_then(|k| a.restarts.lock().unwrap().remove(&k)).and_then(|w| w.upgrade()).filter(|p| !p.is_ended());
     let client_fp = rtc::sdp_fingerprint(&offer.offer);
     let Some(peer) = peer.filter(|p| client_fp.as_ref().is_some_and(|fp| p.remote_id() == format!("dtls-{fp}"))) else {
-        failed(&a.ep, source, "unknown rtc restart");
+        failed(&a.ep, GuardKind::WebRtc, &counted, "unknown rtc restart");
         return Err(LinkError::InvalidArgument("no connection to restart".into()));
     };
     let (usable, remote_candidates) = rtc::usable_sdp(&offer.offer);
@@ -839,13 +847,13 @@ async fn accept_loop(a: Arc<Accepting>) {
             IncomingAddr::Ip(sa) => Some(sa.ip().to_canonical()),
             _ => None,
         };
+        // a blocked source is ignored, not refused: a client sends its first packet on every path at once, and a refusal
+        // of its straight copy would end the connection its relayed copy can still make
         let permit = match a.ep.inner.guard.admit(ip) {
             Ok(p) => p,
             Err(r) => {
-                if r != Refusal::Blocked {
-                    debug!("link: refused {remote:?}: {r:?}");
-                }
-                incoming.refuse();
+                debug!("link: ignored {remote:?}: {r:?}");
+                incoming.ignore();
                 continue;
             }
         };
@@ -853,13 +861,16 @@ async fn accept_loop(a: Arc<Accepting>) {
     }
 }
 
-/// Counts a failure from `ip` with the guard (and says when it starts a cooldown).
-fn failed(ep: &Endpoint, ip: Option<IpAddr>, why: &str) {
-    if let Some(ip) = ip
-        && ep.inner.guard.failed(ip)
-    {
+/// Counts a failure of `kind` from `source` with the guard (and says when it starts a cooldown).
+fn failed(ep: &Endpoint, kind: GuardKind, source: &GuardSource, why: &str) {
+    if ep.inner.guard.failed_as(kind, source) {
+        let who = match source {
+            GuardSource::Ip(ip) => ip.to_string(),
+            GuardSource::Peer(id) => format!("endpoint {}", HEXLOWER.encode(id)),
+            GuardSource::Exempt => "?".into(),
+        };
         warn!(
-            "link: {ip} blocked for {} s after repeated failures ({why})",
+            "link: {who} blocked ({kind:?}) for {} s after repeated failures ({why})",
             ep.inner.guard.config().cooldown.as_secs()
         );
     }
@@ -870,7 +881,7 @@ async fn handle_incoming(
     incoming: Incoming,
     remote: IncomingAddr,
     ip: Option<IpAddr>,
-    permit: Permit,
+    mut permit: Permit,
 ) {
     let server_media = media::ServerMedia::new(a.options.media.clone());
     let target = TargetBitrate::with_media(server_media.target_rate());
@@ -887,18 +898,41 @@ async fn handle_incoming(
             return;
         }
     };
-    let conn = match tokio::time::timeout(HANDSHAKE_TIMEOUT, accepting).await {
-        Ok(Ok(c)) => c,
-        Ok(Err(e)) => {
-            debug!("link: handshake from {remote:?} failed: {e}");
-            failed(&a.ep, ip, "handshake");
-            return;
-        }
-        Err(_) => {
-            failed(&a.ep, ip, "handshake timeout");
+    // (no failure counted before the handshake completes: until then the address may be a forged one, and counting it
+    // would get its owner blocked)
+    let conn = tokio::select! {
+        r = tokio::time::timeout(HANDSHAKE_TIMEOUT, accepting) => match r {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                debug!("link: handshake from {remote:?} failed: {e}");
+                return;
+            }
+            Err(_) => {
+                debug!("link: handshake from {remote:?} not done in {} s", HANDSHAKE_TIMEOUT.as_secs());
+                return;
+            }
+        },
+        _ = permit.sent_away() => {
+            debug!("link: handshake from {remote:?} sent away (the pool was full)");
             return;
         }
     };
+    // its source is proven now (an address; through a relay, its peer's id): a blocked endpoint id is refused here (a
+    // blocked address was ignored before), else into the second pool under it
+    let (way, counted) = match ip {
+        Some(ip) => (Way::Straight, a.ep.inner.guard.source_of(ip)),
+        None => (Way::Relayed, GuardSource::Peer(conn.remote_id().as_bytes().to_vec())),
+    };
+    if a.ep.inner.guard.is_blocked_as(GuardKind::Quic, &counted) {
+        debug!("link: {remote:?} refused after its handshake: blocked");
+        Conn::Quic(conn).close(CloseCode::RateLimited, "blocked");
+        return;
+    }
+    if let Err(r) = permit.handshake_done(way, counted.clone()) {
+        debug!("link: {remote:?} refused after its handshake: {r:?}");
+        Conn::Quic(conn).close(CloseCode::Busy, "busy");
+        return;
+    }
     let known: HashSet<SocketAddr> = match &remote {
         IncomingAddr::Ip(sa) => [*sa].into_iter().collect(),
         _ => HashSet::new(),
@@ -921,29 +955,56 @@ async fn handle_incoming(
             Ok((SendHalf::Quic(s), RecvHalf::Quic(r)))
         }
     };
-    let pending = Pending { conn: Conn::Quic(conn), source, known, ip, permit, target, media: server_media };
+    let pending = Pending {
+        conn: Conn::Quic(conn),
+        source,
+        known,
+        kind: GuardKind::Quic,
+        counted,
+        permit,
+        target,
+        media: server_media,
+    };
     serve(a, pending, control).await;
 }
 
 async fn handle_rtc(a: Arc<Accepting>, conn: RtcConn, signal_ip: Option<IpAddr>, permit: Permit) {
     let server_media = media::ServerMedia::new(a.options.media.clone());
     let target = TargetBitrate::with_media(server_media.target_rate());
-    let control = match tokio::time::timeout(rtc::CONNECT_TIMEOUT, conn.control()).await {
+    let connected = tokio::select! {
+        r = tokio::time::timeout(rtc::CONNECT_TIMEOUT, conn.control()) => r,
+        _ = permit.sent_away() => {
+            conn.close(CloseCode::Busy, "busy");
+            return;
+        }
+    };
+    let control = match connected {
         Ok(Some((s, r))) => (SendHalf::Rtc(s), RecvHalf::Rtc(r)),
         Ok(None) => return,
         Err(_) => {
             debug!("link: rtc offer from {signal_ip:?}: not connected within {} s", rtc::CONNECT_TIMEOUT.as_secs());
-            failed(&a.ep, signal_ip, "rtc connect timeout");
+            let counted = signal_ip.map_or(GuardSource::Exempt, |ip| a.ep.inner.guard.source_of(ip));
+            failed(&a.ep, GuardKind::WebRtc, &counted, "rtc connect timeout");
             conn.close(CloseCode::Protocol, "not connected in time");
             return;
         }
     };
     let remote = conn.remote_addr();
     let path = conn.path();
-    let ip = signal_ip.or_else(|| remote.map(|r| r.ip().to_canonical()));
+    // (its failures count under the signaling request's address, as its place: none, not counted — the address ICE
+    // proved may be a TURN server's, shared by every browser using it)
+    let counted = signal_ip.map_or(GuardSource::Exempt, |ip| a.ep.inner.guard.source_of(ip));
     let source = Source { addr: remote, relay: None, path: path.kind };
-    let pending =
-        Pending { conn: Conn::Rtc(conn), source, known: HashSet::new(), ip, permit, target, media: server_media };
+    let pending = Pending {
+        conn: Conn::Rtc(conn),
+        source,
+        known: HashSet::new(),
+        kind: GuardKind::WebRtc,
+        counted,
+        permit,
+        target,
+        media: server_media,
+    };
     serve(a, pending, async move { Ok(control) }).await;
 }
 
@@ -952,8 +1013,9 @@ struct Pending {
     conn: Conn,
     source: Source,
     known: HashSet<SocketAddr>,
-    /// Whose failures count with the guard.
-    ip: Option<IpAddr>,
+    /// What kind of failures (QUIC, WebRTC) it counts with the guard, and whose.
+    kind: GuardKind,
+    counted: GuardSource,
     permit: Permit,
     target: TargetBitrate,
     media: media::ServerMedia,
@@ -961,14 +1023,20 @@ struct Pending {
 
 /// `hello` (the control stream within `hello_timeout`), the authenticator, `welcome` / `denied`, the session.
 async fn serve(a: Arc<Accepting>, p: Pending, control: impl Future<Output = Result<(SendHalf, RecvHalf)>>) {
-    let Pending { conn, source, known, ip, mut permit, target, media: server_media } = p;
-    let fail = |why: &str| failed(&a.ep, ip, why);
-    let hello_read = tokio::time::timeout(a.options.hello_timeout, async {
-        let (send, mut recv) = control.await?;
-        let m = framing::read_frame(&mut recv, MAX_CONTROL_FRAME).await?;
-        Ok::<_, LinkError>((send, recv, m))
-    })
-    .await;
+    let Pending { conn, source, known, kind, counted, mut permit, target, media: server_media } = p;
+    let fail = |why: &str| failed(&a.ep, kind, &counted, why);
+    let hello_read = tokio::select! {
+        r = tokio::time::timeout(a.options.hello_timeout, async {
+            let (send, mut recv) = control.await?;
+            let m = framing::read_frame(&mut recv, MAX_CONTROL_FRAME).await?;
+            Ok::<_, LinkError>((send, recv, m))
+        }) => r,
+        // sent away to make room (not a failure)
+        _ = permit.sent_away() => {
+            conn.close(CloseCode::Busy, "busy");
+            return;
+        }
+    };
     let (mut send, recv, hello) = match hello_read {
         Ok(Ok((s, r, Some(m)))) if m.get("t").and_then(Value::as_str) == Some("hello") => (s, r, m),
         Ok(Ok(_)) | Ok(Err(LinkError::Protocol(_))) => {
@@ -987,6 +1055,7 @@ async fn serve(a: Arc<Accepting>, p: Pending, control: impl Future<Output = Resu
         }
     };
     if hello.get("v").and_then(Value::as_u64) != Some(1) {
+        // (not a failure: a client of a later version, which falls back)
         conn.close(CloseCode::Protocol, "unsupported version");
         return;
     }
@@ -998,14 +1067,34 @@ async fn serve(a: Arc<Accepting>, p: Pending, control: impl Future<Output = Resu
             return;
         }
     };
+    // a sound hello: from here on the authenticator's to end, never sent away (unless it was sent away already)
+    if !permit.hello_received() {
+        let msg = json!({"t": "denied", "code": DenyCode::Busy.as_str(), "message": "busy"});
+        deny(conn, send, &msg, DenyCode::Busy).await;
+        return;
+    }
 
     let request = AuthRequest { hello: hello.clone(), client_key: conn.remote_id(), source };
-    let decision = match tokio::time::timeout(AUTH_TIMEOUT, a.options.authenticator.authenticate(request)).await {
-        Ok(d) => d,
-        Err(_) => AuthDecision::Deny { code: DenyCode::Busy, message: "no answer".into() },
+    let decision = tokio::select! {
+        r = tokio::time::timeout(AUTH_TIMEOUT, a.options.authenticator.authenticate(request)) => match r {
+            Ok(d) => d,
+            Err(_) => AuthDecision::Deny { code: DenyCode::Busy, message: "no answer".into() },
+        },
+        _ = permit.sent_away() => {
+            let msg = json!({"t": "denied", "code": DenyCode::Busy.as_str(), "message": "busy"});
+            deny(conn, send, &msg, DenyCode::Busy).await;
+            return;
+        }
+        // the client went away meanwhile: its place is free at once (not only once the authenticator answers)
+        _ = conn.closed() => {
+            debug!("link: {} ({}) closed while in the authenticator", hello.device.name, hello.device.id);
+            return;
+        }
     };
     match decision {
         AuthDecision::Deny { code, message } => {
+            // answered: its place is free at once (not only once `deny` has waited for the close)
+            drop(permit);
             if code == DenyCode::Unauthorized {
                 fail("unauthorized");
             }
@@ -1020,13 +1109,19 @@ async fn serve(a: Arc<Accepting>, p: Pending, control: impl Future<Output = Resu
                 features: features.unwrap_or_else(|| a.options.features.clone()),
                 max_datagram: conn.max_datagram_size() as u32,
             };
+            // a session from here on — unless it was sent away while the authenticator answered (then Busy, as any
+            // connection sent away)
+            if !permit.authenticated() {
+                let msg = json!({"t": "denied", "code": DenyCode::Busy.as_str(), "message": "busy"});
+                deny(conn, send, &msg, DenyCode::Busy).await;
+                return;
+            }
             if let Err(e) =
                 framing::write_frame(&mut send, &session::welcome_message(&welcome), MAX_CONTROL_FRAME).await
             {
                 debug!("link: welcome not sent: {e}");
                 return;
             }
-            permit.authenticated();
             let session = Session::start(Parts {
                 id: a.ep.inner.next_session.fetch_add(1, Ordering::Relaxed),
                 side: Side::Server,

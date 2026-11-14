@@ -5,7 +5,7 @@
 .build/
 
 # TypeScript kits (packages/*)
-node_modules/
+node_modules
 packages/*/dist/
 
 # the web app's build (webapp/), and its copy in the site's assets (web/deploy.sh)

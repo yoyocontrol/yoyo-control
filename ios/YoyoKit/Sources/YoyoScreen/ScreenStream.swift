@@ -56,6 +56,8 @@ final class ScreenStream: NSObject, URLSessionDataDelegate, Sendable {
         config.urlCache = nil
         config.timeoutIntervalForRequest = request.timeoutInterval
         config.timeoutIntervalForResource = 24 * 3600
+        // the host's road for its requests (its URLProtocols), for these too
+        YoyoHost.current.configureSession?(config)
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
         queue.name = "ca.sarria.yoyocontrol.screen-stream"

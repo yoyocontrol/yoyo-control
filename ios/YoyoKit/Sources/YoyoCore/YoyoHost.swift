@@ -33,6 +33,11 @@ public struct YoyoHost: Sendable {
     /// debug log. `category` says whose (`screen-stop`: how long a Screen session's stop took on the main thread, step by
     /// step). Called on any thread; nil: the system log only.
     public var log: (@Sendable (_ category: String, _ line: String) -> Void)?
+    /// Called on every URLSession configuration the kits make for the host's backend (the Screen page's stream and its
+    /// acks, the tunnel way), before the session is created: the host's own `URLProtocol`s go in here — a host whose
+    /// requests may take another road than HTTP (its own tunnel, a relay) puts the same protocol it uses for its own
+    /// requests, so the kits' reach the computer whichever way the host's do. nil: the system's defaults.
+    public var configureSession: (@Sendable (URLSessionConfiguration) -> Void)?
 
     public init() {}
 

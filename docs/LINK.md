@@ -767,6 +767,12 @@ Rust 的运行时上跑，里面的 panic 变成 `LinkError.Internal`（发布�
 - Windows 的 `.node`：`windows/build.sh` 在 Mac 上按 `x86_64-pc-windows-gnu`（mingw-w64）编，放成 `vendor/link/uu-link.win32-x64.node`；N-API 的
   符号经一个指向 `node.exe` 的导入库链接（`windows/README.md`「发布」）。
 
+- Node 的发布包：`scripts/link-node.sh release <x.y.z>` 一次编出四个系统的插件（darwin-arm64 本机；linux-x64 / arm64 用上面
+  `link-addon` 阶段，docker buildx；win32-x64 照 `windows/build.sh` 用 mingw-w64），每个系统打一个
+  `uu-link-node-<x.y.z>-<os>-<arch>.tgz`（`package.json`、`dist/`、`native/` 里那一个 `.node`、LICENSE、NOTICE），写出 `SHA256SUMS`。
+  上传为公开仓库的 release `link-node-v<x.y.z>`：不想自己编 Rust 的程序（比如 nest 的网关）按版本和 sha256 下载它，解开就能
+  `import` 它的 `dist/index.js`（加载器在 `native/` 里找到插件）。
+
 ## 测试工具
 
 - `uu-link-netem --listen <ip:port> --to <ip:port> --profile lan|5g|bad|handover`：两个方向各自损伤。

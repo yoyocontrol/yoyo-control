@@ -26,6 +26,7 @@
 +scripts/check-private.mjs
 +scripts/git-dist.sh
 +scripts/link-apple.sh
++scripts/link-node.sh
 +scripts/link-trace.py
 +scripts/public/
 

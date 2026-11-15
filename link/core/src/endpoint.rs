@@ -40,7 +40,7 @@ use crate::{
     rpc::{DEFAULT_BLOCKED_PATHS, DEFAULT_MAX_REQUEST_BODY, RpcHandler, ServeConfig},
     rtc::{self, Hub, IdentitySigner, RtcAnswer, RtcConfig, RtcConn, RtcOffer},
     session::{self, Hello, Parts, ServerInfo, Session, Side, Welcome},
-    transport::{Conn, RecvHalf, SendHalf},
+    transport::{Conn, RecvHalf, SendHalf, Transport},
 };
 
 pub const KEEP_ALIVE: Duration = Duration::from_secs(5);
@@ -210,6 +210,10 @@ pub struct ServerOptions {
     /// Signs `rtc` answers (and the binding in them): the identity key (`rtc::IdentityKey`) or the app's own
     /// signer. Without it `Listener::accept_rtc_offer` refuses.
     pub rtc_identity: Option<Arc<dyn IdentitySigner>>,
+    /// Takes duplex requests (rpc.rs; the handler answers them with `accept_duplex`): its QUIC sessions' `welcome`
+    /// says `duplex`. Off: a duplex request is refused (400) before the handler. Never over WebRTC (its data channels
+    /// have no receive limit of their own: a duplex stream's peer could fill the server's memory).
+    pub duplex: bool,
 }
 
 impl ServerOptions {
@@ -224,6 +228,7 @@ impl ServerOptions {
             hello_timeout: HELLO_TIMEOUT,
             media: media::ServerConfig::default(),
             rtc_identity: None,
+            duplex: false,
         }
     }
 }
@@ -680,8 +685,11 @@ impl Endpoint {
         }
         let (tx, rx) = mpsc::channel(8);
         let rpc = options.rpc.clone().map(|h| {
-            let cfg =
-                ServeConfig { blocked_paths: options.rpc_blocked_paths.clone(), max_body: options.max_request_body };
+            let cfg = ServeConfig {
+                blocked_paths: options.rpc_blocked_paths.clone(),
+                max_body: options.max_request_body,
+                duplex: options.duplex,
+            };
             (h, Arc::new(cfg))
         });
         let shared =
@@ -824,6 +832,16 @@ fn restart_rtc(
     }
     info!("link: rtc restart of {} ({} candidates)", peer.remote_id(), offer.offer.matches("a=candidate").count());
     Ok(signed.to_json())
+}
+
+/// A server that takes duplex requests (rpc.rs) says so in a QUIC session's `welcome`; nobody says it otherwise (the
+/// app's own list loses a `duplex` it should not have).
+fn with_duplex(mut features: Vec<String>, takes: bool) -> Vec<String> {
+    features.retain(|f| f != crate::rpc::DUPLEX_FEATURE);
+    if takes {
+        features.push(crate::rpc::DUPLEX_FEATURE.into());
+    }
+    features
 }
 
 /// Why a client's handshake failed: from the close code when no `denied` was read.
@@ -1106,7 +1124,10 @@ async fn serve(a: Arc<Accepting>, p: Pending, control: impl Future<Output = Resu
             let welcome = Welcome {
                 server: a.options.server.clone(),
                 principal,
-                features: features.unwrap_or_else(|| a.options.features.clone()),
+                features: with_duplex(
+                    features.unwrap_or_else(|| a.options.features.clone()),
+                    a.options.duplex && a.options.rpc.is_some() && conn.transport() == Transport::Quic,
+                ),
                 max_datagram: conn.max_datagram_size() as u32,
             };
             // a session from here on — unless it was sent away while the authenticator answered (then Busy, as any
@@ -1173,5 +1194,19 @@ mod relay_url_tests {
         );
         assert!(relay_map(&[]).unwrap().is_none());
         assert!(parse_relays(&["not a url".into()]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod duplex_feature_tests {
+    use super::with_duplex;
+
+    #[test]
+    fn only_the_server_says_duplex() {
+        let f = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(with_duplex(f(&["link"]), true), f(&["link", "duplex"]));
+        assert_eq!(with_duplex(f(&["link", "duplex"]), true), f(&["link", "duplex"]));
+        assert_eq!(with_duplex(f(&["duplex", "link"]), false), f(&["link"]), "an app's own `duplex` goes");
+        assert_eq!(with_duplex(f(&[]), false), f(&[]));
     }
 }

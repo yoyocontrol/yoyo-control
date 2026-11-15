@@ -344,6 +344,19 @@ impl Session {
         rpc::request(&self.inner.conn, req, body).await
     }
 
+    /// A duplex request (client side): a WebSocket's upgrade over the link (rpc.rs). Accepted → `duplex`; any other
+    /// answer → its status and body. Refused here, without asking, when the server's `welcome` doesn't list `duplex`
+    /// (an older server would wait for a body).
+    pub async fn request_duplex(&self, req: &RpcRequest) -> Result<rpc::DuplexResponse> {
+        if self.inner.side != Side::Client {
+            return Err(LinkError::InvalidArgument("only the client sends requests".into()));
+        }
+        if !self.inner.welcome.features.iter().any(|f| f == rpc::DUPLEX_FEATURE) {
+            return Err(LinkError::InvalidArgument("the server takes no duplex requests".into()));
+        }
+        rpc::request_duplex(&self.inner.conn, req).await
+    }
+
     // MARK: datagrams
 
     /// Sends `header(channel) ‖ payload`. Older unsent datagrams may be dropped to make room (newest wins).

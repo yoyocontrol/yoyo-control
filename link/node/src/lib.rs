@@ -253,6 +253,8 @@ pub struct ServerSettings {
     pub recovery_on_nack: Option<bool>,
     /// The identity private key (97-byte X9.63) that signs rtc answers; absent = `acceptRtcOffer` refuses.
     pub identity_key: Option<Buffer>,
+    /// Takes duplex requests (the `rpc` handler answers them with `acceptDuplex`; QUIC sessions only). Default off.
+    pub duplex: Option<bool>,
 }
 
 #[napi(object)]
@@ -280,6 +282,49 @@ pub struct RpcRequest {
     pub method: String,
     pub path: String,
     pub headers: Option<HashMap<String, String>>,
+    /// A duplex request (a WebSocket's upgrade over the link: no body; `acceptDuplex` or any answer).
+    pub duplex: Option<bool>,
+}
+
+/// One message of a duplex stream: `type` "text" (`text`), "binary" (`data`) or "close" (`code`, `reason`).
+#[napi(object)]
+pub struct DuplexMessage {
+    #[napi(js_name = "type")]
+    pub kind: String,
+    pub text: Option<String>,
+    pub data: Option<Buffer>,
+    pub code: Option<u32>,
+    pub reason: Option<String>,
+}
+
+impl DuplexMessage {
+    fn to_core(&self) -> Result<core::DuplexMessage> {
+        match self.kind.as_str() {
+            "text" => Ok(core::DuplexMessage::Text(self.text.clone().unwrap_or_default())),
+            "binary" => Ok(core::DuplexMessage::Binary(
+                self.data.as_ref().map(|d| Bytes::copy_from_slice(d)).unwrap_or_default(),
+            )),
+            "close" => {
+                let code = self.code.unwrap_or(1000);
+                let code = u16::try_from(code).map_err(|_| invalid(format!("close code {code}")))?;
+                Ok(core::DuplexMessage::Close { code, reason: self.reason.clone().unwrap_or_default() })
+            }
+            t => Err(invalid(format!("duplex message type {t}: text, binary or close"))),
+        }
+    }
+
+    fn from_core(m: core::DuplexMessage) -> Self {
+        let none = DuplexMessage { kind: String::new(), text: None, data: None, code: None, reason: None };
+        match m {
+            core::DuplexMessage::Text(t) => DuplexMessage { kind: "text".into(), text: Some(t), ..none },
+            core::DuplexMessage::Binary(b) => {
+                DuplexMessage { kind: "binary".into(), data: Some(b.to_vec().into()), ..none }
+            }
+            core::DuplexMessage::Close { code, reason } => {
+                DuplexMessage { kind: "close".into(), code: Some(code as u32), reason: Some(reason), ..none }
+            }
+        }
+    }
 }
 
 #[napi(object)]
@@ -511,6 +556,7 @@ impl LinkEndpoint {
             opts.max_request_body = m as usize;
         }
         opts.media.video.recovery_on_nack = settings.recovery_on_nack.unwrap_or(false);
+        opts.duplex = settings.duplex.unwrap_or(false);
         if let Some(k) = settings.identity_key {
             opts.rtc_identity = Some(Arc::new(core::IdentityKey::new(&k).map_err(err)?));
         }
@@ -574,6 +620,7 @@ impl core::RpcHandler for JsRpc {
             method: request.method,
             path: request.path,
             headers: Some(request.headers.into_iter().collect()),
+            duplex: Some(request.duplex),
         };
         let args = (
             LinkSession { inner: session },
@@ -683,12 +730,32 @@ impl LinkSession {
                 .into_iter()
                 .map(|(k, v)| (k.to_ascii_lowercase(), v))
                 .collect(),
+            duplex: false,
         };
         let body = body.map(|b| b.to_vec()).unwrap_or_default();
         let r = self.inner.request(&req, &body).await.map_err(err)?;
         Ok(RpcResponse {
             status: r.status as u32,
             headers: r.headers.into_iter().collect(),
+            body: Arc::new(tokio::sync::Mutex::new(r.body)),
+        })
+    }
+
+    /// A duplex request (a WebSocket's upgrade over the link). Refused without asking when the server's `welcome`
+    /// doesn't list "duplex".
+    #[napi]
+    pub async fn request_duplex(&self, request: RpcRequest) -> Result<DuplexResponse> {
+        let req = core::RpcRequest {
+            method: request.method,
+            path: request.path,
+            headers: lower(request.headers),
+            duplex: true,
+        };
+        let r = self.inner.request_duplex(&req).await.map_err(err)?;
+        Ok(DuplexResponse {
+            status: r.status as u32,
+            headers: r.headers.into_iter().collect(),
+            duplex: r.duplex.map(LinkDuplex::new),
             body: Arc::new(tokio::sync::Mutex::new(r.body)),
         })
     }
@@ -1182,5 +1249,134 @@ impl RpcResponder {
         if let Some(f) = f {
             f.await;
         }
+    }
+
+    /// Accepts a duplex request: 101 with `headers`, then its two directions. (Not one: an error, and the responder
+    /// can still answer.)
+    #[napi]
+    pub async fn accept_duplex(&self, headers: Option<HashMap<String, String>>) -> Result<LinkDuplex> {
+        let mut g = self.inner.lock().await;
+        if !g.as_ref().ok_or_else(finished)?.is_duplex() {
+            return Err(invalid("not a duplex request"));
+        }
+        let mut r = g.take().expect("checked");
+        drop(g);
+        let d = r.accept_duplex(&lower(headers)).await.map_err(err)?;
+        Ok(LinkDuplex::new(d))
+    }
+}
+
+// MARK: duplex
+
+/// An accepted duplex stream (both sides).
+#[napi]
+#[derive(Clone)]
+pub struct LinkDuplex {
+    sender: Arc<tokio::sync::Mutex<core::DuplexSender>>,
+    receiver: Arc<tokio::sync::Mutex<core::DuplexReceiver>>,
+    /// `cancel`: ends a `recv` that is waiting (it holds the receiver's lock), and every later one.
+    cancelled: Arc<tokio::sync::watch::Sender<bool>>,
+    /// true once the other side stopped reading or the session ended (watched from the sender up front: waiting on it
+    /// never holds the sender's lock; every `stopped()` call sees it).
+    stopped: tokio::sync::watch::Receiver<bool>,
+}
+
+impl LinkDuplex {
+    fn new(d: core::Duplex) -> Self {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let f = d.sender.stopped();
+        napi::bindgen_prelude::spawn(async move {
+            f.await;
+            let _ = tx.send(true);
+        });
+        LinkDuplex {
+            sender: Arc::new(tokio::sync::Mutex::new(d.sender)),
+            receiver: Arc::new(tokio::sync::Mutex::new(d.receiver)),
+            cancelled: Arc::new(tokio::sync::watch::channel(false).0),
+            stopped: rx,
+        }
+    }
+}
+
+#[napi]
+impl LinkDuplex {
+    #[napi]
+    pub async fn send(&self, message: DuplexMessage) -> Result<()> {
+        let m = message.to_core()?;
+        self.sender.lock().await.send(&m).await.map_err(err)
+    }
+
+    /// The next message; `null` once the other side finished (or after `cancel`).
+    #[napi]
+    pub async fn recv(&self) -> Result<Option<DuplexMessage>> {
+        let mut cancelled = self.cancelled.subscribe();
+        if *cancelled.borrow() {
+            return Ok(None);
+        }
+        let mut r = self.receiver.lock().await;
+        tokio::select! {
+            m = r.recv() => Ok(m.map_err(err)?.map(DuplexMessage::from_core)),
+            _ = cancelled.wait_for(|c| *c) => {
+                // (a message half read goes with the stream)
+                r.cancel();
+                Ok(None)
+            }
+        }
+    }
+
+    /// Ends this side's direction.
+    #[napi]
+    pub async fn finish(&self) -> Result<()> {
+        self.sender.lock().await.finish().await.map_err(err)
+    }
+
+    /// Stops reading (the other side's sends fail; a waiting `recv` returns null).
+    #[napi]
+    pub fn cancel(&self) {
+        self.cancelled.send_replace(true);
+        let r = self.receiver.clone();
+        napi::bindgen_prelude::spawn(async move { r.lock().await.cancel() });
+    }
+
+    /// Resolves when the other side stopped reading or the session ended.
+    #[napi]
+    pub async fn stopped(&self) {
+        let mut s = self.stopped.clone();
+        let _ = s.wait_for(|v| *v).await;
+    }
+}
+
+/// A duplex request's answer: accepted (`duplex()`), or any other response (`status`, `headers`, the body).
+#[napi]
+pub struct DuplexResponse {
+    status: u32,
+    headers: HashMap<String, String>,
+    duplex: Option<LinkDuplex>,
+    body: Arc<tokio::sync::Mutex<core::RpcBody>>,
+}
+
+#[napi]
+impl DuplexResponse {
+    #[napi(getter)]
+    pub fn status(&self) -> u32 {
+        self.status
+    }
+
+    #[napi(getter)]
+    pub fn headers(&self) -> HashMap<String, String> {
+        self.headers.clone()
+    }
+
+    /// The accepted stream (status 101); null otherwise.
+    #[napi]
+    pub fn duplex(&self) -> Option<LinkDuplex> {
+        self.duplex.clone()
+    }
+
+    /// Not accepted: the response's body.
+    #[napi]
+    pub async fn read_all(&self, limit: Option<u32>) -> Result<Buffer> {
+        let limit = limit.map(|l| l as usize).unwrap_or(64 << 20);
+        Ok(self.body.lock().await.read_all(limit).await.map_err(err)?.to_vec().into())
     }
 }

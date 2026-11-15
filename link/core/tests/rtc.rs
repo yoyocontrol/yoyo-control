@@ -104,6 +104,8 @@ async fn server(guard: GuardConfig) -> Server {
     opts.features = vec!["link".into()];
     opts.rpc = Some(Arc::new(Routes));
     opts.rtc_identity = Some(Arc::new(IdentityKey::new(&identity).unwrap()));
+    // (it takes duplex requests: over QUIC; never over WebRTC — `no_duplex_over_rtc`)
+    opts.duplex = true;
     let listener = Arc::new(ep.listen(opts).unwrap());
     Server { ep, listener, tokens, fp: identity_fingerprint(&identity).unwrap() }
 }
@@ -510,4 +512,15 @@ fn test_identity() -> Vec<u8> {
     let mut key = pair.public_key().as_ref().to_vec();
     key.extend_from_slice(&doc[at..at + 32]);
     key
+}
+
+/// A server that takes duplex requests takes none over WebRTC (its data channels have no receive limit): an rtc
+/// session's welcome doesn't say `duplex`, and the client sends none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_duplex_over_rtc() {
+    let s = server(GuardConfig::default()).await;
+    let (c, _srv, _ep) = dial(&s, "good-nd").await.unwrap();
+    assert!(!c.welcome().features.iter().any(|f| f == "duplex"), "{:?}", c.welcome().features);
+    let r = c.request_duplex(&uu_link::RpcRequest::new("GET", "/ws")).await;
+    assert!(matches!(r, Err(LinkError::InvalidArgument(_))), "{r:?}");
 }

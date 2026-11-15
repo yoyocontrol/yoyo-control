@@ -40,7 +40,10 @@ pub use framing::{MAX_CONTROL_FRAME, MAX_RPC_HEAD};
 pub use guard::GuardConfig;
 pub use path::{Iface, PathInfo, PathKind};
 pub use probe::{ProbeReport, ProbeServerReport};
-pub use rpc::{Headers, RpcBody, RpcHandler, RpcRequest, RpcResponder, RpcResponse};
+pub use rpc::{
+    DUPLEX_FEATURE, Duplex, DuplexMessage, DuplexReceiver, DuplexResponse, DuplexSender, Headers, MAX_DUPLEX_MESSAGE,
+    RpcBody, RpcHandler, RpcRequest, RpcResponder, RpcResponse,
+};
 pub use rtc::{IdentityKey, IdentitySigner, RtcConfig};
 pub use session::{AppInfo, CloseInfo, Device, Hello, ServerInfo, Session, Side, Welcome};
 pub use stats::{MediaStats, StatsSnapshot};

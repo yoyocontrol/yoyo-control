@@ -31,7 +31,21 @@ export interface NativeAuthAnswer {
   code?: string;
   message?: string;
 }
-export interface NativeRpcRequest { method: string; path: string; headers?: Record<string, string> }
+export interface NativeRpcRequest { method: string; path: string; headers?: Record<string, string>; duplex?: boolean }
+export interface NativeDuplexMessage { type: "text" | "binary" | "close"; text?: string; data?: Buffer; code?: number; reason?: string }
+export interface NativeDuplex {
+  send(message: NativeDuplexMessage): Promise<void>;
+  recv(): Promise<NativeDuplexMessage | null>;
+  finish(): Promise<void>;
+  cancel(): void;
+  stopped(): Promise<void>;
+}
+export interface NativeDuplexResponse {
+  readonly status: number;
+  readonly headers: Record<string, string>;
+  duplex(): NativeDuplex | null;
+  readAll(limit?: number): Promise<Buffer>;
+}
 export interface NativeCloseInfo { code?: number; reason: string; remote: boolean; description: string }
 
 export interface NativeRpcResponse {
@@ -48,6 +62,7 @@ export interface NativeRpcResponder {
   finish(): Promise<void>;
   respond(status: number, headers?: Record<string, string>, body?: Buffer): Promise<void>;
   stopped(): Promise<void>;
+  acceptDuplex(headers?: Record<string, string>): Promise<NativeDuplex>;
 }
 
 export interface FrameMeta {
@@ -97,6 +112,7 @@ export interface NativeSession {
   sendControl(message: unknown): Promise<void>;
   recvControl(): Promise<Record<string, unknown> | null>;
   request(request: NativeRpcRequest, body?: Buffer): Promise<NativeRpcResponse>;
+  requestDuplex(request: NativeRpcRequest): Promise<NativeDuplexResponse>;
   sendDatagram(channel: number, payload: Buffer): void;
   sendDatagramRaw(datagram: Buffer): void;
   recvDatagram(channel: number): Promise<Buffer | null>;
@@ -143,7 +159,7 @@ export interface NativeEndpoint {
   dial(target: { id: string; relays?: string[]; direct?: string[] }, hello: NativeHello, connectTimeoutMs?: number): Promise<NativeSession>;
   dialRtc(signal: (offerJson: string) => Promise<string>, fingerprint: string, hello: NativeHello, connectTimeoutMs?: number): Promise<NativeSession>;
   listen(
-    settings: { server: NativeServerInfo; features?: string[]; rpcBlockedPaths?: string[]; maxRequestBody?: number; recoveryOnNack?: boolean; identityKey?: Buffer },
+    settings: { server: NativeServerInfo; features?: string[]; rpcBlockedPaths?: string[]; maxRequestBody?: number; recoveryOnNack?: boolean; identityKey?: Buffer; duplex?: boolean },
     authenticate: (request: NativeAuthRequest) => Promise<NativeAuthAnswer>,
     rpc?: (session: NativeSession, request: NativeRpcRequest, body: Buffer, responder: NativeRpcResponder) => void,
   ): NativeListener;

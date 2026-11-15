@@ -1174,11 +1174,34 @@ impl LinkSession {
                 method: request.method,
                 path: request.path,
                 headers: request.headers.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect(),
+                duplex: false,
             };
             let r = s.request(&req, &body).await?;
             Ok(Arc::new(RpcResponse {
                 status: r.status,
                 headers: r.headers.into_iter().collect(),
+                body: Arc::new(tokio::sync::Mutex::new(r.body)),
+            }))
+        })
+        .await
+    }
+
+    /// A duplex request (a WebSocket's upgrade over the link): accepted (101) → `DuplexResponse.duplex()`; any other
+    /// answer → its status and body. Refused without asking when the server's `welcome` doesn't list "duplex".
+    pub async fn request_duplex(&self, request: RpcRequest) -> Result<Arc<DuplexResponse>> {
+        let s = self.inner.clone();
+        on_runtime(async move {
+            let req = core::RpcRequest {
+                method: request.method,
+                path: request.path,
+                headers: request.headers.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect(),
+                duplex: true,
+            };
+            let r = s.request_duplex(&req).await?;
+            Ok(Arc::new(DuplexResponse {
+                status: r.status,
+                headers: r.headers.into_iter().collect(),
+                duplex: r.duplex.map(|d| Arc::new(LinkDuplex::new(d))),
                 body: Arc::new(tokio::sync::Mutex::new(r.body)),
             }))
         })
@@ -1737,6 +1760,134 @@ impl LinkSession {
 }
 
 // MARK: RPC objects
+
+/// One message of a duplex stream.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum DuplexMessage {
+    Text {
+        text: String,
+    },
+    Binary {
+        data: Vec<u8>,
+    },
+    /// A WebSocket's close (the stream goes on until the other side finishes).
+    Close {
+        code: u16,
+        reason: String,
+    },
+}
+
+impl From<core::DuplexMessage> for DuplexMessage {
+    fn from(m: core::DuplexMessage) -> Self {
+        match m {
+            core::DuplexMessage::Text(text) => DuplexMessage::Text { text },
+            core::DuplexMessage::Binary(b) => DuplexMessage::Binary { data: b.to_vec() },
+            core::DuplexMessage::Close { code, reason } => DuplexMessage::Close { code, reason },
+        }
+    }
+}
+
+impl From<DuplexMessage> for core::DuplexMessage {
+    fn from(m: DuplexMessage) -> Self {
+        match m {
+            DuplexMessage::Text { text } => core::DuplexMessage::Text(text),
+            DuplexMessage::Binary { data } => core::DuplexMessage::Binary(Bytes::from(data)),
+            DuplexMessage::Close { code, reason } => core::DuplexMessage::Close { code, reason },
+        }
+    }
+}
+
+/// An accepted duplex stream.
+#[derive(uniffi::Object)]
+pub struct LinkDuplex {
+    sender: Arc<tokio::sync::Mutex<core::DuplexSender>>,
+    receiver: Arc<tokio::sync::Mutex<core::DuplexReceiver>>,
+    /// `cancel`: ends a `recv` that is waiting (it holds the receiver's lock), and every later one.
+    cancelled: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl LinkDuplex {
+    fn new(d: core::Duplex) -> Self {
+        LinkDuplex {
+            sender: Arc::new(tokio::sync::Mutex::new(d.sender)),
+            receiver: Arc::new(tokio::sync::Mutex::new(d.receiver)),
+            cancelled: Arc::new(tokio::sync::watch::channel(false).0),
+        }
+    }
+}
+
+#[uniffi::export]
+impl LinkDuplex {
+    pub async fn send(&self, message: DuplexMessage) -> Result<()> {
+        let s = self.sender.clone();
+        on_runtime(async move { Ok(s.lock().await.send(&message.into()).await?) }).await
+    }
+
+    /// The next message; nil once the other side finished (or after `cancel`). Not cancel-safe: a Swift task
+    /// cancelled while it waits may lose that message — end a stream with `cancel`, not by cancelling its reader.
+    pub async fn recv(&self) -> Result<Option<DuplexMessage>> {
+        let r = self.receiver.clone();
+        let mut cancelled = self.cancelled.subscribe();
+        on_runtime(async move {
+            if *cancelled.borrow() {
+                return Ok(None);
+            }
+            let mut r = r.lock().await;
+            tokio::select! {
+                m = r.recv() => Ok(m?.map(DuplexMessage::from)),
+                _ = cancelled.wait_for(|c| *c) => {
+                    r.cancel();
+                    Ok(None)
+                }
+            }
+        })
+        .await
+    }
+
+    /// Ends this side's direction.
+    pub async fn finish(&self) -> Result<()> {
+        let s = self.sender.clone();
+        on_runtime(async move { Ok(s.lock().await.finish().await?) }).await
+    }
+
+    /// Stops reading (the other side's sends fail; a waiting `recv` returns nil).
+    pub fn cancel(&self) {
+        self.cancelled.send_replace(true);
+        let r = self.receiver.clone();
+        core::runtime::runtime().spawn(async move { r.lock().await.cancel() });
+    }
+}
+
+/// A duplex request's answer.
+#[derive(uniffi::Object)]
+pub struct DuplexResponse {
+    status: u16,
+    headers: HashMap<String, String>,
+    duplex: Option<Arc<LinkDuplex>>,
+    body: Arc<tokio::sync::Mutex<core::RpcBody>>,
+}
+
+#[uniffi::export]
+impl DuplexResponse {
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    pub fn headers(&self) -> HashMap<String, String> {
+        self.headers.clone()
+    }
+
+    /// The accepted stream (status 101); nil otherwise.
+    pub fn duplex(&self) -> Option<Arc<LinkDuplex>> {
+        self.duplex.clone()
+    }
+
+    /// Not accepted: the response's body (at most `limit` bytes).
+    pub async fn read_all(&self, limit: u64) -> Result<Vec<u8>> {
+        let b = self.body.clone();
+        on_runtime(async move { Ok(b.lock().await.read_all(limit as usize).await?.to_vec()) }).await
+    }
+}
 
 #[derive(uniffi::Object)]
 pub struct RpcResponse {

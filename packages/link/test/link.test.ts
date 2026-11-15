@@ -47,12 +47,22 @@ before(async () => {
   const listener = server.listen({
     server: { id: "srv", name: "Test Linux", platform: "linux" },
     features: ["link"],
+    duplex: true,
     authenticate: async (r) => {
       await new Promise((resolve) => setTimeout(resolve, 5));
       if (r.hello.credential !== "Bearer good") return { ok: false, code: "unauthorized", message: "bad token" };
       return { ok: true, principal: { device: r.hello.device, key: r.clientKey, path: r.path } };
     },
     rpc: async (session, req, body, res) => {
+      if (req.duplex) {
+        if (req.path !== "/ws") return res.json(403, { error: "no" });
+        const d = await res.acceptDuplex({ "x-ws": "yes" });
+        for await (const m of d) {
+          await d.send(m);
+          if (m.type === "close") break;
+        }
+        return d.finish();
+      }
       if (req.path === "/echo") return res.respond(200, { "x-method": req.method }, body);
       if (req.path.startsWith("/events")) {
         await res.head(200, { "content-type": "application/x-ndjson" });
@@ -82,7 +92,7 @@ test("handshake: welcome, principal, hello on the server", async () => {
   const c = await client.dial(target(), hello("Bearer good"));
   const s = await nextServerSession();
   assert.equal(c.welcome.server.name, "Test Linux");
-  assert.deepEqual(c.welcome.features, ["link"]);
+  assert.deepEqual(c.welcome.features, ["link", "duplex"], "a server with an rpc handler takes duplex requests");
   assert.equal((c.principal as any).device.id, "phone-1");
   assert.equal((c.principal as any).key, client.id);
   assert.equal((c.principal as any).path, "lan");
@@ -126,6 +136,42 @@ test("rpc: whole, streamed, blocked, failing handler", async () => {
 
   const big = Buffer.alloc(2 << 20, 9);
   assert.equal((await (await c.request({ method: "POST", path: "/echo" }, big)).readAll()).length, big.length);
+  await c.close();
+});
+
+test("duplex: messages both ways, close, refusal", async () => {
+  const c = await client.dial(target(), hello("Bearer good", "phone-ws"));
+  await nextServerSession();
+  assert.ok(c.welcome.features.includes("duplex"));
+  const r = await c.requestDuplex({ method: "GET", path: "/ws" });
+  assert.equal(r.status, 101);
+  assert.equal(r.headers["x-ws"], "yes");
+  const d = r.duplex!;
+  const sent = Promise.all([d.sendText("hé"), d.sendBinary(Buffer.from([1, 2, 3])), d.sendBinary(Buffer.alloc(1 << 20, 5))]);
+  assert.deepEqual(await d.recv(), { type: "text", text: "hé" });
+  assert.deepEqual(await d.recv(), { type: "binary", data: Buffer.from([1, 2, 3]) });
+  assert.equal(((await d.recv()) as { data: Buffer }).data.length, 1 << 20);
+  await sent;
+  await assert.rejects(d.sendBinary(Buffer.alloc((1 << 20) + 1)));
+  await d.send({ type: "close", code: 4001, reason: "bye" });
+  assert.deepEqual(await d.recv(), { type: "close", code: 4001, reason: "bye" });
+  assert.equal(await d.recv(), null);
+  await d.finish();
+
+  // cancel ends a recv that is waiting, and every later one
+  const r2 = await c.requestDuplex({ method: "GET", path: "/ws" });
+  const d2 = r2.duplex!;
+  assert.equal(r2.duplex, d2, "one wrapper");
+  const waiting = d2.recv();
+  d2.cancel();
+  assert.equal(await waiting, null);
+  assert.equal(await d2.recv(), null);
+  await d2.finish();
+
+  const no = await c.requestDuplex({ method: "GET", path: "/nope" });
+  assert.equal(no.status, 403);
+  assert.equal(no.duplex, null);
+  assert.deepEqual(JSON.parse((await no.readAll()).toString()), { error: "no" });
   await c.close();
 });
 

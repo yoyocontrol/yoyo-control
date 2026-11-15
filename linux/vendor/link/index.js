@@ -143,7 +143,7 @@ export class Endpoint {
             ? (s, req, body, res) => {
                 const response = new RpcResponder(res);
                 Promise.resolve()
-                    .then(() => handler(new Session(s), { ...req, headers: req.headers ?? {} }, body, response))
+                    .then(() => handler(new Session(s), { ...req, headers: req.headers ?? {}, duplex: req.duplex === true }, body, response))
                     .catch((e) => response.fail(e));
             }
             : undefined;
@@ -151,6 +151,7 @@ export class Endpoint {
             server: options.server,
             features: options.features,
             rpcBlockedPaths: options.rpcBlockedPaths,
+            duplex: options.duplex,
             maxRequestBody: options.maxRequestBody,
             recoveryOnNack: options.recoveryOnNack,
             identityKey: options.identityKey,
@@ -237,6 +238,14 @@ export class Session {
     async request(request, body) {
         const r = await call(() => this.s.request(request, body));
         return new RpcResponse(r);
+    }
+    /**
+     * A duplex request (a WebSocket's upgrade over the link): `duplex` when the server accepted it (101), else its
+     * status and body. Rejected without asking when the server's welcome doesn't list "duplex".
+     */
+    async requestDuplex(request) {
+        const r = await call(() => this.s.requestDuplex({ ...request, duplex: true }));
+        return new DuplexResponse(r);
     }
     /** Sends `channel << 4 | 1` then `payload`. */
     sendDatagram(channel, payload) {
@@ -444,11 +453,96 @@ export class RpcResponder {
     stopped() {
         return this.r.stopped();
     }
+    /** Accepts a duplex request (`request.duplex`): 101 with `headers`, then its two directions. */
+    async acceptDuplex(headers = {}) {
+        this.started = true;
+        return new Duplex(await call(() => this.r.acceptDuplex(headers)));
+    }
     /** @internal a handler threw */
     fail(e) {
         if (this.started)
             return;
         const message = e instanceof Error ? e.message : String(e);
         void this.json(500, { error: message }).catch(() => { });
+    }
+}
+/** An accepted duplex stream: messages both ways, each at most 1 MiB, until either side finishes. */
+export class Duplex {
+    d;
+    /** @internal */
+    constructor(d) {
+        this.d = d;
+    }
+    send(message) {
+        const m = message.type === "text"
+            ? { type: "text", text: message.text }
+            : message.type === "binary"
+                ? { type: "binary", data: message.data }
+                : { type: "close", code: message.code, reason: message.reason };
+        return call(() => this.d.send(m));
+    }
+    sendText(text) {
+        return this.send({ type: "text", text });
+    }
+    sendBinary(data) {
+        return this.send({ type: "binary", data });
+    }
+    /** The next message; `null` once the other side finished, or after `cancel` (a waiting one too). */
+    async recv() {
+        const m = await call(() => this.d.recv());
+        if (!m)
+            return null;
+        if (m.type === "text")
+            return { type: "text", text: m.text ?? "" };
+        if (m.type === "binary")
+            return { type: "binary", data: m.data ?? Buffer.alloc(0) };
+        return { type: "close", code: m.code ?? 1005, reason: m.reason ?? "" };
+    }
+    async *[Symbol.asyncIterator]() {
+        for (;;) {
+            const m = await this.recv();
+            if (!m)
+                return;
+            yield m;
+        }
+    }
+    /** Ends this side's direction. */
+    finish() {
+        return call(() => this.d.finish());
+    }
+    /** Stops reading: a waiting `recv` and every later one return `null`; the other side's sends fail. */
+    cancel() {
+        this.d.cancel();
+    }
+    /** Resolves when the other side stopped reading or the session ended. */
+    stopped() {
+        return this.d.stopped();
+    }
+}
+export class DuplexResponse {
+    r;
+    d;
+    /** @internal */
+    constructor(r) {
+        this.r = r;
+    }
+    get status() {
+        return this.r.status;
+    }
+    /** lower-case names */
+    get headers() {
+        return this.r.headers;
+    }
+    /** The accepted stream (status 101); `null` otherwise. */
+    get duplex() {
+        if (this.d === undefined) {
+            const d = this.r.duplex();
+            this.d = d ? new Duplex(d) : null;
+        }
+        return this.d;
+    }
+    /** Not accepted: the response's body. */
+    readAll(limit) {
+        return call(() => this.r.readAll(limit));
     }
 }

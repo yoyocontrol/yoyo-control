@@ -158,6 +158,24 @@ App 的处理器（它走现有的 HTTP 路由，同远程访问的白名单，�
 - 客户端取消（停止读）后，服务端的写入失败，`stopped()` 返回。处理器没 `finish` 就丢掉回答者：流被重置，客户端看到错误，
   不是截短的正文。
 
+**双工请求**（WebSocket 的升级走 Link：语音、电话这类两头随时说话的连接）：
+- 请求头多一个 `"duplex": true`，不带请求体，客户端的方向不 FIN。处理器看到 `RpcRequest.duplex`，用 `RpcResponder::accept_duplex(头)`
+  接受（回答的状态 101），或者像普通请求那样回答（拒绝：任何别的状态加正文）。上面那几个 Link 自己的路径照样 404。
+- 接受之后流的两个方向都是**消息**：`u8 类型 + u32 大端长度 + 内容`，类型 1 = 文本（UTF-8）、2 = 二进制、8 = 关闭
+  （内容 = `u16 大端关闭码 + 原因`，同 WebSocket 的关闭帧）；一条最多 1 MiB（`MAX_DUPLEX_MESSAGE`），超了发的一方报错、收到的一方
+  当协议错误停读。关闭消息只是一条消息：方向的结束是 FIN（`DuplexSender::finish`）；`recv` 返回 `None` = 对方 FIN 了。发送方没
+  `finish` 就丢掉：流被重置。
+- 服务端要自己说收（`ServerOptions.duplex`，Node 的 `listen({ duplex: true })`，默认关）：收的服务端在 **QUIC** 会话的 `welcome`
+  的 `features` 里加 `duplex`（App 自己的列表里写了也会被拿掉，只有这里说了算）；不收的，或者经 WebRTC 来的，双工请求在到处理器之前
+  就回 400，那条流的进向停读（QUIC 上对方再发就失败；WebRTC 上再发来的直接丢掉——都不会堆在服务端）。WebRTC 不收是因为它的数据通道没有自己的接收上限：一条一直在写的
+  双工流会把服务端的内存撑满。Swift 的服务端（FFI）不收。
+- 客户端对没说 `duplex` 的服务端**不发**双工请求（`request_duplex` 直接报 `InvalidArgument`）：旧的服务端会把它当普通请求等请求体，
+  两边互等。普通的 `request` 发出去的头里永远没有 `duplex`。
+- 绑定：Node / Swift 的 `cancel()` 让正在等的 `recv()` 立刻返回空（以后的也一样），流的进向停读；Node 的 `stopped()` 可以等多次
+  （Swift 没有）。Swift 的
+  `recv` 不是取消安全的：Swift 的任务在等的时候被取消，那条消息可能丢——要结束一条流用 `cancel`。
+- 浏览器的 wasm（`link/wasm`）没有双工请求。
+
 ### 数据报
 
 字节 0 = `通道 << 4 | 1`（版本 1），整数大端。通道：1 视频、2 声音、3 输入、4 反馈、5 指针，归会话里的媒体层
@@ -732,12 +750,15 @@ TEST_RUNNER_YOYO_LINK_SMOKE=$TMPDIR/serve.json TEST_RUNNER_YOYO_LINK_SMOKE_SECON
   `ServerOptions::rtc_identity: Option<Arc<dyn rtc::IdentitySigner>>`（`rtc::IdentityKey`）+ `Listener::accept_rtc_offer(json, source)`。
 - `Session`：`id`、`side`、`transport()`（`Transport::Quic` / `Rtc`）、`remote_id`、`hello`、`welcome`、`principal`；`send_control(&Value)` / `recv_control()`；
   `request(&RpcRequest, body) -> RpcResponse { status, headers, body: RpcBody }`（`chunk()`、`read_all(limit)`、`cancel()`）；
+  `request_duplex(&RpcRequest) -> DuplexResponse { status, headers, duplex: Option<Duplex>, body }`（`Duplex { sender, receiver }`：
+  `DuplexSender::send(&DuplexMessage)` / `finish()` / `stopped()`，`DuplexReceiver::recv()` / `cancel()`）；
   `send_datagram(channel, payload)`、`send_datagram_raw(bytes)`、`recv_datagram(channel)`、`try_recv_datagram`、`max_datagram_size`、
   `datagram_send_buffer_space`；`target_bitrate()`；`path()` / `watch_path()`；`stats()`、`peer_stats()`、`set_media_stats`；
   `close(CloseCode, reason)`、`closed()`、`close_info()`；`connection()`（QUIC 的连接，rtc 上 `None`）；`probe(Duration) -> ProbeReport`
   （客户端：「测速」；丢掉 future = 停止）。会话的最后一个句柄丢掉时自动关闭（代码 0）。
   媒体：见「媒体」（`media::{FrameMeta, Codec, FrameKind, InputKind, ServerEvent, ClientEvent, …}`）。
-- `RpcHandler::handle(session, request, body, RpcResponder)`；`RpcResponder`：`head`、`write`、`finish`、`respond`、`stopped()`。
+- `RpcHandler::handle(session, request, body, RpcResponder)`；`RpcResponder`：`head`、`write`、`finish`、`respond`、`stopped()`、
+  双工请求的 `is_duplex()` / `accept_duplex(headers) -> Duplex`。
 - `binding::{sign_binding, verify_binding, fingerprint, identity_fingerprint, generate_link_key, link_public_key,
   load_or_create_link_key}`；`cc::{MediaCc, MediaCcFactory, TargetBitrate}`；`guard::{Guard, GuardConfig}`；
   `stats::{StatsSnapshot, MediaStats}`；`log::set_log_sink`；`runtime::runtime()`（绑定层共用的 tokio 运行时，2 个线程）；
@@ -757,6 +778,8 @@ TEST_RUNNER_YOYO_LINK_SMOKE=$TMPDIR/serve.json TEST_RUNNER_YOYO_LINK_SMOKE_SECON
 `path()`、`stats()`、`peerStats()`、`setMediaStats(stats:)`、`probe(durationMs:)` → `ProbeReport`（「测速」，带 `json`；取消 Task = 停止）、
 `close(code:reason:)`、`closed()`）、`RpcResponse`（`status()`、
 `headers()`、`chunk()`、`readAll(limit:)`、`cancel()`）、`RpcResponder`（`head`、`write`、`finish`、`respond`、`stopped`）、
+`LinkSession.requestDuplex(request:)` → `DuplexResponse`（`status()`、`headers()`、`duplex()` → `LinkDuplex`：`send(message:)`、
+`recv()`、`finish()`、`cancel()`；`DuplexMessage` 的 `.text` / `.binary` / `.close(code:reason:)`；Swift 这边只有客户端）、
 `AuthReply`（`accept(principalJson:features:)`、`deny(code:message:)`），媒体（`openVideo(stream:)`、`canSendFrame(stream:)`、
 `sendFrame(stream:meta:au:)`、`sendAudio`、`sendCursor`、`requestKeyframe`、`nextServerEvent()` → `ServerMediaEvent`、
 `sendInput(kind:json:)`、`frameDecoded(stream:frame:ok:)`、`nextClientEvent()` → `ClientMediaEvent`；`FrameMeta`、`VideoFrame`、
@@ -786,7 +809,9 @@ Rust 的运行时上跑，里面的 panic 变成 `LinkError.Internal`（发布�
 `closed()`；媒体 `openVideo`、`canSendFrame`、`frameRateCap(stream)`（旧的原生插件没有：null）、`sendFrame(stream, { codec, kind, width, height }, au)`、`sendAudio`、`sendCursor`、
 `requestKeyframe`、`nextServerEvent()` / `serverEvents()`、`sendInput("discrete" | "move", event)`、`frameDecoded`、
 `nextClientEvent()` / `clientEvents()`，事件是带 `type` 的对象）；`RpcResponse`（`status`、`headers`、`chunk()`、`readAll()`、`text()`、`json()`、`for await`、`cancel()`）；
-`RpcResponder`（`head`、`write`、`finish`、`respond`、`json`、`stopped`）；`generateLinkKey`、`linkPublicKey`、`loadOrCreateLinkKey`、
+`RpcResponder`（`head`、`write`、`finish`、`respond`、`json`、`stopped`、双工请求的 `acceptDuplex(headers)`）；`Session.requestDuplex(req)` →
+`DuplexResponse`（`status`、`headers`、`duplex`、`readAll`）；`Duplex`（`send({type,…})` / `sendText` / `sendBinary`、`recv()`、`for await`、
+`finish`、`cancel`、`stopped`）；`generateLinkKey`、`linkPublicKey`、`loadOrCreateLinkKey`、
 `identityFingerprint`、`signBinding`、`verifyBinding`、`setLogSink`；`Channel`、`CloseCode`；错误都是 `LinkError`（`kind`，拒绝时
 `code`）。`authenticate(request)` 返回（或 resolve 成）`{ ok: true, principal, features? }` / `{ ok: false, code, message? }`；
 `rpc(session, request, body, response)` 抛错时回 500。

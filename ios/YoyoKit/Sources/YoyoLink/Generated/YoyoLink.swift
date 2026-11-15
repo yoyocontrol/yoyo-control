@@ -1198,6 +1198,377 @@ public func FfiConverterTypeAuthenticator_lower(_ value: Authenticator) -> UInt6
 
 
 
+/**
+ * A duplex request's answer.
+ */
+public protocol DuplexResponseProtocol: AnyObject, Sendable {
+    
+    /**
+     * The accepted stream (status 101); nil otherwise.
+     */
+    func duplex()  -> LinkDuplex?
+    
+    func headers()  -> [String: String]
+    
+    /**
+     * Not accepted: the response's body (at most `limit` bytes).
+     */
+    func readAll(limit: UInt64) async throws  -> Data
+    
+    func status()  -> UInt16
+    
+}
+/**
+ * A duplex request's answer.
+ */
+open class DuplexResponse: DuplexResponseProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_uu_link_ffi_fn_clone_duplexresponse(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_uu_link_ffi_fn_free_duplexresponse(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * The accepted stream (status 101); nil otherwise.
+     */
+open func duplex() -> LinkDuplex?  {
+    return try!  FfiConverterOptionTypeLinkDuplex.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_uu_link_ffi_fn_method_duplexresponse_duplex(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func headers() -> [String: String]  {
+    return try!  FfiConverterDictionaryStringString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_uu_link_ffi_fn_method_duplexresponse_headers(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Not accepted: the response's body (at most `limit` bytes).
+     */
+open func readAll(limit: UInt64)async throws  -> Data  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_uu_link_ffi_fn_method_duplexresponse_read_all(
+                        self.uniffiCloneHandle(),FfiConverterUInt64.lower(limit)
+                )
+            },
+            pollFunc: ffi_uu_link_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_uu_link_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_uu_link_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterData.lift,
+            errorHandler: FfiConverterTypeLinkError_lift
+        )
+}
+    
+open func status() -> UInt16  {
+    return try!  FfiConverterUInt16.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_uu_link_ffi_fn_method_duplexresponse_status(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDuplexResponse: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = DuplexResponse
+
+    public static func lift(_ handle: UInt64) throws -> DuplexResponse {
+        return DuplexResponse(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: DuplexResponse) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DuplexResponse {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: DuplexResponse, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDuplexResponse_lift(_ handle: UInt64) throws -> DuplexResponse {
+    return try FfiConverterTypeDuplexResponse.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDuplexResponse_lower(_ value: DuplexResponse) -> UInt64 {
+    return FfiConverterTypeDuplexResponse.lower(value)
+}
+
+
+
+
+
+
+/**
+ * An accepted duplex stream.
+ */
+public protocol LinkDuplexProtocol: AnyObject, Sendable {
+    
+    /**
+     * Stops reading (the other side's sends fail; a waiting `recv` returns nil).
+     */
+    func cancel() 
+    
+    /**
+     * Ends this side's direction.
+     */
+    func finish() async throws 
+    
+    /**
+     * The next message; nil once the other side finished (or after `cancel`). Not cancel-safe: a Swift task
+     * cancelled while it waits may lose that message — end a stream with `cancel`, not by cancelling its reader.
+     */
+    func recv() async throws  -> DuplexMessage?
+    
+    func send(message: DuplexMessage) async throws 
+    
+}
+/**
+ * An accepted duplex stream.
+ */
+open class LinkDuplex: LinkDuplexProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_uu_link_ffi_fn_clone_linkduplex(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_uu_link_ffi_fn_free_linkduplex(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Stops reading (the other side's sends fail; a waiting `recv` returns nil).
+     */
+open func cancel()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_uu_link_ffi_fn_method_linkduplex_cancel(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Ends this side's direction.
+     */
+open func finish()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_uu_link_ffi_fn_method_linkduplex_finish(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_uu_link_ffi_rust_future_poll_void,
+            completeFunc: ffi_uu_link_ffi_rust_future_complete_void,
+            freeFunc: ffi_uu_link_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLinkError_lift
+        )
+}
+    
+    /**
+     * The next message; nil once the other side finished (or after `cancel`). Not cancel-safe: a Swift task
+     * cancelled while it waits may lose that message — end a stream with `cancel`, not by cancelling its reader.
+     */
+open func recv()async throws  -> DuplexMessage?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_uu_link_ffi_fn_method_linkduplex_recv(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_uu_link_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_uu_link_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_uu_link_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeDuplexMessage.lift,
+            errorHandler: FfiConverterTypeLinkError_lift
+        )
+}
+    
+open func send(message: DuplexMessage)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_uu_link_ffi_fn_method_linkduplex_send(
+                        self.uniffiCloneHandle(),FfiConverterTypeDuplexMessage_lower(message)
+                )
+            },
+            pollFunc: ffi_uu_link_ffi_rust_future_poll_void,
+            completeFunc: ffi_uu_link_ffi_rust_future_complete_void,
+            freeFunc: ffi_uu_link_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeLinkError_lift
+        )
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLinkDuplex: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = LinkDuplex
+
+    public static func lift(_ handle: UInt64) throws -> LinkDuplex {
+        return LinkDuplex(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: LinkDuplex) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LinkDuplex {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: LinkDuplex, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLinkDuplex_lift(_ handle: UInt64) throws -> LinkDuplex {
+    return try FfiConverterTypeLinkDuplex.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLinkDuplex_lower(_ value: LinkDuplex) -> UInt64 {
+    return FfiConverterTypeLinkDuplex.lower(value)
+}
+
+
+
+
+
+
 public protocol LinkEndpointProtocol: AnyObject, Sendable {
     
     /**
@@ -1849,6 +2220,12 @@ public protocol LinkSessionProtocol: AnyObject, Sendable {
     func request(request: RpcRequest, body: Data) async throws  -> RpcResponse
     
     /**
+     * A duplex request (a WebSocket's upgrade over the link): accepted (101) → `DuplexResponse.duplex()`; any other
+     * answer → its status and body. Refused without asking when the server's `welcome` doesn't list "duplex".
+     */
+    func requestDuplex(request: RpcRequest) async throws  -> DuplexResponse
+    
+    /**
      * Server: force a key frame next; client: ask for one.
      */
     func requestKeyframe(stream: UInt8) 
@@ -2284,6 +2661,26 @@ open func request(request: RpcRequest, body: Data)async throws  -> RpcResponse  
             completeFunc: ffi_uu_link_ffi_rust_future_complete_u64,
             freeFunc: ffi_uu_link_ffi_rust_future_free_u64,
             liftFunc: FfiConverterTypeRpcResponse_lift,
+            errorHandler: FfiConverterTypeLinkError_lift
+        )
+}
+    
+    /**
+     * A duplex request (a WebSocket's upgrade over the link): accepted (101) → `DuplexResponse.duplex()`; any other
+     * answer → its status and body. Refused without asking when the server's `welcome` doesn't list "duplex".
+     */
+open func requestDuplex(request: RpcRequest)async throws  -> DuplexResponse  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_uu_link_ffi_fn_method_linksession_request_duplex(
+                        self.uniffiCloneHandle(),FfiConverterTypeRpcRequest_lower(request)
+                )
+            },
+            pollFunc: ffi_uu_link_ffi_rust_future_poll_u64,
+            completeFunc: ffi_uu_link_ffi_rust_future_complete_u64,
+            freeFunc: ffi_uu_link_ffi_rust_future_free_u64,
+            liftFunc: FfiConverterTypeDuplexResponse_lift,
             errorHandler: FfiConverterTypeLinkError_lift
         )
 }
@@ -6132,6 +6529,95 @@ public func FfiConverterTypeDenyCode_lower(_ value: DenyCode) -> RustBuffer {
 
 
 
+/**
+ * One message of a duplex stream.
+ */
+
+public enum DuplexMessage: Equatable, Hashable {
+    
+    case text(text: String
+    )
+    case binary(data: Data
+    )
+    /**
+     * A WebSocket's close (the stream goes on until the other side finishes).
+     */
+    case close(code: UInt16, reason: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DuplexMessage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDuplexMessage: FfiConverterRustBuffer {
+    typealias SwiftType = DuplexMessage
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DuplexMessage {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .text(text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .binary(data: try FfiConverterData.read(from: &buf)
+        )
+        
+        case 3: return .close(code: try FfiConverterUInt16.read(from: &buf), reason: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DuplexMessage, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .text(text):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(text, into: &buf)
+            
+        
+        case let .binary(data):
+            writeInt(&buf, Int32(2))
+            FfiConverterData.write(data, into: &buf)
+            
+        
+        case let .close(code,reason):
+            writeInt(&buf, Int32(3))
+            FfiConverterUInt16.write(code, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDuplexMessage_lift(_ buf: RustBuffer) throws -> DuplexMessage {
+    return try FfiConverterTypeDuplexMessage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDuplexMessage_lower(_ value: DuplexMessage) -> RustBuffer {
+    return FfiConverterTypeDuplexMessage.lower(value)
+}
+
+
+
 
 public enum FrameKind: Equatable, Hashable {
     
@@ -7253,6 +7739,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeLinkDuplex: FfiConverterRustBuffer {
+    typealias SwiftType = LinkDuplex?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeLinkDuplex.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeLinkDuplex.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeLinkSession: FfiConverterRustBuffer {
     typealias SwiftType = LinkSession?
 
@@ -7437,6 +7947,30 @@ fileprivate struct FfiConverterOptionTypeClientMediaEvent: FfiConverterRustBuffe
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeClientMediaEvent.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeDuplexMessage: FfiConverterRustBuffer {
+    typealias SwiftType = DuplexMessage?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeDuplexMessage.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeDuplexMessage.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -7839,6 +8373,30 @@ private let initializationResult: InitializationResult = {
     if (uniffi_uu_link_ffi_checksum_method_authenticator_authenticate() != 26051) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_uu_link_ffi_checksum_method_duplexresponse_duplex() != 15898) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_uu_link_ffi_checksum_method_duplexresponse_headers() != 30418) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_uu_link_ffi_checksum_method_duplexresponse_read_all() != 52259) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_uu_link_ffi_checksum_method_duplexresponse_status() != 27619) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_uu_link_ffi_checksum_method_linkduplex_cancel() != 30526) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_uu_link_ffi_checksum_method_linkduplex_finish() != 6661) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_uu_link_ffi_checksum_method_linkduplex_recv() != 8137) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_uu_link_ffi_checksum_method_linkduplex_send() != 45545) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_uu_link_ffi_checksum_method_linkendpoint_add_external_addr() != 41919) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -7957,6 +8515,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_uu_link_ffi_checksum_method_linksession_request() != 19133) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_uu_link_ffi_checksum_method_linksession_request_duplex() != 57010) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_uu_link_ffi_checksum_method_linksession_request_keyframe() != 5364) {

@@ -48,7 +48,9 @@ done
 # ---- win32-x64: mingw-w64. The addon imports N-API from node.exe: an import library made from napi-sys's names
 say "win32-x64 (mingw-w64) ..."
 host=x86_64-w64-mingw32
-libnode="$work/libnode"
+# (a fixed place, not under the version's work directory: the addon's build script records this path, and cargo reuses
+# that record on the next release, after the work directory is gone)
+libnode="$link/target/link-node/libnode"
 mkdir -p "$libnode" && : > "$libnode/libnode.dll"
 napi_sys=$(cd "$link" && cargo metadata --format-version 1 2>/dev/null | python3 -c 'import json,sys; print([p["manifest_path"] for p in json.load(sys.stdin)["packages"] if p["name"]=="napi-sys"][0])')
 { echo "LIBRARY node.exe"; echo "EXPORTS"; grep -rhoE '\b(napi|node_api|uv)_[a-z0-9_]+\b' "$(dirname "$napi_sys")/src" | sort -u | sed 's/^/  /'; } > "$libnode/node.def"

@@ -11,9 +11,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use serde_json::{Value, json};
 use uu_link::{
-    AuthDecision, AuthRequest, Authenticator, CloseCode, DenyCode, DialOptions, DialTarget, Endpoint, EndpointConfig,
-    GuardConfig, Headers, Hello, LinkError, PathKind, RpcHandler, RpcRequest, RpcResponder, ServerInfo, ServerOptions,
-    Session,
+    AuthDecision, AuthRequest, Authenticator, CloseCode, DenyCode, DialOptions, DialTarget, DuplexMessage, Endpoint,
+    EndpointConfig, GuardConfig, Headers, Hello, LinkError, PathKind, RpcHandler, RpcRequest, RpcResponder, ServerInfo,
+    ServerOptions, Session,
     binding::{generate_link_key, identity_fingerprint},
     cc::MediaCc,
 };
@@ -67,6 +67,29 @@ impl RpcHandler for Routes {
     async fn handle(&self, session: Session, req: RpcRequest, body: Bytes, mut res: RpcResponder) {
         let mut h = Headers::new();
         h.insert("x-principal".into(), session.principal()["device"]["id"].as_str().unwrap_or("").into());
+        if req.duplex {
+            match req.path.as_str() {
+                // echoes every message; a close is echoed and then this side finishes
+                "/ws" => {
+                    let mut h = Headers::new();
+                    h.insert("x-ws".into(), "yes".into());
+                    let Ok(mut d) = res.accept_duplex(&h).await else { return };
+                    while let Ok(Some(m)) = d.receiver.recv().await {
+                        let close = matches!(m, DuplexMessage::Close { .. });
+                        if d.sender.send(&m).await.is_err() {
+                            return;
+                        }
+                        if close {
+                            let _ = d.sender.finish().await;
+                            return;
+                        }
+                    }
+                    let _ = d.sender.finish().await;
+                }
+                _ => res.respond(403, &h, b"{\"error\":\"no\"}").await.unwrap(),
+            }
+            return;
+        }
         match req.path.split('?').next().unwrap() {
             "/echo" => {
                 h.insert("x-method".into(), req.method.clone());
@@ -110,6 +133,7 @@ async fn server(guard: GuardConfig, hello_timeout: Duration) -> Server {
     );
     opts.features = vec!["link".into(), "clipboard".into()];
     opts.rpc = Some(Arc::new(Routes));
+    opts.duplex = true;
     opts.hello_timeout = hello_timeout;
     let listener = ep.listen(opts).unwrap();
     let (tx, sessions) = tokio::sync::mpsc::unbounded_channel();
@@ -155,7 +179,7 @@ async fn handshake_accepted() {
     let srv = s.sessions.recv().await.unwrap();
 
     assert_eq!(c.welcome().server.name, "Test Mac");
-    assert_eq!(c.welcome().features, vec!["link", "clipboard"]);
+    assert_eq!(c.welcome().features, vec!["link", "clipboard", "duplex"]);
     assert_eq!(c.principal()["device"]["id"], "phone-a");
     assert!(c.welcome().max_datagram > 1000, "max datagram {}", c.welcome().max_datagram);
     assert_eq!(srv.hello().device.name, "phone-a's iPhone");
@@ -735,4 +759,92 @@ fn test_identity() -> Vec<u8> {
     let mut key = pair.public_key().as_ref().to_vec();
     key.extend_from_slice(&doc[at..at + 32]);
     key
+}
+
+/// Duplex requests (a WebSocket's upgrade over the link): messages both ways at once, the size limit, the close
+/// message and FIN, a refusal (any status but 101, with its body), a path the link keeps for itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplex_requests() {
+    let mut s = default_server().await;
+    let c = dial(&s, "good-ws", "ws").await.unwrap();
+    let _srv = s.sessions.recv().await.unwrap();
+    assert!(c.welcome().features.iter().any(|f| f == "duplex"), "{:?}", c.welcome().features);
+
+    let r = c.request_duplex(&RpcRequest::new("GET", "/ws")).await.unwrap();
+    assert_eq!(r.status, 101);
+    assert_eq!(r.headers.get("x-ws").map(String::as_str), Some("yes"));
+    let uu_link::Duplex { mut sender, mut receiver } = r.duplex.unwrap();
+
+    // both directions at once: 200 messages out while their echoes come back
+    let writer = tokio::spawn(async move {
+        for i in 0..200u32 {
+            let m = if i % 2 == 0 {
+                DuplexMessage::Text(format!("m{i}"))
+            } else {
+                DuplexMessage::Binary(Bytes::from(i.to_be_bytes().to_vec()))
+            };
+            sender.send(&m).await.unwrap();
+        }
+        // the largest message, then one byte over
+        sender.send(&DuplexMessage::Binary(vec![7u8; uu_link::MAX_DUPLEX_MESSAGE].into())).await.unwrap();
+        assert!(sender.send(&DuplexMessage::Binary(vec![7u8; uu_link::MAX_DUPLEX_MESSAGE + 1].into())).await.is_err());
+        sender.send(&DuplexMessage::Close { code: 4001, reason: "bye".into() }).await.unwrap();
+        sender
+    });
+    for i in 0..200u32 {
+        let m = tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await.unwrap().unwrap().unwrap();
+        let want = if i % 2 == 0 {
+            DuplexMessage::Text(format!("m{i}"))
+        } else {
+            DuplexMessage::Binary(Bytes::from(i.to_be_bytes().to_vec()))
+        };
+        assert_eq!(m, want);
+    }
+    match receiver.recv().await.unwrap().unwrap() {
+        DuplexMessage::Binary(b) => assert_eq!(b.len(), uu_link::MAX_DUPLEX_MESSAGE),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(receiver.recv().await.unwrap().unwrap(), DuplexMessage::Close { code: 4001, reason: "bye".into() });
+    // the server finished after echoing the close: the stream ends
+    assert_eq!(receiver.recv().await.unwrap(), None);
+    let mut sender = writer.await.unwrap();
+    sender.finish().await.unwrap();
+
+    // refused: its status and body, no stream
+    let mut no = c.request_duplex(&RpcRequest::new("GET", "/nope")).await.unwrap();
+    assert_eq!(no.status, 403);
+    assert!(no.duplex.is_none());
+    assert_eq!(&no.body.read_all(1024).await.unwrap()[..], b"{\"error\":\"no\"}");
+    // the link's own paths stay closed to duplex requests too
+    let blocked = c.request_duplex(&RpcRequest::new("GET", "/control")).await.unwrap();
+    assert_eq!(blocked.status, 404);
+    // plain requests still work on the same session
+    let mut e = c.request(&RpcRequest::new("POST", "/echo"), b"hi").await.unwrap();
+    assert_eq!(&e.body.read_all(1024).await.unwrap()[..], b"hi");
+}
+
+/// A server with no RPC handler says nothing of duplex in its welcome: the client sends no duplex request to it (an
+/// older server would wait for a body that never comes).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_duplex_request_to_a_server_without_it() {
+    let mut cfg = EndpointConfig::server(generate_link_key(), 0);
+    cfg.portmapper = Some(false);
+    let ep = Endpoint::bind(cfg).await.unwrap();
+    let opts = ServerOptions::new(
+        ServerInfo { id: "srv-2".into(), name: "No RPC".into(), platform: "macos".into() },
+        Arc::new(Tokens::default()),
+    );
+    let listener = ep.listen(opts).unwrap();
+    tokio::spawn(async move {
+        let mut kept = Vec::new();
+        while let Some(s) = listener.accept().await {
+            kept.push(s);
+        }
+    });
+    let t = DialTarget { id: ep.id(), relays: vec![], direct: vec![format!("127.0.0.1:{}", ep.port())] };
+    let c = client().await.dial(&t, &hello("good-n", "n"), &DialOptions::default()).await.unwrap();
+    assert!(!c.welcome().features.iter().any(|f| f == "duplex"));
+    let r =
+        tokio::time::timeout(Duration::from_secs(2), c.request_duplex(&RpcRequest::new("GET", "/ws"))).await.unwrap();
+    assert!(matches!(r, Err(LinkError::InvalidArgument(_))), "{r:?}");
 }

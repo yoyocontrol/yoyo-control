@@ -15,8 +15,8 @@ import PackageDescription
 let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let linkLocal = FileManager.default.fileExists(atPath: packageDir + "/link/target/apple/YoyoLinkFFI.xcframework/Info.plist")
 let linkRelease: (url: String, checksum: String)? = (
-    url: "https://github.com/yoyocontrol/yoyo-control/releases/download/link-apple-v0.4.0/YoyoLinkFFI-0.4.0.xcframework.zip",
-    checksum: "0afbf114b6a03e6c54d3e353d30393f7c1fc4418d6bfa49149510bc079b8806a")
+    url: "https://github.com/yoyocontrol/yoyo-control/releases/download/link-apple-v0.5.0/YoyoLinkFFI-0.5.0.xcframework.zip",
+    checksum: "6c13d66d3ff9239f6cae3fd8f55c39d871b297131e8d9b55875a153b1a8b44b5")
 // Yoyo Control Pro (StoreKit) is the product's, not the open-source kits': the public tree (scripts/public) has no
 // ios/YoyoKit/Sources/YoyoPro, and then this package has no `YoyoPro`.
 let hasPro = FileManager.default.fileExists(atPath: packageDir + "/ios/YoyoKit/Sources/YoyoPro")

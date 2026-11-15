@@ -13,6 +13,9 @@ import {
   type NativeListener,
   type NativeRpcRequest,
   type NativeRpcResponder,
+  type NativeDuplex,
+  type NativeDuplexMessage,
+  type NativeDuplexResponse,
   type NativeRpcResponse,
   type NativeSession,
   type NativeWelcome,
@@ -188,6 +191,8 @@ export interface RpcRequest {
   /** path and query */
   path: string;
   headers?: Record<string, string>;
+  /** a duplex request (a WebSocket's upgrade over the link): no body; answered by `acceptDuplex` or as any request */
+  duplex?: boolean;
 }
 
 export type RpcHandler = (session: Session, request: RpcRequest, body: Buffer, response: RpcResponder) => void | Promise<void>;
@@ -197,6 +202,8 @@ export interface ListenOptions {
   features?: string[];
   authenticate: (request: AuthRequest) => AuthDecision | Promise<AuthDecision>;
   rpc?: RpcHandler;
+  /** Takes duplex requests (`rpc` answers them with `response.acceptDuplex`; QUIC sessions only). Default off. */
+  duplex?: boolean;
   /** Paths answered 404 (default: the channels' HTTP paths: /stream, /stream/ack, /audio, /input, /control). */
   rpcBlockedPaths?: string[];
   maxRequestBody?: number;
@@ -299,7 +306,7 @@ export class Endpoint {
       ? (s: NativeSession, req: NativeRpcRequest, body: Buffer, res: NativeRpcResponder) => {
           const response = new RpcResponder(res);
           Promise.resolve()
-            .then(() => handler(new Session(s), { ...req, headers: req.headers ?? {} }, body, response))
+            .then(() => handler(new Session(s), { ...req, headers: req.headers ?? {}, duplex: req.duplex === true }, body, response))
             .catch((e: unknown) => response.fail(e));
         }
       : undefined;
@@ -307,6 +314,7 @@ export class Endpoint {
       server: options.server,
       features: options.features,
       rpcBlockedPaths: options.rpcBlockedPaths,
+      duplex: options.duplex,
       maxRequestBody: options.maxRequestBody,
       recoveryOnNack: options.recoveryOnNack,
       identityKey: options.identityKey,
@@ -433,6 +441,15 @@ export class Session {
   async request(request: RpcRequest, body?: Buffer): Promise<RpcResponse> {
     const r = await call(() => this.s.request(request, body));
     return new RpcResponse(r);
+  }
+
+  /**
+   * A duplex request (a WebSocket's upgrade over the link): `duplex` when the server accepted it (101), else its
+   * status and body. Rejected without asking when the server's welcome doesn't list "duplex".
+   */
+  async requestDuplex(request: Omit<RpcRequest, "duplex">): Promise<DuplexResponse> {
+    const r = await call(() => this.s.requestDuplex({ ...request, duplex: true }));
+    return new DuplexResponse(r);
   }
 
   /** Sends `channel << 4 | 1` then `payload`. */
@@ -679,10 +696,108 @@ export class RpcResponder {
     return this.r.stopped();
   }
 
+  /** Accepts a duplex request (`request.duplex`): 101 with `headers`, then its two directions. */
+  async acceptDuplex(headers: Record<string, string> = {}): Promise<Duplex> {
+    this.started = true;
+    return new Duplex(await call(() => this.r.acceptDuplex(headers)));
+  }
+
   /** @internal a handler threw */
   fail(e: unknown): void {
     if (this.started) return;
     const message = e instanceof Error ? e.message : String(e);
     void this.json(500, { error: message }).catch(() => {});
+  }
+}
+
+/** One message of a duplex stream. */
+export type DuplexMessage =
+  | { type: "text"; text: string }
+  | { type: "binary"; data: Buffer }
+  | { type: "close"; code: number; reason: string };
+
+/** An accepted duplex stream: messages both ways, each at most 1 MiB, until either side finishes. */
+export class Duplex {
+  /** @internal */
+  constructor(private readonly d: NativeDuplex) {}
+
+  send(message: DuplexMessage): Promise<void> {
+    const m: NativeDuplexMessage =
+      message.type === "text"
+        ? { type: "text", text: message.text }
+        : message.type === "binary"
+          ? { type: "binary", data: message.data }
+          : { type: "close", code: message.code, reason: message.reason };
+    return call(() => this.d.send(m));
+  }
+
+  sendText(text: string): Promise<void> {
+    return this.send({ type: "text", text });
+  }
+
+  sendBinary(data: Buffer): Promise<void> {
+    return this.send({ type: "binary", data });
+  }
+
+  /** The next message; `null` once the other side finished, or after `cancel` (a waiting one too). */
+  async recv(): Promise<DuplexMessage | null> {
+    const m = await call(() => this.d.recv());
+    if (!m) return null;
+    if (m.type === "text") return { type: "text", text: m.text ?? "" };
+    if (m.type === "binary") return { type: "binary", data: m.data ?? Buffer.alloc(0) };
+    return { type: "close", code: m.code ?? 1005, reason: m.reason ?? "" };
+  }
+
+  async *[Symbol.asyncIterator](): AsyncIterator<DuplexMessage> {
+    for (;;) {
+      const m = await this.recv();
+      if (!m) return;
+      yield m;
+    }
+  }
+
+  /** Ends this side's direction. */
+  finish(): Promise<void> {
+    return call(() => this.d.finish());
+  }
+
+  /** Stops reading: a waiting `recv` and every later one return `null`; the other side's sends fail. */
+  cancel(): void {
+    this.d.cancel();
+  }
+
+  /** Resolves when the other side stopped reading or the session ended. */
+  stopped(): Promise<void> {
+    return this.d.stopped();
+  }
+}
+
+export class DuplexResponse {
+  private d: Duplex | null | undefined;
+
+  /** @internal */
+  constructor(private readonly r: NativeDuplexResponse) {}
+
+  get status(): number {
+    return this.r.status;
+  }
+
+  /** lower-case names */
+  get headers(): Record<string, string> {
+    return this.r.headers;
+  }
+
+  /** The accepted stream (status 101); `null` otherwise. */
+  get duplex(): Duplex | null {
+    if (this.d === undefined) {
+      const d = this.r.duplex();
+      this.d = d ? new Duplex(d) : null;
+    }
+    return this.d;
+  }
+
+  /** Not accepted: the response's body. */
+  readAll(limit?: number): Promise<Buffer> {
+    return call(() => this.r.readAll(limit));
   }
 }

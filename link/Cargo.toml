@@ -49,8 +49,9 @@ strip = true
 inherits = "release"
 panic = "unwind"
 
-# sctp-proto (str0m's SCTP) with uu's patch: empty data channel messages (the rtc streams' FIN) go out as one byte
-# (RFC 8831 §6.6) instead of not at all. vendor/sctp-proto is 0.10.8 from crates.io plus that one change.
+# sctp-proto (str0m's SCTP) with uu's patches (each marked "uu patch" in the source), among them: empty data channel
+# messages (the rtc streams' FIN) go out as one byte (RFC 8831 §6.6) instead of not at all; DATA for a stream this
+# side stopped reading (a local close) is acknowledged and dropped instead of held until the association aborts.
 [patch.crates-io]
 sctp-proto = { path = "vendor/sctp-proto" }
 

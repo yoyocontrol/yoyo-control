@@ -28,7 +28,13 @@ noq-udp.workspace = true
 socket2.workspace = true
 netdev.workspace = true
 
+[features]
+# hooks for the integration tests only (tests/rtc.rs: refused grant writes); never in a build that ships
+test-hooks = []
+
 [dev-dependencies]
+# the integration tests build the core with its test hooks
+uu-link = { path = ".", features = ["test-hooks"] }
 tokio = { workspace = true, features = ["test-util"] }
 rand.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

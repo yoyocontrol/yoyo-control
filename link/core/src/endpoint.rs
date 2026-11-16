@@ -40,7 +40,7 @@ use crate::{
     rpc::{DEFAULT_BLOCKED_PATHS, DEFAULT_MAX_REQUEST_BODY, RpcHandler, ServeConfig},
     rtc::{self, Hub, IdentitySigner, RtcAnswer, RtcConfig, RtcConn, RtcOffer},
     session::{self, Hello, Parts, ServerInfo, Session, Side, Welcome},
-    transport::{Conn, RecvHalf, SendHalf, Transport},
+    transport::{Conn, RecvHalf, SendHalf},
 };
 
 pub const KEEP_ALIVE: Duration = Duration::from_secs(5);
@@ -146,11 +146,14 @@ pub struct DialOptions {
     pub connect_timeout: Duration,
     /// From `hello` sent to `welcome` / `denied`.
     pub welcome_timeout: Duration,
+    /// WebRTC: offer the credit window (`hello`'s `credit`, docs/LINK.md「信用窗口」). Off: as before it, every stream
+    /// held to the receive bounds and reset past them (a peer that doesn't take it gets that anyway).
+    pub credit: bool,
 }
 
 impl Default for DialOptions {
     fn default() -> Self {
-        DialOptions { connect_timeout: Duration::from_secs(10), welcome_timeout: Duration::from_secs(15) }
+        DialOptions { connect_timeout: Duration::from_secs(10), welcome_timeout: Duration::from_secs(15), credit: true }
     }
 }
 
@@ -210,9 +213,9 @@ pub struct ServerOptions {
     /// Signs `rtc` answers (and the binding in them): the identity key (`rtc::IdentityKey`) or the app's own
     /// signer. Without it `Listener::accept_rtc_offer` refuses.
     pub rtc_identity: Option<Arc<dyn IdentitySigner>>,
-    /// Takes duplex requests (rpc.rs; the handler answers them with `accept_duplex`): its QUIC sessions' `welcome`
-    /// says `duplex`. Off: a duplex request is refused (400) before the handler. Never over WebRTC (its data channels
-    /// have no receive limit of their own: a duplex stream's peer could fill the server's memory).
+    /// Takes duplex requests (rpc.rs; the handler answers them with `accept_duplex`): its sessions' `welcome` says
+    /// `duplex`. Off: a duplex request is refused (400) before the handler. Over WebRTC too: a data channel has no
+    /// receive window, so each duplex stream holds at most `rpc::RTC_DUPLEX_RECV_MAX` unread bytes (past it, reset).
     pub duplex: bool,
 }
 
@@ -625,6 +628,14 @@ impl Endpoint {
         target_bps: TargetBitrate,
     ) -> Result<Session> {
         let media = media::Engine::Client(Box::new(media::ClientMedia::new(media::ClientConfig::default())));
+        // over WebRTC: the credit window, if `opts` wants it (the app's own list loses a `credit` it should not have)
+        let mut hello = hello.clone();
+        hello.features.retain(|f| f != crate::rpc::CREDIT_FEATURE);
+        let offer_credit = opts.credit && conn.transport() == crate::transport::Transport::Rtc;
+        if offer_credit {
+            hello.features.push(crate::rpc::CREDIT_FEATURE.into());
+        }
+        let hello = &hello;
         let answer = tokio::time::timeout(opts.welcome_timeout, async {
             framing::write_frame(&mut send, &session::hello_message(hello), MAX_CONTROL_FRAME).await?;
             framing::read_frame(&mut recv, MAX_CONTROL_FRAME).await
@@ -642,6 +653,9 @@ impl Endpoint {
             Some("welcome") => {
                 let welcome: Welcome = serde_json::from_value(Value::Object(reply))
                     .map_err(|e| LinkError::protocol(format!("welcome: {e}")))?;
+                if offer_credit && welcome.features.iter().any(|f| f == crate::rpc::CREDIT_FEATURE) {
+                    conn.enable_credit();
+                }
                 Ok(Session::start(Parts {
                     id: self.inner.next_session.fetch_add(1, Ordering::Relaxed),
                     side: Side::Client,
@@ -834,8 +848,17 @@ fn restart_rtc(
     Ok(signed.to_json())
 }
 
-/// A server that takes duplex requests (rpc.rs) says so in a QUIC session's `welcome`; nobody says it otherwise (the
+/// A server that takes duplex requests (rpc.rs) says so in a session's `welcome`; nobody says it otherwise (the
 /// app's own list loses a `duplex` it should not have).
+/// `feature` in the list exactly when `on` (the app's own list can't add or keep it: the link says).
+fn with_feature(mut features: Vec<String>, feature: &str, on: bool) -> Vec<String> {
+    features.retain(|f| f != feature);
+    if on {
+        features.push(feature.into());
+    }
+    features
+}
+
 fn with_duplex(mut features: Vec<String>, takes: bool) -> Vec<String> {
     features.retain(|f| f != crate::rpc::DUPLEX_FEATURE);
     if takes {
@@ -1121,12 +1144,19 @@ async fn serve(a: Arc<Accepting>, p: Pending, control: impl Future<Output = Resu
             deny(conn, send, &msg, code).await;
         }
         AuthDecision::Accept { principal, features } => {
+            // the credit window over WebRTC when the client asked for it
+            let credit = conn.transport() == crate::transport::Transport::Rtc
+                && hello.features.iter().any(|f| f == crate::rpc::CREDIT_FEATURE);
             let welcome = Welcome {
                 server: a.options.server.clone(),
                 principal,
-                features: with_duplex(
-                    features.unwrap_or_else(|| a.options.features.clone()),
-                    a.options.duplex && a.options.rpc.is_some() && conn.transport() == Transport::Quic,
+                features: with_feature(
+                    with_duplex(
+                        features.unwrap_or_else(|| a.options.features.clone()),
+                        a.options.duplex && a.options.rpc.is_some(),
+                    ),
+                    crate::rpc::CREDIT_FEATURE,
+                    credit,
                 ),
                 max_datagram: conn.max_datagram_size() as u32,
             };
@@ -1136,6 +1166,10 @@ async fn serve(a: Arc<Accepting>, p: Pending, control: impl Future<Output = Resu
                 let msg = json!({"t": "denied", "code": DenyCode::Busy.as_str(), "message": "busy"});
                 deny(conn, send, &msg, DenyCode::Busy).await;
                 return;
+            }
+            // before the welcome: no `rpc` channel can come before it
+            if credit {
+                conn.enable_credit();
             }
             if let Err(e) =
                 framing::write_frame(&mut send, &session::welcome_message(&welcome), MAX_CONTROL_FRAME).await

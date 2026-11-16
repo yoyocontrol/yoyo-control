@@ -27,6 +27,37 @@ pub const DEFAULT_BLOCKED_PATHS: &[&str] = &["/stream", "/stream/ack", "/audio",
 pub const DEFAULT_MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
 /// Largest message of a duplex stream (its payload).
 pub const MAX_DUPLEX_MESSAGE: usize = 1024 * 1024;
+/// Unread bytes a duplex stream over WebRTC may hold (two whole messages and some; each data-channel message waiting
+/// also counts 64 bytes, so a flood of tiny ones hits it too): a data channel has no receive window, so a peer that
+/// writes faster than the other side reads past this gets the stream reset, where QUIC's flow control would hold it
+/// back.
+pub const RTC_DUPLEX_RECV_MAX: usize = 2 * MAX_DUPLEX_MESSAGE + 64 * 1024;
+/// What a request's body may run ahead of its reader over WebRTC beyond the body limit (the head, each message's
+/// overhead, and what the client sends past the limit before the reader sees it: a body over the limit gets its 413
+/// unless it is more than this over while the reader is held up — then the stream is reset).
+pub(crate) const RTC_BODY_SLACK: usize = 2 * 1024 * 1024;
+/// The bound of every other RPC stream a server takes over WebRTC, from the channel's open until its head is read
+/// (then: the server's body limit and `RTC_BODY_SLACK`). A body is read as it arrives, and up to the body limit
+/// anyway: what waits unread costs no more than the read body would.
+pub const RTC_RPC_RECV_MAX: usize = DEFAULT_MAX_REQUEST_BODY + RTC_BODY_SLACK;
+/// Without the credit window: what all of a WebRTC session's duplex streams may hold unread together (32 streams just
+/// under their own bounds would be ~70 MiB): the stream whose message would go past it is reset. Under the credit
+/// window: the pool that decides how big a stream's next window may be (the others' unread bytes) — fairness, not
+/// the memory bound, which is each stream's window: at most 32 x `RTC_CREDIT_WINDOW` (32 MiB) unread per session.
+pub const RTC_SESSION_RECV_MAX: usize = 8 * 1024 * 1024;
+/// The `hello` / `welcome` feature of the credit window over WebRTC (docs/LINK.md「信用窗口」): both sides say it, and
+/// every `rpc` channel's sender waits for the receiver's grants instead of being reset past the receive bounds.
+pub const CREDIT_FEATURE: &str = "credit";
+/// What one data-channel message costs on top of its length, for the receive bounds and the credit window alike (both
+/// sides count it the same way: a flood of tiny messages costs what it takes in memory).
+pub const RTC_MESSAGE_COST: usize = 64;
+/// The window each stream starts with (each direction), and keeps whatever the session's pool: its messages fit
+/// (≤ 16 KiB + `RTC_MESSAGE_COST`), so it always moves.
+pub const RTC_CREDIT_INITIAL: usize = 64 * 1024;
+/// The most a stream's receiver lets the peer have unacknowledged (sent, not yet read): with `MAX_RPC_STREAMS`, the
+/// memory bound (32 x 1 MiB unread per session). Past `RTC_CREDIT_INITIAL` it is given only as far as the session's
+/// pool (`RTC_SESSION_RECV_MAX`, the others' unread bytes) has room: fairness between streams.
+pub const RTC_CREDIT_WINDOW: usize = 1024 * 1024;
 /// The `welcome` feature of a server that takes duplex requests.
 pub const DUPLEX_FEATURE: &str = "duplex";
 
@@ -347,6 +378,7 @@ pub(crate) async fn request_duplex(conn: &Conn, req: &RpcRequest) -> Result<Dupl
         .ok_or_else(|| LinkError::protocol("response without s"))? as u16;
     let headers = headers_from(head.get("h"));
     if status == 101 {
+        recv.limit(RTC_DUPLEX_RECV_MAX, true);
         let duplex =
             Duplex { sender: DuplexSender { send: Some(send) }, receiver: DuplexReceiver { recv: Some(recv) } };
         return Ok(DuplexResponse { status, headers, duplex: Some(duplex), body: RpcBody { recv: None } });
@@ -460,7 +492,7 @@ pub trait RpcHandler: Send + Sync + 'static {
 pub(crate) struct ServeConfig {
     pub blocked_paths: Vec<String>,
     pub max_body: usize,
-    /// Takes duplex requests (over QUIC only).
+    /// Takes duplex requests (over WebRTC too, each stream's unread bytes bounded: RTC_DUPLEX_RECV_MAX).
     pub duplex: bool,
 }
 
@@ -492,18 +524,22 @@ pub(crate) async fn serve_one(
         return;
     }
     if req.duplex {
-        // only where they are taken, and never over WebRTC (no receive limit there): else refused, the stream's
-        // incoming side stopped (the peer's sends fail instead of piling up)
-        if !config.duplex || session.transport() != crate::transport::Transport::Quic {
+        // only where they are taken: else refused, the stream's incoming side stopped (the peer's sends fail instead
+        // of piling up)
+        if !config.duplex {
             recv.stop();
             let _ = respond_error(&mut responder, 400, "duplex requests are not taken here").await;
             return;
         }
-        // no body: the stream stays open both ways for `accept_duplex`
+        // no body: the stream stays open both ways for `accept_duplex`; over WebRTC with a bound on what may wait
+        // unread (no receive window there)
+        recv.limit(RTC_DUPLEX_RECV_MAX, true);
         responder.recv = Some(recv);
         handler.handle(session, req, Bytes::new(), responder).await;
         return;
     }
+    // over WebRTC: unread, at most what the body may be (and some)
+    recv.limit(config.max_body.saturating_add(RTC_BODY_SLACK), false);
     let body = match recv.read_to_end(config.max_body).await {
         Ok(b) => Bytes::from(b),
         Err(ReadToEnd::TooLong) => {

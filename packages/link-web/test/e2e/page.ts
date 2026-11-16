@@ -23,6 +23,16 @@ const pct = (v: number[], p: number) => {
 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** The page's JS heap in use after a GC (the runner measures it over CDP: `e2eHeapAsk`); null when it can't. */
+function heapUsed(): Promise<number | null> {
+  const g = globalThis as { e2eHeapAsk?: (s: string) => void; __e2eHeap?: (n: number) => void };
+  if (typeof g.e2eHeapAsk !== "function") return Promise.resolve(null);
+  return new Promise((r) => {
+    g.__e2eHeap = r;
+    g.e2eHeapAsk!("");
+  });
+}
+
 async function controlRtt(session: LinkSession, n: number): Promise<number[]> {
   const out: number[] = [];
   for (let i = 0; i < n; i++) {
@@ -42,8 +52,9 @@ async function controlRtt(session: LinkSession, n: number): Promise<number[]> {
   return out;
 }
 
-const dial = (cfg: Config) =>
+const dial = (cfg: Config, credit = true) =>
   dialRtc({
+    credit,
     signal: async (offer) => {
       const res = await fetch(cfg.signal, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(offer) });
       if (!res.ok) throw new Error(`signal: HTTP ${res.status} ${await res.text()}`);
@@ -63,6 +74,7 @@ async function run(cfg: Config) {
   const result: Record<string, unknown> = { userAgent: navigator.userAgent };
   const t0 = performance.now();
   const session = await dial(cfg);
+  console.log("e2e: dialed");
   result.welcomeMs = Math.round((performance.now() - t0) * 10) / 10;
   result.timing = session.timing;
   result.server = session.server;
@@ -98,10 +110,98 @@ async function run(cfg: Config) {
     rpc.push(performance.now() - t);
   }
   result.rpcEchoMs = { p50: pct(rpc, 0.5), p90: pct(rpc, 0.9) };
+  console.log("e2e: rpc echo");
   const td = performance.now();
   const big = await (await session.request({ method: "GET", path: "/bytes?n=8388608" })).readAll(16 << 20);
   const secs = (performance.now() - td) / 1000;
   result.rpcDownload = { bytes: big.length, mbps: Math.round(((big.length * 8) / 1e6 / secs) * 10) / 10 };
+  console.log("e2e: download 8 MiB");
+  // uploads, paced by the channel's buffer (and the server's credit): 7 MiB echoed
+  const up = new Uint8Array(7 * 1024 * 1024);
+  for (let i = 0; i < up.length; i += 4096) up[i] = (i / 4096) & 0xff;
+  const tu = performance.now();
+  const echoed = await (await session.request({ method: "POST", path: "/echo" }, up)).readAll(16 << 20);
+  const usecs = (performance.now() - tu) / 1000;
+  if (echoed.length !== up.length || echoed.some((b, i) => b !== up[i])) throw new Error(`upload echo: ${echoed.length} bytes`);
+  // 30 MiB (twice Chrome's send queue; the probe takes bodies up to 64 MiB): it arrives whole
+  const huge = new Uint8Array(30 * 1024 * 1024);
+  for (let i = 0; i < huge.length; i += 997) huge[i] = i & 0xff;
+  let sum = 0;
+  for (let i = 0; i < huge.length; i += 997) sum = (sum + huge[i]!) >>> 0;
+  const th = performance.now();
+  const sunk = (await (await session.request({ method: "POST", path: "/sink" }, huge)).json()) as { n: number; sum: number };
+  const hsecs = (performance.now() - th) / 1000;
+  if (sunk.n !== huge.length || sunk.sum !== sum) throw new Error(`a 30 MiB upload: ${JSON.stringify(sunk)}`);
+  result.rpcUpload = {
+    bytes: up.length,
+    mbps: Math.round(((up.length * 8) / 1e6 / usecs) * 10) / 10,
+    upload30MiB: { ok: true, mbps: Math.round(((huge.length * 8) / 1e6 / hsecs) * 10) / 10 },
+  };
+
+  // the credit window (both sides say `credit`): an answer nobody reads waits in the server, not in this page
+  result.credit = session.welcome.features.includes("credit");
+  console.log("e2e: uploads");
+  if (result.credit) {
+    const n = 50 * 1024 * 1024;
+    const before = await heapUsed();
+    const t0 = performance.now();
+    const r = await session.request({ method: "GET", path: `/bytes?n=${n}` });
+    await new Promise((res) => setTimeout(res, 2000)); // nobody reads for 2 s
+    const idle = await heapUsed();
+    // then a slow reader: a pause every MiB
+    let got = 0;
+    let peak = idle;
+    for (let c = await r.chunk(); c; c = await r.chunk()) {
+      got += c.length;
+      if (got % (1024 * 1024) < c.length) await new Promise((res) => setTimeout(res, 10));
+      if (got % (10 * 1024 * 1024) < c.length) peak = Math.max(peak ?? 0, (await heapUsed()) ?? 0);
+    }
+    if (got !== n) throw new Error(`a 50 MiB download: ${got} bytes`);
+    const mib = (x: number | null) => (x === null || before === null ? null : Math.round(((x - before) / 1048576) * 10) / 10);
+    result.creditDownload = { bytes: got, ms: Math.round(performance.now() - t0), heapIdleMiB: mib(idle), heapPeakMiB: mib(peak) };
+  console.log("e2e: credit download");
+    if (before !== null && idle !== null && idle - before > 4 * 1024 * 1024) throw new Error(`the page held ${mib(idle)} MiB of an unread answer`);
+
+    // a slow duplex reader (`/ws-slow`: a message every 20 ms) holds the writer back: 4 MiB, no reset
+    const d = (await session.requestDuplex({ method: "GET", path: "/ws-slow" })).duplex!;
+    const td = performance.now();
+    const sends: Promise<void>[] = [];
+    for (let i = 0; i < 64; i++) sends.push(d.sendBinary(new Uint8Array(64 * 1024).fill(i)));
+    await Promise.all(sends);
+    await d.finish();
+    const count = await d.recv();
+    if (!count || count.type !== "text" || count.text !== String(64 * 64 * 1024)) throw new Error(`slow duplex: ${JSON.stringify(count)}`);
+    result.creditDuplex = { bytes: 64 * 64 * 1024, ms: Math.round(performance.now() - td) };
+  console.log("e2e: credit duplex");
+  }
+
+  // a duplex request (a WebSocket over the link): `/ws` echoes; 20 messages, the largest, a close, both FINs
+  if (session.welcome.features.includes("duplex")) {
+    const t = performance.now();
+    const r = await session.requestDuplex({ method: "GET", path: "/ws" });
+    if (r.status !== 101 || !r.duplex) throw new Error(`duplex: ${r.status}`);
+    const d = r.duplex;
+    // not awaited one by one: they go in order, each whole
+    const sends: Promise<void>[] = [];
+    for (let i = 0; i < 20; i++) sends.push(d.sendText(`m${i}`));
+    sends.push(d.sendBinary(new Uint8Array(1024 * 1024).fill(7)));
+    sends.push(d.send({ type: "close", code: 4001, reason: "bye" }));
+    const sending = Promise.all(sends);
+    for (let i = 0; i < 20; i++) {
+      const m = await d.recv();
+      if (!m || m.type !== "text" || m.text !== `m${i}`) throw new Error(`duplex echo ${i}: ${JSON.stringify(m)}`);
+    }
+    const big = await d.recv();
+    if (!big || big.type !== "binary" || big.data.length !== 1024 * 1024) throw new Error("duplex: the 1 MiB message");
+    const close = await d.recv();
+    if (!close || close.type !== "close" || close.code !== 4001 || close.reason !== "bye") throw new Error(`duplex close: ${JSON.stringify(close)}`);
+    if ((await d.recv()) !== null) throw new Error("duplex: no FIN");
+    await sending;
+    await d.finish();
+    result.duplex = { ok: true, ms: Math.round(performance.now() - t) };
+  } else {
+    result.duplex = { ok: false, reason: "the server takes no duplex requests" };
+  }
 
   // control
   const ctl = await controlRtt(session, 20);
@@ -186,6 +286,18 @@ async function run(cfg: Config) {
   await again.close();
   if (!keys[0]?.startsWith("dtls-sha256:") || keys[0] !== keys[1] || keys[0] !== kept) throw new Error(`client keys differ: ${keys.join(", ")}, kept ${kept}`);
   result.clientKey = { stable: true, key: keys[0] };
+
+  // the control: the same unread 50 MiB answer without the credit window piles up in the page (what the window saves)
+  if (result.credit) {
+    const old = await dial(cfg, false);
+    const before = await heapUsed();
+    const r = await old.request({ method: "GET", path: `/bytes?n=${50 * 1024 * 1024}` });
+    await new Promise((res) => setTimeout(res, 2000));
+    const idle = await heapUsed();
+    r.cancel();
+    await old.close();
+    result.withoutCredit = { heapIdleMiB: before === null || idle === null ? null : Math.round(((idle - before) / 1048576) * 10) / 10 };
+  }
   return result;
 }
 

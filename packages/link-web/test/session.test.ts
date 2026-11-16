@@ -39,7 +39,7 @@ test("dial: negotiated channels, a non-trickle offer, hello → welcome", async 
   assert.equal(offer.v, 1);
   assert.match(offer.offer, /a=candidate:/, "the gathered candidates are in the offer");
   assert.deepEqual(offer.device, { id: "dev-1", name: "Test Browser" });
-  assert.deepEqual(server.received[0], { t: "hello", v: 1, credential: "Bearer t0ken", device: { id: "dev-1", name: "Test Browser" }, app: { name: "test", version: "1" }, features: ["screen", "audio", "cursor", "input"] });
+  assert.deepEqual(server.received[0], { t: "hello", v: 1, credential: "Bearer t0ken", device: { id: "dev-1", name: "Test Browser" }, app: { name: "test", version: "1" }, features: ["screen", "audio", "cursor", "input", "credit"] });
   assert.deepEqual(session.server, { id: "srv", name: "Test Mac", platform: "macos" });
   assert.deepEqual(session.principal, { device: { id: "d1", name: "Browser" } });
   assert.equal(session.maxDatagramSize, 1200);

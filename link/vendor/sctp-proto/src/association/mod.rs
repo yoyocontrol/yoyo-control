@@ -2505,6 +2505,14 @@ impl Association {
             }
         } else if stream_handle_data {
             if let Some(s) = self.streams.get_mut(&d.stream_identifier) {
+                // uu patch: this side stopped reading the stream (a local close, its reset to the peer under way):
+                // what the peer sent before it saw the reset is acknowledged and dropped. Queued, it could never be
+                // read (`read` refuses a stream that isn't readable) and would hold receive buffer until the
+                // association aborted ("receive buffer exhausted during message reassembly").
+                if !matches!(s.state, RecvSendState::Readable | RecvSendState::ReadWritable) {
+                    self.payload_queue.push(d.clone(), self.peer_last_tsn);
+                    return self.handle_peer_last_tsn_and_acknowledgement(immediate_sack);
+                }
                 let queued = s.handle_data(d)?;
                 // Only commit to payload_queue after reassembly accepts the chunk
                 self.payload_queue.push(d.clone(), self.peer_last_tsn);

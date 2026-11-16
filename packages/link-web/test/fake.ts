@@ -7,9 +7,16 @@ import { encodeFrame, FrameReader, messageBytes, rtcSignedText } from "../src/in
 export class FakeChannel extends EventTarget {
   readyState: RTCDataChannelState = "connecting";
   bufferedAmount = 0;
+  bufferedAmountLowThreshold = 0;
   binaryType: BinaryType = "arraybuffer";
   peer: FakeChannel | null = null;
   sent: Uint8Array[] = [];
+  /** Sends count into `bufferedAmount` (as a browser's do until SCTP takes them) until the test `drain`s it. */
+  buffering = false;
+  /** A browser's send queue: a send past it throws (Chrome's is 16 MiB). */
+  queueLimit = Infinity;
+  /** The most `bufferedAmount` was. */
+  maxBuffered = 0;
 
   constructor(
     readonly label: string,
@@ -19,14 +26,43 @@ export class FakeChannel extends EventTarget {
     super();
   }
 
+  /** Text messages sent (a browser keeps them text: the credit window's grants). */
+  sentText: string[] = [];
+  /** The next this many text sends throw (as a browser's do when its send queue is full). */
+  refuseText = 0;
+
   send(data: string | ArrayBuffer | ArrayBufferView | Blob): void {
     if (this.readyState !== "open") throw new Error("InvalidStateError: not open");
+    if (typeof data === "string") {
+      if (this.refuseText > 0) {
+        this.refuseText--;
+        throw new Error("OperationError: RTCDataChannel send queue is full");
+      }
+      this.sentText.push(data);
+      const peer = this.peer;
+      queueMicrotask(() => {
+        if (peer && peer.readyState === "open") peer.dispatchEvent(new MessageEvent("message", { data }));
+      });
+      return;
+    }
     const bytes = messageBytes(data).slice();
+    if (this.buffering) {
+      if (this.bufferedAmount + bytes.length > this.queueLimit) throw new Error("OperationError: RTCDataChannel send queue is full");
+      this.bufferedAmount += bytes.length;
+      this.maxBuffered = Math.max(this.maxBuffered, this.bufferedAmount);
+    }
     this.sent.push(bytes);
     const peer = this.peer;
     queueMicrotask(() => {
       if (peer && peer.readyState === "open") peer.dispatchEvent(new MessageEvent("message", { data: bytes.buffer }));
     });
+  }
+
+  /** SCTP took `n` bytes of the buffer: `bufferedamountlow` when it crosses the threshold, as a browser's does. */
+  drain(n = Infinity): void {
+    const before = this.bufferedAmount;
+    this.bufferedAmount = Math.max(0, before - n);
+    if (before > this.bufferedAmountLowThreshold && this.bufferedAmount <= this.bufferedAmountLowThreshold) this.dispatchEvent(new Event("bufferedamountlow"));
   }
 
   open(): void {
@@ -57,6 +93,8 @@ export class FakePeerConnection extends EventTarget {
   iceGatheringState: RTCIceGatheringState = "new";
   connectionState: RTCPeerConnectionState = "new";
   readonly channels: FakeChannel[] = [];
+  /** `close()` closes the channels without their `close` events (a browser needn't fire them). */
+  silentClose = false;
   private serverEnds = new Map<number, FakeChannel>();
   stats: Record<string, unknown>[] = [
     { id: "T1", type: "transport", selectedCandidatePairId: "CP1" },
@@ -125,7 +163,10 @@ export class FakePeerConnection extends EventTarget {
   close(): void {
     if (this.connectionState === "closed") return;
     this.connectionState = "closed";
-    for (const ch of this.channels) ch.close();
+    for (const ch of this.channels) {
+      if (this.silentClose) ch.readyState = "closed";
+      else ch.close();
+    }
     this.dispatchEvent(new Event("connectionstatechange"));
   }
 }
@@ -169,6 +210,13 @@ export class ScriptedServer implements FakeServer {
   onHello: (hello: Record<string, unknown>, send: (m: object) => void) => void = (_h, send) =>
     send({ t: "welcome", v: 1, server: { id: "srv", name: "Test Mac", platform: "macos" }, principal: { device: { id: "d1", name: "Browser" } }, features: ["screen"], maxDatagram: 1200 });
   onControl: (m: Record<string, unknown>, send: (m: object) => void) => void = () => {};
+  /** A duplex request (its head has `duplex: true`): the channel is the handler's from the head on (`early`: bytes
+   *  after the head in the same message). Default: refused, 400. */
+  duplex: (head: Record<string, unknown>, ch: FakeChannel, early: Uint8Array) => void = (_h, ch) => {
+    ch.send(encodeFrame({ s: 400, h: {} }));
+    ch.send(new TextEncoder().encode('{"error":"duplex requests are not taken here"}'));
+    ch.send(new Uint8Array(0));
+  };
   rpc: (head: Record<string, unknown>, body: Uint8Array, ch: FakeChannel) => void = (head, body, ch) => {
     ch.send(encodeFrame({ s: 200, h: { "content-type": "application/json" } }));
     ch.send(new TextEncoder().encode(JSON.stringify({ m: head.m, p: head.p, n: body.length })));
@@ -199,13 +247,22 @@ export class ScriptedServer implements FakeServer {
     const reader = new FrameReader();
     let head: Record<string, unknown> | null = null;
     const body: Uint8Array[] = [];
-    ch.addEventListener("message", (ev) => {
+    const onMessage = (ev: Event) => {
+      // (text: the credit window's grants, not the stream's bytes)
+      if (typeof (ev as MessageEvent).data === "string") return;
       const b = messageBytes((ev as MessageEvent).data);
       if (!head) {
         reader.append(b);
         head = reader.next();
         if (head) {
           const rest = reader.rest();
+          if (head.duplex === true) {
+            // the handler takes the channel's messages from here on
+            const h = head;
+            ch.removeEventListener("message", onMessage);
+            this.duplex(h, ch, rest);
+            return;
+          }
           if (rest.length) body.push(rest);
         }
         return;
@@ -221,6 +278,7 @@ export class ScriptedServer implements FakeServer {
         return;
       }
       body.push(b);
-    });
+    };
+    ch.addEventListener("message", onMessage);
   }
 }

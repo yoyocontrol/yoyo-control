@@ -2,7 +2,9 @@ import { CloseCode, LinkError } from "./errors.js";
 import { encodeFrame, FrameReader, messageBytes } from "./framing.js";
 import type { LinkMedia } from "./media.js";
 import { probeReport, type ProbeReport } from "./probe.js";
-import { rpcRequest, type RpcRequest, type RpcResponse } from "./rpc.js";
+import { DUPLEX_FEATURE, duplexRequest, type DuplexResponse } from "./duplex.js";
+import { rpcRequest, type RpcRequest, type RpcResponse, type SessionStream } from "./rpc.js";
+import { CREDIT_FEATURE, CreditPool } from "./credit.js";
 import { browserIface, classifyPath, linkMediaStats, parseLinkStats, RttWindow, statsLine, type CandidateInfo, type Iface, type LinkStats, type PathInfo } from "./stats.js";
 
 /** The client's `hello` (without `t` / `v`). */
@@ -54,7 +56,8 @@ export const IDLE_MS = 20_000;
 export const ACTIVE_IDLE_MS = 3000;
 /** `dgram`'s send buffer: past it a datagram is dropped rather than queued (new datagrams are what matters). */
 export const DGRAM_BUFFER = 256 * 1024;
-/** RPC answers start within this long. */
+/** RPC answers start within this long of the request's end (its FIN: an upload's own length doesn't count); a
+ *  channel opens, and an upload makes progress, within it too. */
 export const RPC_TIMEOUT_MS = 30_000;
 /** A lost path (ICE `disconnected` / `failed`: the network changed, Wi-Fi ↔ 5G) is looked for again this long by ICE
  *  restarts before the session ends (the server keeps a silent connection about 20 s). */
@@ -149,6 +152,10 @@ export class LinkSession {
   private restarts = 0;
   /** The running speed test hears its `link.probe.*` replies here. */
   private probeListener: ((m: ControlMessage) => void) | null = null;
+  /** Open RPCs and duplex streams: ended here when the session ends (not left to their channels' `close`). */
+  private readonly streams = new Set<SessionStream>();
+  /** The credit window's pool, when both sides took it (`credit` in `hello` and `welcome`); null: none. */
+  private readonly creditPool: CreditPool | null;
 
   /** @internal use `dialRtc` */
   constructor(p: SessionParts) {
@@ -157,6 +164,7 @@ export class LinkSession {
     this.dgram = p.dgram;
     this.reader = p.reader;
     this.hello = p.hello;
+    this.creditPool = p.hello.features.includes(CREDIT_FEATURE) && p.welcome.features.includes(CREDIT_FEATURE) ? new CreditPool() : null;
     this.welcome = p.welcome;
     this.media = p.media;
     this.timing = p.timing;
@@ -279,7 +287,18 @@ export class LinkSession {
   /** One request (docs/LINK.md「RPC 流」); resolves with the answer once its head came. */
   request(request: RpcRequest, body?: Uint8Array): Promise<RpcResponse> {
     if (this.closeInfo) return Promise.reject(new LinkError("closed", this.closeInfo.description));
-    return rpcRequest(this.pc, request, body, RPC_TIMEOUT_MS);
+    return rpcRequest(this.pc, request, body, RPC_TIMEOUT_MS, this.streams, this.creditPool);
+  }
+
+  /**
+   * A duplex request (a WebSocket's upgrade over the link: voice, a phone call's stream; docs/LINK.md「双工请求」):
+   * `duplex` when the server accepted it (101), else its status and body. Rejected without asking (`unsupported`)
+   * when the server's welcome doesn't list "duplex" — an older server would wait for a body that never comes.
+   */
+  requestDuplex(request: RpcRequest): Promise<DuplexResponse> {
+    if (this.closeInfo) return Promise.reject(new LinkError("closed", this.closeInfo.description));
+    if (!this.welcome.features.includes(DUPLEX_FEATURE)) return Promise.reject(new LinkError("unsupported", "the server takes no duplex requests"));
+    return duplexRequest(this.pc, request, RPC_TIMEOUT_MS, this.streams, this.creditPool);
   }
 
   /**
@@ -717,6 +736,9 @@ export class LinkSession {
     if (this.tick) clearInterval(this.tick);
     this.tick = null;
     this.media?.end();
+    const ended = new LinkError("closed", info.description);
+    for (const s of [...this.streams]) s.sessionEnded(ended);
+    this.streams.clear();
     for (const ch of [this.control, this.dgram]) {
       try {
         ch.close();

@@ -76,6 +76,13 @@ pub(crate) enum Conn {
 }
 
 impl Conn {
+    /// `rtc`: the credit window was negotiated (`RtcConn::enable_credit`); QUIC has flow control of its own.
+    pub(crate) fn enable_credit(&self) {
+        if let Conn::Rtc(c) = self {
+            c.enable_credit();
+        }
+    }
+
     pub(crate) fn transport(&self) -> Transport {
         match self {
             Conn::Quic(_) => Transport::Quic,
@@ -393,6 +400,15 @@ impl RecvHalf {
                 let _ = r.stop(VarInt::from_u32(0));
             }
             RecvHalf::Rtc(r) => r.discard(),
+        }
+    }
+
+    /// At most `cap` unread bytes on this stream (`rtc`: past it the stream is reset; a data channel has no receive
+    /// window); `shared`: within the session's budget too (`RTC_SESSION_RECV_MAX`, a duplex stream's). QUIC: nothing
+    /// to do, its flow control holds the peer back.
+    pub(crate) fn limit(&mut self, cap: usize, shared: bool) {
+        if let RecvHalf::Rtc(r) = self {
+            r.limit(cap, shared);
         }
     }
 

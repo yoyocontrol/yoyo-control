@@ -10,7 +10,8 @@
 //!     uu-link-probe watch <id> <ip:port>[,<ip:port>…] [--credential <text>] [--query <stream query>] [--seconds 30]
 //!             [--csv <file>] [--h264 <file>] [--relay <url>] [--bind <ip>]
 //!
-//! `serve` prints its id and addresses and answers: RPC `/echo` (the body back) and `/bytes?n=` (n bytes streamed),
+//! `serve` prints its id and addresses and answers: RPC `/echo` (the body back), `/sink` (its length and byte sum; bodies up
+//! to 64 MiB) and `/bytes?n=` (n bytes streamed), duplex `/ws` (echo) and `/ws-slow` (a slow reader),
 //! control `ping` → `pong`, datagram channel 14 echoed, channel 15 counted (the load), `video.open` → synthetic
 //! 60 fps video; `welcome.principal` is `{device, client}` (`client` = the client key it saw). With `--rtc` it also takes WebRTC sessions: `--signal <port>` serves the signaling on
 //! `127.0.0.1:<port>` (`POST /rtc` with the offer JSON → the answer JSON, `GET /info`; CORS open, for a browser on
@@ -151,11 +152,51 @@ struct Routes;
 #[async_trait::async_trait]
 impl RpcHandler for Routes {
     async fn handle(&self, _s: Session, req: RpcRequest, body: Bytes, mut res: RpcResponder) {
+        // `/ws` (a duplex request): every message echoed; a close is echoed, then this side finishes
+        if req.duplex {
+            // `/ws-slow`: reads a message every 20 ms (a slow reader); at the FIN, the payload bytes it got as text
+            if req.path == "/ws-slow" {
+                let Ok(mut d) = res.accept_duplex(&Headers::new()).await else { return };
+                let mut n = 0usize;
+                while let Ok(Some(m)) = d.receiver.recv().await {
+                    if let uu_link::DuplexMessage::Binary(b) = m {
+                        n += b.len();
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                let _ = d.sender.send(&uu_link::DuplexMessage::Text(n.to_string())).await;
+                let _ = d.sender.finish().await;
+                return;
+            }
+            if req.path != "/ws" {
+                let _ = res.respond(404, &Headers::new(), b"{}").await;
+                return;
+            }
+            let Ok(mut d) = res.accept_duplex(&Headers::new()).await else { return };
+            while let Ok(Some(m)) = d.receiver.recv().await {
+                let close = matches!(m, uu_link::DuplexMessage::Close { .. });
+                if d.sender.send(&m).await.is_err() {
+                    return;
+                }
+                if close {
+                    break;
+                }
+            }
+            let _ = d.sender.finish().await;
+            return;
+        }
         {
             let route = req.path.split('?').next().unwrap_or("");
             match route {
                 "/echo" => {
                     let _ = res.respond(200, &Headers::new(), &body).await;
+                }
+                // the body's length and byte sum (an upload's check without sending it back)
+                "/sink" => {
+                    let sum = body.iter().fold(0u32, |a, &b| a.wrapping_add(b as u32));
+                    let _ = res
+                        .respond(200, &Headers::new(), format!("{{\"n\":{},\"sum\":{sum}}}", body.len()).as_bytes())
+                        .await;
                 }
                 "/bytes" => {
                     let n: usize = req.path.split("n=").nth(1).and_then(|v| v.parse().ok()).unwrap_or(1 << 20);
@@ -219,6 +260,10 @@ async fn serve(args: &[String]) {
         Arc::new(Token(token.clone())),
     );
     opts.rpc = Some(Arc::new(Routes));
+    // duplex requests (`/ws`): link-web's end-to-end test asks one over WebRTC
+    opts.duplex = true;
+    // link-web's end-to-end test uploads 30 MiB (the default limit is 8 MiB)
+    opts.max_request_body = 64 * 1024 * 1024;
     opts.rtc_identity = Some(Arc::new(IdentityKey::new(&identity).unwrap_or_else(|e| {
         eprintln!("probe: {e}");
         exit(1)

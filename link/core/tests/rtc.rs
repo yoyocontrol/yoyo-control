@@ -1,7 +1,7 @@
 // The WebRTC transport on loopback: a server endpoint with an rtc socket, clients dialing it with `dial_rtc` (str0m as
 // the offering side, the way a browser does), signaled straight into `Listener::accept_rtc_offer`. The same session
-// protocol as on QUIC: handshake, the answer's signature, control messages, RPC, datagrams, media, close codes,
-// the guard.
+// protocol as on QUIC: handshake, the answer's signature, control messages, RPC, duplex requests, datagrams, media,
+// close codes, the guard.
 
 use std::{
     net::IpAddr,
@@ -13,9 +13,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use serde_json::json;
 use uu_link::{
-    AuthDecision, AuthRequest, Authenticator, CloseCode, DenyCode, DialOptions, Endpoint, EndpointConfig, GuardConfig,
-    Headers, Hello, IdentityKey, LinkError, Listener, PathKind, RpcHandler, RpcRequest, RpcResponder, RtcConfig,
-    ServerInfo, ServerOptions, Session, Transport,
+    AuthDecision, AuthRequest, Authenticator, CloseCode, DenyCode, DialOptions, DuplexMessage, Endpoint,
+    EndpointConfig, GuardConfig, Headers, Hello, IdentityKey, LinkError, Listener, PathKind, RpcHandler, RpcRequest,
+    RpcResponder, RtcConfig, ServerInfo, ServerOptions, Session, Transport,
     binding::{generate_link_key, identity_fingerprint},
     media::{ClientEvent, Codec, FrameKind, FrameMeta, InputKind, ServerEvent},
     rtc::{RtcAnswer, RtcOffer},
@@ -43,13 +43,101 @@ impl Authenticator for Tokens {
 
 struct Routes;
 
+/// How far `/bytes` got writing (one test uses it).
+static BYTES_WRITTEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[async_trait]
 impl RpcHandler for Routes {
     async fn handle(&self, session: Session, req: RpcRequest, body: Bytes, mut res: RpcResponder) {
         let mut h = Headers::new();
         h.insert("x-principal".into(), session.principal()["device"]["id"].as_str().unwrap_or("").into());
+        if req.duplex {
+            match req.path.as_str() {
+                // echoes every message; a close is echoed and then this side finishes
+                "/ws" => {
+                    let Ok(mut d) = res.accept_duplex(&h).await else { return };
+                    while let Ok(Some(m)) = d.receiver.recv().await {
+                        let close = matches!(m, DuplexMessage::Close { .. });
+                        if d.sender.send(&m).await.is_err() {
+                            return;
+                        }
+                        if close {
+                            break;
+                        }
+                    }
+                    let _ = d.sender.finish().await;
+                }
+                // accepts and never reads: what the client sends piles up to the stream's receive limit
+                "/ws-deaf" => {
+                    let Ok(d) = res.accept_duplex(&h).await else { return };
+                    let stopped = d.sender.stopped();
+                    let _ = tokio::time::timeout(Duration::from_secs(20), stopped).await;
+                    session.send_control(&json!({"t": "deaf.done"})).await.ok();
+                    drop(d);
+                }
+                // reads one message every 20 ms (a slow reader); at the FIN says how many payload bytes came
+                "/ws-slow" => {
+                    let Ok(mut d) = res.accept_duplex(&h).await else { return };
+                    let mut n = 0usize;
+                    while let Ok(Some(m)) = d.receiver.recv().await {
+                        if let DuplexMessage::Binary(b) = m {
+                            n += b.len();
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    let _ = d.sender.send(&DuplexMessage::Text(n.to_string())).await;
+                    let _ = d.sender.finish().await;
+                }
+                // reads everything; at the FIN says how many payload bytes came
+                "/ws-sink" => {
+                    let Ok(mut d) = res.accept_duplex(&h).await else { return };
+                    let mut n = 0usize;
+                    while let Ok(Some(m)) = d.receiver.recv().await {
+                        if let DuplexMessage::Binary(b) = m {
+                            n += b.len();
+                        }
+                    }
+                    let _ = d.sender.send(&DuplexMessage::Text(n.to_string())).await;
+                    let _ = d.sender.finish().await;
+                }
+                // reads one message, then never again (until the client goes)
+                "/ws-sip" => {
+                    let Ok(mut d) = res.accept_duplex(&h).await else { return };
+                    let _ = d.receiver.recv().await;
+                    let stopped = d.sender.stopped();
+                    let _ = tokio::time::timeout(Duration::from_secs(20), stopped).await;
+                }
+                _ => res.respond(403, &h, b"{\"error\":\"no\"}").await.unwrap(),
+            }
+            return;
+        }
         match req.path.split('?').next().unwrap() {
             "/echo" => res.respond(200, &h, &body).await.unwrap(),
+            // n bytes in 64 KiB writes; with `track`, how far it got is in BYTES_WRITTEN
+            "/bytes" => {
+                let n: usize = req
+                    .path
+                    .split("n=")
+                    .nth(1)
+                    .and_then(|s| s.split('&').next())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let track = req.path.contains("track");
+                res.head(200, &h).await.unwrap();
+                let piece = vec![7u8; 64 * 1024];
+                let mut at = 0;
+                while at < n {
+                    let k = piece.len().min(n - at);
+                    if res.write(&piece[..k]).await.is_err() {
+                        return;
+                    }
+                    at += k;
+                    if track {
+                        BYTES_WRITTEN.store(at, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                res.finish().await.unwrap();
+            }
             "/count" => {
                 let n: u32 = req.path.split("n=").nth(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                 res.head(200, &h).await.unwrap();
@@ -85,6 +173,10 @@ struct Server {
 }
 
 async fn server(guard: GuardConfig) -> Server {
+    server_with(guard, |_| {}).await
+}
+
+async fn server_with(guard: GuardConfig, adjust: impl FnOnce(&mut ServerOptions)) -> Server {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
@@ -104,8 +196,9 @@ async fn server(guard: GuardConfig) -> Server {
     opts.features = vec!["link".into()];
     opts.rpc = Some(Arc::new(Routes));
     opts.rtc_identity = Some(Arc::new(IdentityKey::new(&identity).unwrap()));
-    // (it takes duplex requests: over QUIC; never over WebRTC — `no_duplex_over_rtc`)
+    // (it takes duplex requests: over WebRTC too, each stream's unread bytes bounded — `duplex_over_rtc`)
     opts.duplex = true;
+    adjust(&mut opts);
     let listener = Arc::new(ep.listen(opts).unwrap());
     Server { ep, listener, tokens, fp: identity_fingerprint(&identity).unwrap() }
 }
@@ -128,13 +221,22 @@ fn hello(token: &str, device: &str) -> Hello {
 
 /// Dials `s` from `ep`; the server session comes from its listener.
 async fn dial_from(ep: &Endpoint, s: &Server, token: &str) -> Result<(Session, Session), LinkError> {
+    dial_from_with(ep, s, token, &DialOptions::default()).await
+}
+
+async fn dial_from_with(
+    ep: &Endpoint,
+    s: &Server,
+    token: &str,
+    opts: &DialOptions,
+) -> Result<(Session, Session), LinkError> {
     let l = s.listener.clone();
     let c = ep
         .dial_rtc(
             |offer| async move { l.accept_rtc_offer(&offer, Some("127.0.0.1".parse().unwrap())).await },
             &s.fp,
             &hello(token, "web-1"),
-            &DialOptions::default(),
+            opts,
         )
         .await?;
     let srv = tokio::time::timeout(Duration::from_secs(5), s.listener.accept()).await.unwrap().unwrap();
@@ -144,6 +246,14 @@ async fn dial_from(ep: &Endpoint, s: &Server, token: &str) -> Result<(Session, S
 async fn dial(s: &Server, token: &str) -> Result<(Session, Session, Endpoint), LinkError> {
     let ep = client().await;
     let (c, srv) = dial_from(&ep, s, token).await?;
+    Ok((c, srv, ep))
+}
+
+/// A client without the credit window (an older one): every stream held to the receive bounds, reset past them.
+async fn dial_without_credit(s: &Server, token: &str) -> Result<(Session, Session, Endpoint), LinkError> {
+    let ep = client().await;
+    let (c, srv) = dial_from_with(&ep, s, token, &DialOptions { credit: false, ..DialOptions::default() }).await?;
+    assert!(!c.welcome().features.iter().any(|f| f == "credit"));
     Ok((c, srv, ep))
 }
 
@@ -514,13 +624,365 @@ fn test_identity() -> Vec<u8> {
     key
 }
 
-/// A server that takes duplex requests takes none over WebRTC (its data channels have no receive limit): an rtc
-/// session's welcome doesn't say `duplex`, and the client sends none.
+/// Duplex requests over WebRTC (a browser's WebSocket over the link): the welcome says `duplex`; messages both ways
+/// (text, binary, the largest, a close with its code), the server's FIN; a refusal with its status and body; and a
+/// peer that writes to a stream nobody reads gets it reset at the receive limit instead of filling the server's memory.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn no_duplex_over_rtc() {
+async fn duplex_over_rtc() {
     let s = server(GuardConfig::default()).await;
-    let (c, _srv, _ep) = dial(&s, "good-nd").await.unwrap();
-    assert!(!c.welcome().features.iter().any(|f| f == "duplex"), "{:?}", c.welcome().features);
-    let r = c.request_duplex(&uu_link::RpcRequest::new("GET", "/ws")).await;
-    assert!(matches!(r, Err(LinkError::InvalidArgument(_))), "{r:?}");
+    let (c, _srv, _ep) = dial(&s, "good-dx").await.unwrap();
+    assert!(c.welcome().features.iter().any(|f| f == "duplex"), "{:?}", c.welcome().features);
+
+    let r = c.request_duplex(&RpcRequest::new("GET", "/ws")).await.unwrap();
+    assert_eq!(r.status, 101);
+    let uu_link::Duplex { mut sender, mut receiver } = r.duplex.unwrap();
+    let writer = tokio::spawn(async move {
+        for i in 0..100u32 {
+            let m = if i % 2 == 0 {
+                DuplexMessage::Text(format!("m{i}"))
+            } else {
+                DuplexMessage::Binary(Bytes::from(i.to_be_bytes().to_vec()))
+            };
+            sender.send(&m).await.unwrap();
+        }
+        sender.send(&DuplexMessage::Binary(vec![7u8; uu_link::MAX_DUPLEX_MESSAGE].into())).await.unwrap();
+        sender.send(&DuplexMessage::Close { code: 4001, reason: "bye".into() }).await.unwrap();
+        sender
+    });
+    for i in 0..100u32 {
+        let m = tokio::time::timeout(Duration::from_secs(10), receiver.recv()).await.unwrap().unwrap().unwrap();
+        let want = if i % 2 == 0 {
+            DuplexMessage::Text(format!("m{i}"))
+        } else {
+            DuplexMessage::Binary(Bytes::from(i.to_be_bytes().to_vec()))
+        };
+        assert_eq!(m, want);
+    }
+    match tokio::time::timeout(Duration::from_secs(10), receiver.recv()).await.unwrap().unwrap().unwrap() {
+        DuplexMessage::Binary(b) => assert_eq!(b.len(), uu_link::MAX_DUPLEX_MESSAGE),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(receiver.recv().await.unwrap().unwrap(), DuplexMessage::Close { code: 4001, reason: "bye".into() });
+    assert_eq!(receiver.recv().await.unwrap(), None, "the server finished");
+    writer.await.unwrap().finish().await.unwrap();
+
+    let mut no = c.request_duplex(&RpcRequest::new("GET", "/nope")).await.unwrap();
+    assert_eq!(no.status, 403);
+    assert!(no.duplex.is_none());
+    assert_eq!(&no.body.read_all(1024).await.unwrap()[..], b"{\"error\":\"no\"}");
+
+    // a client without the credit window, nobody reading: past RTC_DUPLEX_RECV_MAX unread the server resets the
+    // stream, the client's sends fail
+    let (old, _old_srv, _old_ep) = dial_without_credit(&s, "good-dx").await.unwrap();
+    let r = old.request_duplex(&RpcRequest::new("GET", "/ws-deaf")).await.unwrap();
+    let uu_link::Duplex { mut sender, receiver: _r } = r.duplex.unwrap();
+    let chunk = DuplexMessage::Binary(vec![1u8; 256 * 1024].into());
+    let mut sent = 0usize;
+    let failed = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if sender.send(&chunk).await.is_err() {
+                return true;
+            }
+            sent += 256 * 1024;
+            if sent > 16 * uu_link::RTC_DUPLEX_RECV_MAX {
+                return false;
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(failed, "the stream was reset after {sent} bytes");
+    assert!(
+        sent <= uu_link::RTC_DUPLEX_RECV_MAX + 4 * 1024 * 1024,
+        "reset near the limit (what was in flight aside), not later: {sent}"
+    );
+    // and the session lives on
+    let mut e = old.request(&RpcRequest::new("POST", "/echo"), b"hi").await.unwrap();
+    assert_eq!(&e.body.read_all(1024).await.unwrap()[..], b"hi");
+}
+
+/// A flood of tiny messages to a stream nobody reads hits the same bound: each waiting data-channel message counts
+/// its overhead too, not just its few bytes (1-byte messages would otherwise pile up ~10x the bound in memory).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rtc_tiny_messages_hit_the_bound() {
+    let s = server(GuardConfig::default()).await;
+    let (c, _srv, _ep) = dial_without_credit(&s, "good-tiny").await.unwrap();
+    let r = c.request_duplex(&RpcRequest::new("GET", "/ws-deaf")).await.unwrap();
+    let uu_link::Duplex { mut sender, receiver: _r } = r.duplex.unwrap();
+    // each goes as one 6-byte data-channel message
+    let tiny = DuplexMessage::Binary(Bytes::from_static(&[1]));
+    let old_bound = uu_link::RTC_DUPLEX_RECV_MAX / 6;
+    let mut sent = 0usize;
+    let failed = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if sender.send(&tiny).await.is_err() {
+                return true;
+            }
+            sent += 1;
+            if sent > 2 * old_bound {
+                return false;
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(failed, "the stream was reset after {sent} messages");
+    assert!(
+        sent < old_bound / 3,
+        "reset at ~{} messages (overhead counted), not ~{old_bound}: {sent}",
+        uu_link::RTC_DUPLEX_RECV_MAX / 70
+    );
+    let mut e = c.request(&RpcRequest::new("POST", "/echo"), b"hi").await.unwrap();
+    assert_eq!(&e.body.read_all(1024).await.unwrap()[..], b"hi");
+}
+
+/// A session's duplex streams share one budget (RTC_SESSION_RECV_MAX): streams each under their own bound, nobody
+/// reading, until together they'd hold more; the stream that pushes it over is reset, the others and the session go on.
+/// (The one that goes over sends only a little past the budget: a reset with much in flight behind it can still cost
+/// the whole association, sctp-proto's deferred-reset data — the credit window is what keeps resets rare.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rtc_session_receive_budget() {
+    let s = server(GuardConfig::default()).await;
+    let (c, _srv, _ep) = dial_without_credit(&s, "good-budget").await.unwrap();
+    let msg = 64 * 1024;
+    let per = 25 * msg; // 1600 KiB: under RTC_DUPLEX_RECV_MAX each
+    assert!(per < uu_link::RTC_DUPLEX_RECV_MAX);
+    let cost = per + (per / (16 * 1024)) * 64; // with each data-channel message's overhead
+    let fit = uu_link::RTC_SESSION_RECV_MAX / cost;
+    let left = uu_link::RTC_SESSION_RECV_MAX - fit * cost;
+    let chunk = DuplexMessage::Binary(vec![1u8; msg].into());
+    let mut streams = Vec::new();
+    for i in 0..=fit {
+        let r = c.request_duplex(&RpcRequest::new("GET", "/ws-deaf")).await.unwrap();
+        let uu_link::Duplex { mut sender, receiver } = r.duplex.unwrap();
+        // the last: just past what the budget has left
+        let n = if i < fit { per / msg } else { left / msg + 2 };
+        for _ in 0..n {
+            if sender.send(&chunk).await.is_err() {
+                break;
+            }
+        }
+        let reset = tokio::time::timeout(Duration::from_millis(if i < fit { 300 } else { 3000 }), sender.stopped())
+            .await
+            .is_ok();
+        assert_eq!(reset, i == fit, "stream {i} (of {fit} that fit): reset = {reset}");
+        streams.push((sender, receiver));
+    }
+    // the session goes on
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut e = c.request(&RpcRequest::new("POST", "/echo"), b"hi").await.unwrap();
+    assert_eq!(&e.body.read_all(1024).await.unwrap()[..], b"hi");
+}
+
+/// A reset with ~1 MiB still in flight behind it (a peer that writes and never waits, nobody reading) costs only that
+/// stream: the session, a stream open beside it and new ones go on. Several in a row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rtc_reset_with_data_in_flight() {
+    let s = server(GuardConfig::default()).await;
+    let (c, _srv, _ep) = dial_without_credit(&s, "good-inflight").await.unwrap();
+    let echo = c.request_duplex(&RpcRequest::new("GET", "/ws")).await.unwrap();
+    let uu_link::Duplex { sender: mut es, receiver: mut er } = echo.duplex.unwrap();
+    let chunk = DuplexMessage::Binary(vec![1u8; 256 * 1024].into());
+    for round in 0..6 {
+        let r = c.request_duplex(&RpcRequest::new("GET", "/ws-deaf")).await.unwrap();
+        let uu_link::Duplex { mut sender, receiver: _r } = r.duplex.unwrap();
+        let mut sent = 0usize;
+        let failed = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if sender.send(&chunk).await.is_err() {
+                    return true;
+                }
+                sent += 256 * 1024;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(failed, "round {round}: the stream was reset");
+        // (the client's sends go on past the bound until it hears the reset: SCTP keeps ~1 MiB in flight)
+        assert!(sent >= 2 * uu_link::MAX_DUPLEX_MESSAGE, "round {round}: reset before the bound: {sent}");
+        // the stream beside it and the session go on
+        let m = DuplexMessage::Text(format!("round {round}"));
+        es.send(&m).await.unwrap_or_else(|e| panic!("round {round}: {e:?} {:?}", c.close_info()));
+        let back = tokio::time::timeout(Duration::from_secs(5), er.recv()).await.unwrap().unwrap().unwrap();
+        assert_eq!(back, m);
+    }
+    let mut e = c.request(&RpcRequest::new("POST", "/echo"), b"hi").await.unwrap();
+    assert_eq!(&e.body.read_all(1024).await.unwrap()[..], b"hi");
+    assert!(c.close_info().is_none());
+}
+
+// MARK: the credit window (docs/LINK.md「信用窗口」)
+
+/// Both sides take it over WebRTC: `credit` in the welcome. A slow duplex reader slows the writer (no reset, however
+/// far ahead the writer would be): what the writer has out is the reader's window, not the whole of what it sends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_slow_duplex_reader() {
+    let s = server(GuardConfig::default()).await;
+    let (c, _srv, _ep) = dial(&s, "good-slow").await.unwrap();
+    assert!(c.welcome().features.iter().any(|f| f == "credit"), "{:?}", c.welcome().features);
+    let r = c.request_duplex(&RpcRequest::new("GET", "/ws-slow")).await.unwrap();
+    let uu_link::Duplex { mut sender, mut receiver } = r.duplex.unwrap();
+    let total = 4 * 1024 * 1024; // twice RTC_DUPLEX_RECV_MAX: without the window, a reset
+    let msg = 64 * 1024;
+    let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let progress = sent.clone();
+    let writer = tokio::spawn(async move {
+        for _ in 0..total / msg {
+            sender.send(&DuplexMessage::Binary(vec![3u8; msg].into())).await.unwrap();
+            progress.fetch_add(msg, std::sync::atomic::Ordering::SeqCst);
+        }
+        sender.finish().await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    // ~20 messages read by now (1.25 MiB) + the window
+    let ahead = sent.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(ahead < total / 2 + uu_link::RTC_CREDIT_WINDOW / 2, "the writer was held back: {ahead} sent after 400 ms");
+    writer.await.unwrap();
+    let n = tokio::time::timeout(Duration::from_secs(20), receiver.recv()).await.unwrap().unwrap().unwrap();
+    assert_eq!(n, DuplexMessage::Text(total.to_string()), "every byte arrived");
+    assert_eq!(receiver.recv().await.unwrap(), None);
+}
+
+/// Bodies both ways under the window: a 30 MiB upload (a server whose body limit allows it) echoed back whole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_large_upload_and_answer() {
+    let s = server_with(GuardConfig::default(), |o| o.max_request_body = 64 * 1024 * 1024).await;
+    let (c, _srv, _ep) = dial(&s, "good-up").await.unwrap();
+    let big: Vec<u8> = (0..30 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let started = std::time::Instant::now();
+    let mut r = c.request(&RpcRequest::new("POST", "/echo"), &big).await.unwrap();
+    assert_eq!(r.status, 200);
+    assert!(r.body.read_all(64 * 1024 * 1024).await.unwrap() == big, "the same 30 MiB back");
+    eprintln!("30 MiB up and back in {} ms", started.elapsed().as_millis());
+}
+
+/// An answer nobody reads waits in the server, not in the client: the server gets the client's window ahead, no
+/// more; as the client reads, the rest comes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_unread_answer() {
+    let s = server(GuardConfig::default()).await;
+    let (c, _srv, _ep) = dial(&s, "good-down").await.unwrap();
+    let n = 16 * 1024 * 1024;
+    let mut r = c.request(&RpcRequest::new("GET", format!("/bytes?n={n}&track")), b"").await.unwrap();
+    assert_eq!(r.status, 200);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let ahead = BYTES_WRITTEN.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(ahead <= uu_link::RTC_CREDIT_WINDOW + 128 * 1024, "the server is held back: {ahead} written, none read");
+    let body = r.body.read_all(n).await.unwrap();
+    assert_eq!(body.len(), n);
+    assert_eq!(BYTES_WRITTEN.load(std::sync::atomic::Ordering::SeqCst), n);
+}
+
+/// Windows past the initial one come out of the session's pool: streams that read a little and then stop can't each
+/// keep a whole window (12 x 1 MiB); the pool's 8 MiB, and each stream's own initial window, is what they get together.
+/// The session and new streams go on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_pool() {
+    let s = server(GuardConfig::default()).await;
+    let (c, _srv, _ep) = dial(&s, "good-pool").await.unwrap();
+    let msg = 64 * 1024;
+    let streams = 12;
+    let mut total = 0usize;
+    let mut held = Vec::new();
+    for _ in 0..streams {
+        let r = c.request_duplex(&RpcRequest::new("GET", "/ws-sip")).await.unwrap();
+        let uu_link::Duplex { mut sender, receiver } = r.duplex.unwrap();
+        loop {
+            match tokio::time::timeout(
+                Duration::from_millis(300),
+                sender.send(&DuplexMessage::Binary(vec![1u8; msg].into())),
+            )
+            .await
+            {
+                Ok(Ok(())) => total += msg,
+                Ok(Err(e)) => panic!("a reset under the window: {e:?}"),
+                Err(_) => break, // held back
+            }
+        }
+        held.push((sender, receiver));
+    }
+    // (each window is sized by what the others hold unread when it is given: the pool, plus the last one's window)
+    let bound =
+        uu_link::RTC_SESSION_RECV_MAX + uu_link::RTC_CREDIT_WINDOW + streams * (uu_link::RTC_CREDIT_INITIAL + msg);
+    assert!(total <= bound, "{total} out at once over {streams} streams (bound {bound})");
+    assert!(total >= uu_link::RTC_SESSION_RECV_MAX / 2, "the pool was used: {total}");
+    let mut e = c.request(&RpcRequest::new("POST", "/echo"), b"hi").await.unwrap();
+    assert_eq!(&e.body.read_all(1024).await.unwrap()[..], b"hi");
+    assert!(c.close_info().is_none());
+}
+
+/// Sends `total` bytes on a fresh `/ws-sink` stream and waits for the count; the time it took.
+async fn sink(c: &Session, total: usize) -> Duration {
+    let started = std::time::Instant::now();
+    let r = c.request_duplex(&RpcRequest::new("GET", "/ws-sink")).await.unwrap();
+    let uu_link::Duplex { mut sender, mut receiver } = r.duplex.unwrap();
+    let msg = 64 * 1024;
+    for _ in 0..total / msg {
+        sender.send(&DuplexMessage::Binary(vec![2u8; msg].into())).await.unwrap();
+    }
+    sender.finish().await.unwrap();
+    let n = receiver.recv().await.unwrap().unwrap();
+    assert_eq!(n, DuplexMessage::Text(total.to_string()));
+    started.elapsed()
+}
+
+/// Streams that sent a burst (read at once) and then went quiet keep their windows but hold none of the pool (it
+/// counts unread bytes, not credit given): a new stream goes at full speed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_idle_streams_leave_the_pool() {
+    let s = server(GuardConfig::default()).await;
+    let (c, _srv, _ep) = dial(&s, "good-idle").await.unwrap();
+    let mut idle = Vec::new();
+    for _ in 0..12 {
+        let r = c.request_duplex(&RpcRequest::new("GET", "/ws-sink")).await.unwrap();
+        let uu_link::Duplex { mut sender, receiver } = r.duplex.unwrap();
+        for _ in 0..12 {
+            sender.send(&DuplexMessage::Binary(vec![1u8; 64 * 1024].into())).await.unwrap();
+        }
+        idle.push((sender, receiver)); // quiet from here on, its window granted
+    }
+    let took =
+        tokio::time::timeout(Duration::from_secs(20), sink(&c, 8 * 1024 * 1024)).await.expect("the new stream moved");
+    eprintln!("8 MiB beside 12 idle streams in {} ms", took.as_millis());
+}
+
+/// The pool full of bytes nobody reads (streams that stopped reading): a new stream still moves, on the initial window
+/// every stream keeps (a grant whenever its sender has less left than a message costs).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_full_pool_still_moves() {
+    let s = server(GuardConfig::default()).await;
+    let (c, _srv, _ep) = dial(&s, "good-full").await.unwrap();
+    let mut held = Vec::new();
+    let mut total = 0usize;
+    for _ in 0..12 {
+        let r = c.request_duplex(&RpcRequest::new("GET", "/ws-sip")).await.unwrap();
+        let uu_link::Duplex { mut sender, receiver } = r.duplex.unwrap();
+        while let Ok(Ok(())) = tokio::time::timeout(
+            Duration::from_millis(300),
+            sender.send(&DuplexMessage::Binary(vec![1u8; 64 * 1024].into())),
+        )
+        .await
+        {
+            total += 64 * 1024;
+        }
+        held.push((sender, receiver));
+    }
+    assert!(total >= uu_link::RTC_SESSION_RECV_MAX - uu_link::RTC_CREDIT_WINDOW, "the pool is full: {total}");
+    let took =
+        tokio::time::timeout(Duration::from_secs(30), sink(&c, 2 * 1024 * 1024)).await.expect("the new stream moved");
+    eprintln!("2 MiB beside a full pool in {} ms", took.as_millis());
+}
+
+/// A grant the connection refuses to take (str0m's buffer full: `Ok(false)`) is not counted as given: it goes again
+/// after the next input, and the transfer finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_refused_grant_goes_again() {
+    let s = server(GuardConfig::default()).await;
+    let (c, _srv, _ep) = dial(&s, "good-refuse").await.unwrap();
+    c.test_refuse_grant_writes(30);
+    let n = 8 * 1024 * 1024;
+    let mut r = c.request(&RpcRequest::new("GET", format!("/bytes?n={n}")), b"").await.unwrap();
+    let body = tokio::time::timeout(Duration::from_secs(20), r.body.read_all(n)).await.expect("not stuck").unwrap();
+    assert_eq!(body.len(), n);
+    assert_eq!(c.test_grant_writes_to_refuse(), 0, "grants were refused on the way");
 }

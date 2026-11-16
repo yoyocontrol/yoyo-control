@@ -1,3 +1,4 @@
+import { ChannelCredit, type CreditPool, messageCost, SendGate } from "./credit.js";
 import { LinkError } from "./errors.js";
 import { encodeFrame, FrameReader, MAX_RPC_HEAD, messageBytes } from "./framing.js";
 
@@ -12,38 +13,81 @@ export interface RpcRequest {
 export const RPC_CHUNK = 16 * 1024;
 /** `readAll`'s default limit. */
 export const RPC_READ_LIMIT = 64 * 1024 * 1024;
+/** A request body's pieces wait while the channel holds more than this unsent (a browser refuses sends past its
+ *  queue's size: Chrome's is 16 MiB); they go on at `bufferedamountlow` (half of it). */
+export const RPC_SEND_HIGH = 1024 * 1024;
+
+/** @internal A request or stream the session ends itself when it ends (a closed peer connection needn't fire its
+ *  channels' `close`). */
+export interface SessionStream {
+  sessionEnded(err: LinkError): void;
+}
 
 /**
- * Opens an `rpc` DataChannel (ordered, reliable, in-band) and sends the request on it: the head frame `{m, p, h}`, the
- * body in pieces, then a zero-length message (the FIN). Resolves with the response once its head came.
+ * Opens an `rpc` DataChannel (ordered, reliable, in-band) and sends the request on it: the head frame `{m, p, h}` and
+ * the body in pieces (paced by the channel's buffer, `RPC_SEND_HIGH`, and under the credit window by the server's
+ * grants), then a zero-length message (the FIN). Resolves with the response once its head came. `timeoutMs` is how
+ * long the channel may take to open, an upload may go without progress, and the answer may take after the FIN (an
+ * upload's own length doesn't count against it). `streams`: the session's open ones; `credit`: its pool, when both
+ * sides took the credit window.
  */
-export function rpcRequest(pc: RTCPeerConnection, req: RpcRequest, body: Uint8Array | undefined, timeoutMs: number): Promise<RpcResponse> {
+export function rpcRequest(
+  pc: RTCPeerConnection,
+  req: RpcRequest,
+  body: Uint8Array | undefined,
+  timeoutMs: number,
+  streams?: Set<SessionStream>,
+  credit?: CreditPool | null,
+): Promise<RpcResponse> {
   const ch = pc.createDataChannel("rpc", { ordered: true });
   ch.binaryType = "arraybuffer";
-  const response = new RpcResponse(ch);
+  const response = new RpcResponse(ch, streams, credit ? new ChannelCredit(ch, credit) : null);
   return new Promise<RpcResponse>((resolve, reject) => {
-    const timer = setTimeout(() => fail(new LinkError("timeout", `no answer to ${req.method} ${req.path} in ${timeoutMs} ms`)), timeoutMs);
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = (what: string) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => fail(new LinkError("timeout", `${what} ${req.method} ${req.path} in ${timeoutMs} ms`)), timeoutMs);
+    };
     const fail = (e: LinkError) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       response.cancel();
       reject(e);
     };
     response.onHead = (err) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       if (err) reject(err);
       else resolve(response);
     };
-    ch.addEventListener("open", () => {
+    arm("no channel for");
+    const upload = async () => {
       try {
         const head: Record<string, unknown> = { m: req.method.toUpperCase(), p: req.path, h: lowerHeaders(req.headers ?? {}) };
-        ch.send(encodeFrame(head, MAX_RPC_HEAD));
-        const b = body ?? new Uint8Array(0);
-        for (let i = 0; i < b.length; i += RPC_CHUNK) ch.send(b.slice(i, i + RPC_CHUNK));
+        if (!settled) arm("no progress sending");
+        // the head too goes in pieces: each fits the initial window
+        for (const part of [encodeFrame(head, MAX_RPC_HEAD), body ?? new Uint8Array(0)]) {
+          for (let i = 0; i < part.length; i += RPC_CHUNK) {
+            const piece = part.slice(i, i + RPC_CHUNK);
+            if (!response.canSend(piece.length)) {
+              await response.room(piece.length);
+              if (!settled) arm("no progress sending");
+            }
+            response.send(piece);
+          }
+        }
         ch.send(new Uint8Array(0));
+        // from here on the clock is the answer's
+        if (!settled) arm("no answer to");
       } catch (e) {
+        // (once the head came, the response says how the exchange ended)
         fail(e instanceof LinkError ? e : new LinkError("closed", e instanceof Error ? e.message : String(e)));
       }
-    });
+    };
+    ch.addEventListener("open", () => void upload());
   });
 }
 
@@ -66,25 +110,76 @@ export class RpcResponse {
   onHead: ((err: LinkError | null) => void) | null = null;
   private readonly reader = new FrameReader(MAX_RPC_HEAD);
   private gotHead = false;
-  private chunks: Uint8Array[] = [];
+  /** The body's pieces as they came, each with what it costs against the window (granted again once read). */
+  private chunks: { bytes: Uint8Array; cost: number }[] = [];
   private done = false;
   private error: LinkError | null = null;
   private wake: (() => void) | null = null;
+  private readonly gate: SendGate;
 
-  /** @internal */
-  constructor(private readonly ch: RTCDataChannel) {
+  /** @internal `streams`: the session's open ones (it ends them when it ends); `credit`: the channel's, under the
+   *  credit window */
+  constructor(
+    private readonly ch: RTCDataChannel,
+    streams?: Set<SessionStream>,
+    private readonly credit: ChannelCredit | null = null,
+  ) {
+    this.gate = new SendGate(ch, RPC_SEND_HIGH, credit);
     ch.addEventListener("message", (ev) => this.message(ev.data));
     ch.addEventListener("close", () => this.end(this.done ? null : new LinkError("closed", "the request was reset")));
     ch.addEventListener("error", () => this.end(new LinkError("closed", "the request channel failed")));
+    if (streams) {
+      streams.add(this);
+      const off = () => streams.delete(this);
+      ch.addEventListener("close", off);
+      ch.addEventListener("error", off);
+    }
+  }
+
+  /** @internal the session ended: so does the exchange (a waiting head, body read or upload). */
+  sessionEnded(err: LinkError): void {
+    this.end(err);
+    this.credit?.end();
+  }
+
+  /** @internal Whether a request piece of `n` bytes may go now (buffer room, the server's credit). */
+  canSend(n: number): boolean {
+    return this.ch.bufferedAmount <= RPC_SEND_HIGH && (!this.credit || this.credit.canSend(n));
+  }
+
+  /** @internal Until a request piece of `n` bytes may go; throws once the exchange is over (the answer complete, a
+   *  reset, a cancel, the session's end). */
+  room(n: number): Promise<void> {
+    return this.gate.room(n, () => {
+      if (this.done) throw this.error ?? new LinkError("closed", "the request is over");
+    });
+  }
+
+  /** @internal Sends a request piece (counted against the server's window). */
+  send(bytes: Uint8Array<ArrayBuffer>): void {
+    this.gate.send(bytes);
+  }
+
+  private roomMade(): void {
+    this.gate.wake();
   }
 
   private message(data: unknown): void {
     if (this.done) return;
+    // under the window, text messages are the server's grants (ChannelCredit takes them)
+    if (this.credit && typeof data === "string") return;
     let bytes: Uint8Array;
     try {
       bytes = messageBytes(data);
     } catch (e) {
       this.end(e as LinkError);
+      return;
+    }
+    const cost = messageCost(bytes.length);
+    if (bytes.length && this.credit && !this.credit.arrive(bytes.length)) {
+      // past the window this side gave: the server broke the protocol
+      this.end(new LinkError("protocol", "the server sent past its credit"));
+      this.ch.close();
       return;
     }
     if (!this.gotHead) {
@@ -95,13 +190,18 @@ export class RpcResponse {
       try {
         this.reader.append(bytes);
         const head = this.reader.next();
-        if (!head) return;
+        if (!head) {
+          // (the head's pieces are read at once)
+          this.credit?.consume(cost);
+          return;
+        }
         this.gotHead = true;
         this.status = typeof head.s === "number" ? head.s : 0;
         const h = head.h && typeof head.h === "object" ? (head.h as Record<string, unknown>) : {};
         for (const [k, v] of Object.entries(h)) this.headers[k.toLowerCase()] = String(v);
         const rest = this.reader.rest();
-        if (rest.length) this.chunks.push(rest);
+        if (rest.length) this.chunks.push({ bytes: rest, cost });
+        else this.credit?.consume(cost);
         this.onHead?.(null);
         this.onHead = null;
       } catch (e) {
@@ -113,10 +213,11 @@ export class RpcResponse {
       // the FIN: the body is complete
       this.done = true;
       this.wake?.();
+      this.roomMade();
       this.ch.close();
       return;
     }
-    this.chunks.push(bytes);
+    this.chunks.push({ bytes, cost });
     this.wake?.();
   }
 
@@ -131,13 +232,18 @@ export class RpcResponse {
       this.onHead = null;
     }
     this.wake?.();
+    this.roomMade();
   }
 
   /** The next piece of the body; null at its end. Throws `closed` when the request was reset. */
   async chunk(): Promise<Uint8Array | null> {
     for (;;) {
       const c = this.chunks.shift();
-      if (c) return c;
+      if (c) {
+        // read: the server may send as much again
+        this.credit?.consume(c.cost);
+        return c.bytes;
+      }
       if (this.done) {
         if (this.error) throw this.error;
         return null;
@@ -188,6 +294,7 @@ export class RpcResponse {
       this.wake?.();
     }
     if (this.ch.readyState === "open" || this.ch.readyState === "connecting") this.ch.close();
+    this.roomMade();
   }
 
   /** As a fetch `Response` (status, headers, the body streamed): for code written against HTTP. */

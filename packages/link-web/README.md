@@ -38,6 +38,8 @@ console.log(session.server.name, session.path().kind);       // "My Mac" "lan"
 console.log(session.timing);                                   // { gatheredMs, answeredMs, connectedMs, welcomeMs }
 
 const status = await (await session.fetch("/status")).json();  // any route as RPC
+const ws = await session.requestDuplex({ method: "GET", path: "/ws" });  // a WebSocket over the link (server says "duplex")
+if (ws.duplex) { await ws.duplex.sendText("hi"); console.log(await ws.duplex.recv()); await ws.duplex.finish(); }
 session.onControl((m) => console.log(m.t));                    // control messages
 await session.close();
 ```
@@ -87,6 +89,27 @@ The package also exports the file as `@yoyocontrol/link-web/uu_link_wasm_bg.wasm
 - Channels: `control` (negotiated id 0, ordered, reliable), `dgram` (negotiated id 1, `ordered: false`,
   `maxRetransmits: 0`; one message = one datagram, byte 0 = `channel << 4 | 1`), one in-band `rpc` channel per
   request (head frame, body, a zero-length message as the FIN; closed without it = reset).
+- Duplex requests (`requestDuplex`, docs/LINK.md「双工请求」): the head says `duplex: true`, no body; after a 101 the
+  channel carries messages both ways (`u8 type + u32 BE length + payload`: text, binary, close with its code; at most
+  1 MiB) in ≤ 16 KiB channel messages, a zero-length one as each side's FIN; the client closes the channel once both
+  sides finished. Only to a server whose `welcome` lists `duplex` (else `unsupported`, nothing sent). The same shape as
+  the Node binding: `send` / `sendText` / `sendBinary`, `recv` (`null` at the other side's FIN), `for await`, `finish`,
+  `cancel`, `stopped`. Two differences from QUIC: `cancel()` closes the channel (WebRTC has no half-close: both
+  directions end), and the server holds at most about 2 MiB unread per stream (`RTC_DUPLEX_RECV_MAX`): a peer that
+  outruns the reader gets the stream reset, where QUIC's flow control would hold it back; this side holds the server
+  to the same bound (`DUPLEX_RECV_MAX`). Under the credit window (below) a slow reader holds the writer back instead. Sends wait while the channel's buffer holds over 192 KiB; sends and `finish`
+  needn't be awaited one by one (they go in call order, each message whole), and several `recv`s may wait at once.
+  When the session ends, its open streams and requests end with it (`closed`).
+- Request bodies are paced by the channel's buffer (`RPC_SEND_HIGH`, 1 MiB; a browser refuses sends past its queue's
+  size), so a body of any size goes; the server's own limit still applies (8 MiB by default: past it, a 413). The 30 s
+  `RPC_TIMEOUT_MS` counts from the request's FIN, not while a body that is making progress uploads.
+- The credit window (docs/LINK.md「信用窗口」; `credit` in `hello` and `welcome`, the `credit` dial option, default
+  on): each `rpc` channel's receiver grants its sender bytes as its app reads them (text messages
+  `{"credit": <total>}`; each binary message costs its length + 64 on both sides), 64 KiB to start, topped up to
+  1 MiB (past 64 KiB only as far as an 8 MiB pool of the other streams' unread bytes allows: fairness; the memory
+  bound is the windows, at most 32 x 1 MiB unread per session). Uploads and duplex sends wait for the server's grants;
+  an answer nobody reads waits in the server, not in the page (the e2e test: 1 MiB in the page for an unread 50 MiB
+  answer, 50 MiB without the window). A server that doesn't say `credit` gets today's behaviour.
 - Offer: non-trickle, ICE gathering capped at `gatherTimeoutMs` (1 s); `{v: 1, offer, device}` to `signal`.
 - Answer: `SHA-256(binding.key)` must be the pinned fingerprint, `sig` must verify (ECDSA P-256) over
   `"yoyocontrol-rtc-v1:" + sha256(offer SDP) + ":" + fingerprint`, and the answer SDP's `a=fingerprint` must be

@@ -41,8 +41,9 @@ pub use guard::GuardConfig;
 pub use path::{Iface, PathInfo, PathKind};
 pub use probe::{ProbeReport, ProbeServerReport};
 pub use rpc::{
-    DUPLEX_FEATURE, Duplex, DuplexMessage, DuplexReceiver, DuplexResponse, DuplexSender, Headers, MAX_DUPLEX_MESSAGE,
-    RpcBody, RpcHandler, RpcRequest, RpcResponder, RpcResponse,
+    CREDIT_FEATURE, DUPLEX_FEATURE, Duplex, DuplexMessage, DuplexReceiver, DuplexResponse, DuplexSender, Headers,
+    MAX_DUPLEX_MESSAGE, RTC_CREDIT_INITIAL, RTC_CREDIT_WINDOW, RTC_DUPLEX_RECV_MAX, RTC_MESSAGE_COST,
+    RTC_SESSION_RECV_MAX, RpcBody, RpcHandler, RpcRequest, RpcResponder, RpcResponse,
 };
 pub use rtc::{IdentityKey, IdentitySigner, RtcConfig};
 pub use session::{AppInfo, CloseInfo, Device, Hello, ServerInfo, Session, Side, Welcome};

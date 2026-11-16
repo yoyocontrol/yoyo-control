@@ -608,6 +608,26 @@ impl Session {
         e.info(self.inner.local_close.get())
     }
 
+    /// Tests (`test-hooks`): WebRTC: this session's next `n` credit grants are refused as if the connection's buffer
+    /// were full (they must go again).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_refuse_grant_writes(&self, n: u32) {
+        if let crate::transport::Conn::Rtc(c) = &self.inner.conn {
+            c.refuse_grant_writes(n);
+        }
+    }
+
+    /// Tests (`test-hooks`): grants still to refuse.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn test_grant_writes_to_refuse(&self) -> u32 {
+        match &self.inner.conn {
+            crate::transport::Conn::Rtc(c) => c.grant_writes_to_refuse(),
+            crate::transport::Conn::Quic(_) => 0,
+        }
+    }
+
     /// How the session ended, once it did (and its final stats were logged).
     pub fn close_info(&self) -> Option<CloseInfo> {
         self.inner.close_info.borrow().clone()

@@ -165,16 +165,51 @@ App 的处理器（它走现有的 HTTP 路由，同远程访问的白名单，�
   （内容 = `u16 大端关闭码 + 原因`，同 WebSocket 的关闭帧）；一条最多 1 MiB（`MAX_DUPLEX_MESSAGE`），超了发的一方报错、收到的一方
   当协议错误停读。关闭消息只是一条消息：方向的结束是 FIN（`DuplexSender::finish`）；`recv` 返回 `None` = 对方 FIN 了。发送方没
   `finish` 就丢掉：流被重置。
-- 服务端要自己说收（`ServerOptions.duplex`，Node 的 `listen({ duplex: true })`，默认关）：收的服务端在 **QUIC** 会话的 `welcome`
-  的 `features` 里加 `duplex`（App 自己的列表里写了也会被拿掉，只有这里说了算）；不收的，或者经 WebRTC 来的，双工请求在到处理器之前
-  就回 400，那条流的进向停读（QUIC 上对方再发就失败；WebRTC 上再发来的直接丢掉——都不会堆在服务端）。WebRTC 不收是因为它的数据通道没有自己的接收上限：一条一直在写的
-  双工流会把服务端的内存撑满。Swift 的服务端（FFI）不收。
+- 服务端要自己说收（`ServerOptions.duplex`，Node 的 `listen({ duplex: true })`，默认关）：收的服务端在会话的 `welcome`
+  的 `features` 里加 `duplex`（App 自己的列表里写了也会被拿掉，只有这里说了算）；不收的，双工请求在到处理器之前
+  就回 400，那条流的进向停读（QUIC 上对方再发就失败；WebRTC 上再发来的直接丢掉——都不会堆在服务端）。Swift 的服务端（FFI）不收。
+- **经 WebRTC**（浏览器，`link-web` 的 `requestDuplex`）同样收：消息照样按字节流放在那条 `rpc` 通道上（≤ 16 KiB 一条通道消息，零长度 = FIN，
+  不带 FIN 关通道 = 重置；双方都 FIN 了由客户端关通道）。数据通道没有接收窗口，所以每条双工流**没读的**最多
+  `RTC_DUPLEX_RECV_MAX`（2 MiB + 64 KiB，两条最大的消息多一点；每条等着的通道消息另算 64 字节，一大堆很小的消息也会撞上它）：对方写得比这边读得快、超过它，流就被重置（QUIC 上是流控把对方挡住）；
+  两端都这样（服务端收、客户端 `request_duplex` 的回答、`link-web` 的 `Duplex`）。服务端经 WebRTC 收的**每条** RPC 流从通道打开起就有上限
+  （`RTC_RPC_RECV_MAX` = 8 MiB 请求体上限 + 2 MiB，读到头以后改成服务端自己的请求体上限 + 2 MiB：请求体本来就会读进内存这么多，
+  没读的不比读了的多占）；一个会话里的双工流没读的加起来最多 `RTC_SESSION_RECV_MAX`（8 MiB），哪条流的消息会让它超，就重置哪条。
+  这些上限和重置是兜底：两边都说了 `credit` 的会话走下面的**信用窗口**，守规矩的一方永远碰不到它们；没说的一方（旧的客户端、旧的服务端）
+  照旧由它们管。重置时对方还有数据在路上也只丢那条流（vendor/sctp-proto 的补丁：这边已经停读的流，再来的数据确认后丢掉，不占接收缓冲——
+  以前会把整个关联断掉）。WebRTC 没有半关：`cancel` 关掉通道，两个方向都结束。
+
+#### 信用窗口（WebRTC）
+
+数据通道没有接收窗口；没有它，读得慢的一方只能靠重置保护自己（语音通话里就是丢声音），一个没人读的下载会全堆进页面。所以经 WebRTC 的每条
+`rpc` 通道（请求、回答、双工流，两个方向）由**接收方给发送方额度**，像 QUIC 的流控：
+
+- **协商**：客户端在 `hello.features` 里说 `credit`（`DialOptions.credit` / link-web 的 `credit`，默认开），服务端在 `welcome` 里也说，
+  才用（`CREDIT_FEATURE`）；一边没说就照旧（上面的上限和重置）。服务端在发 `welcome` 前打开，客户端收到 `welcome` 时打开：之后开的通道都用它。QUIC 不用（有自己的流控）。
+- **单位**：两边一样算——每条非空的二进制通道消息算它的长度加 `RTC_MESSAGE_COST`（64 字节，同接收上限的算法），FIN 不算。所以一大堆很小的消息
+  也不会让守规矩的发送方被判越界。
+- **额度**：每条通道每个方向一开始有 `RTC_CREDIT_INITIAL`（64 KiB，一条通道消息 ≤ 16 KiB + 64 总放得下；所以 link-web 的请求头也按 16 KiB 分条发）。
+  接收方在应用**读走**之后（Rust：`RtcRecv` 从收件箱取走；link-web：`RpcResponse.chunk()` / `readAll`、`Duplex.recv()`）把窗口补回
+  `RTC_CREDIT_WINDOW`（1 MiB），用了一半以上才补，每次至少 64 KiB；补的是**累计总额**，一条文本消息 `{"credit": <总额>}`（流本身的消息都是二进制，
+  所以不会混）。发送方已发的加下一条超过对方给的总额就等（Rust：`RtcSend`；link-web：`SendGate`，同 `bufferedAmount` 的等待一起）。
+- **会话的池**（`RTC_SESSION_RECV_MAX`，8 MiB）：算的是各条流**到了没读的**字节（内存，像 QUIC 的连接窗口那样），不是给了没用的额度——
+  一阵发完、读完就闲着的流不占池。一条流的窗口超出 64 KiB 的部分，只给到池还有的那么多；每条流总留着它的 64 KiB。发送方剩下的额度不够一条
+  消息（16 KiB + 64）时，只要能多给，马上补（不等用掉一半），所以池满了新流也照样走。关掉了、处理器还没放手的流，它没读的字节照样算在池里。
+  池被占满时没给出去的额度，在别的流读走或结束时再补。**池只管公平**（下一个窗口能给多大），**内存的上限是每条流的窗口**：一个会话最多
+  32 条流 × 1 MiB = 32 MiB 没读的数据（给出去的额度收不回来：池空的时候拿到满窗口的流，之后都可以填满它）。
+- **额度消息发不出去**（str0m 整个连接的缓冲满了，`write` 回 `Ok(false)`；浏览器的发送队列满了会抛错）：这边不算已给，等下一次收到包 /
+  `bufferedamountlow` 再发——不然对方等着一笔这边以为给过了的额度。
+- **越界**：收到的超过给出的总额，就是对方违反协议：重置那条流（Rust）/ 报 `protocol`（link-web）。用信用窗口的流不再受上面那些上限管（守规矩的一方
+  在窗口内，它们碰不到；会话预算的算法和池不同，混用会误伤）。
+- link-web 的双工流：一条消息的字节全给了应用才还它的额度；但没有完整消息在等应用时，正在拼的那条消息的字节立刻还——最大的消息（1 MiB 加开销）
+  比窗口大，不然永远拼不完。所以页面里等着的最多是一个窗口加一条消息。
+- 结果（`test/e2e`，无头 Chrome ↔ `uu-link-probe`）：没人读的 50 MiB 回答，页面里多占约 1 MiB（不用信用窗口：50 MiB）；读得慢的双工流
+  （每 20 ms 读一条）让写的一方慢下来，4 MiB 一个字节不丢、没有重置；30 MiB 的上传照常（probe 的请求体上限放到了 64 MiB）。
 - 客户端对没说 `duplex` 的服务端**不发**双工请求（`request_duplex` 直接报 `InvalidArgument`）：旧的服务端会把它当普通请求等请求体，
   两边互等。普通的 `request` 发出去的头里永远没有 `duplex`。
 - 绑定：Node / Swift 的 `cancel()` 让正在等的 `recv()` 立刻返回空（以后的也一样），流的进向停读；Node 的 `stopped()` 可以等多次
   （Swift 没有）。Swift 的
   `recv` 不是取消安全的：Swift 的任务在等的时候被取消，那条消息可能丢——要结束一条流用 `cancel`。
-- 浏览器的 wasm（`link/wasm`）没有双工请求。
+- 浏览器：`link-web` 的 `LinkSession.requestDuplex(req)`（TypeScript，走上面那条 WebRTC 的路；`link/wasm` 只是媒体层，不管它）。
 
 ### 数据报
 
@@ -688,7 +723,9 @@ TEST_RUNNER_YOYO_LINK_SMOKE=$TMPDIR/serve.json TEST_RUNNER_YOYO_LINK_SMOKE_SECON
   对不上 = `LinkError("verification")`，硬失败），再 `setRemoteDescription`，然后 `hello` → `welcome`。`denied`（以及 `welcome`
   之前带 1 / 2 / 3 的 `bye`）是 `LinkError("denied")` 带 `code`。整个拨号默认 15 s。
 - `LinkSession`：`sendControl` / `onControl` / `controlMessages()`；RPC 每次开一条带内的 `rpc` 通道（头帧、正文按 16 KiB 分条、
-  空消息 = FIN，没有 FIN 就关 = 重置），`request()` 和 `fetch(path, init)`（给按 HTTP 写的代码，比如一个 `ScreenTransport`）；
+  空消息 = FIN，没有 FIN 就关 = 重置；正文看通道的缓冲发，超过 1 MiB 没发出去就等 `bufferedamountlow`——浏览器的发送队列满了会直接拒；
+  30 s 的超时从请求的 FIN 起算，上传本身多长不算，只要它在动），`request()` 和 `fetch(path, init)`（给按 HTTP 写的代码，比如一个 `ScreenTransport`）；
+  双工请求 `requestDuplex(req)` → `DuplexResponse`（`status`、`headers`、`duplex`、`readAll`），`Duplex` 的样子同 Node 的（「RPC 流」的「双工请求」）；
   `probe(durationMs, {signal})` → `ProbeReport`（「测速」；`signal` 停止；wasm 没有它时 `LinkError("unsupported")`）；
   `sendDatagram` / `onDatagram`（通道 6–15，超过 1200 字节或 `dgram` 缓冲超过 256 KiB 就丢并计数）；`close(code, reason)` 发
   `bye {code, reason}`；`closed()`。每 2 s 发 `link.stats`（路径和 RTT 取 `getStats()` 里选中的候选对：`currentRoundTripTime`，

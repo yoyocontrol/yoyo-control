@@ -176,6 +176,14 @@ browser.addEventListener("message", (ev) => {
     pending.delete(m.id);
   } else if (m.method === "Runtime.consoleAPICalled") {
     console.error("page:", m.params.args.map((a) => a.value ?? a.description).join(" "));
+  } else if (m.method === "Runtime.bindingCalled" && m.params.name === "e2eHeapAsk") {
+    // the page asks for its heap: after a GC, as CDP measures it
+    void (async () => {
+      await cdp("HeapProfiler.collectGarbage", {}, m.sessionId).catch(() => {});
+      // (ArrayBuffers' bytes are outside the JS heap: `backingStorageSize`)
+      const { usedSize, backingStorageSize } = await cdp("Runtime.getHeapUsage", {}, m.sessionId);
+      await cdp("Runtime.evaluate", { expression: `__e2eHeap(${usedSize + (backingStorageSize ?? 0)})` }, m.sessionId);
+    })();
   } else if (m.method === "Runtime.exceptionThrown") {
     console.error("page exception:", m.params.exceptionDetails.exception?.description ?? m.params.exceptionDetails.text);
   }
@@ -189,6 +197,8 @@ const cdp = (method, params = {}, sessionId) =>
 const { targetId } = await cdp("Target.createTarget", { url: `http://127.0.0.1:${webPort}/` });
 const { sessionId } = await cdp("Target.attachToTarget", { targetId, flatten: true });
 await cdp("Runtime.enable", {}, sessionId);
+await cdp("HeapProfiler.enable", {}, sessionId).catch(() => {});
+await cdp("Runtime.addBinding", { name: "e2eHeapAsk" }, sessionId);
 for (let i = 0; i < 100; i++) {
   const r = await cdp("Runtime.evaluate", { expression: "typeof e2e", returnByValue: true }, sessionId);
   if (r.result.value === "function") break;

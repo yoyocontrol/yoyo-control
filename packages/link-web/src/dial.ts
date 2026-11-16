@@ -6,6 +6,7 @@ import { LinkSession, MAX_DATAGRAM, type Hello, type Welcome } from "./session.j
 import { browserIface, type Iface } from "./stats.js";
 import { newRestartSecret, parseAnswer, verifyAnswer, type RtcOffer } from "./verify.js";
 import { loadLinkMedia, type ClientMediaConfig, type WasmSource } from "./wasm.js";
+import { CREDIT_FEATURE } from "./credit.js";
 
 /** What this client says it takes, in `hello.features` by default (as the iOS kit). */
 export const DEFAULT_FEATURES = ["screen", "audio", "cursor", "input"];
@@ -31,6 +32,10 @@ export interface DialRtcOptions {
   app: { name: string; version: string };
   /** `hello.features` (default `DEFAULT_FEATURES`). */
   features?: string[];
+  /** Offer the credit window (`hello`'s `credit`, docs/LINK.md「信用窗口」; default true): a slow reader holds the
+   *  server back instead of the server's receive bounds resetting the stream, and an answer nobody reads waits in the
+   *  server, not in this page. Used when the server's `welcome` says it too. */
+  credit?: boolean;
   /** STUN servers for the browser's own reflexive candidates (default none). */
   iceServers?: RTCIceServer[];
   /**
@@ -132,7 +137,9 @@ export async function dialRtc(options: DialRtcOptions): Promise<LinkSession> {
     await race(opened(control, pc));
     const connectedMs = mark();
 
-    const hello: Hello = { credential: options.credential, device: options.device, app: options.app, features: options.features ?? DEFAULT_FEATURES };
+    const features = (options.features ?? DEFAULT_FEATURES).filter((f) => f !== CREDIT_FEATURE);
+    if (options.credit ?? true) features.push(CREDIT_FEATURE);
+    const hello: Hello = { credential: options.credential, device: options.device, app: options.app, features };
     // an ICE restart over the same signaling path (docs/LINK.md「WebRTC」「换网络」): new candidates and ICE credentials
     // for the same DTLS, SCTP and channels; the session calls it when the path is lost
     const gatherMs = options.gatherTimeoutMs ?? GATHER_TIMEOUT_MS;

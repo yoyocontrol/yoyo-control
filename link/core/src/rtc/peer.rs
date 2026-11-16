@@ -34,6 +34,7 @@ use crate::{
     log::debug,
     media::SEND_BUFFER,
     path::{PathInfo, PathKind, is_local_ip},
+    rpc::{RTC_CREDIT_INITIAL, RTC_CREDIT_WINDOW, RTC_MESSAGE_COST, RTC_RPC_RECV_MAX, RTC_SESSION_RECV_MAX},
     session::{CloseInfo, Side},
     transport::TransportCounters,
 };
@@ -58,6 +59,14 @@ const CLOSE_FLUSH: Duration = Duration::from_millis(250);
 const LOST_GRACE: Duration = Duration::from_secs(10);
 /// A closing `Rtc` that still hasn't drained its last packets after this is dropped.
 const CLOSE_DRAIN: Duration = Duration::from_secs(1);
+/// What one message waiting in an inbox costs on top of its bytes (its `Bytes`, its queue slot, the allocation):
+/// counted against the receive limits (and the credit window, by both sides), so a peer can't get past them with a
+/// flood of tiny messages.
+const INBOX_ENTRY_COST: usize = RTC_MESSAGE_COST;
+/// A grant goes out once it would add at least this much (no grant per message)…
+const CREDIT_MIN_GRANT: u64 = 64 * 1024;
+/// …or whenever the peer has less left than its largest message costs (it couldn't send at all).
+const CREDIT_CHUNK_COST: u64 = (CHUNK + RTC_MESSAGE_COST) as u64;
 
 pub(crate) fn control_config() -> ChannelConfig {
     ChannelConfig {
@@ -92,6 +101,16 @@ fn rpc_config() -> ChannelConfig {
 #[derive(Debug, Default)]
 struct Stream {
     inbox: VecDeque<Bytes>,
+    /// What `inbox` costs: its bytes plus `INBOX_ENTRY_COST` per message.
+    inbox_bytes: usize,
+    /// At most this much unread (`inbox_bytes`): past it the channel is reset. A data channel has no receive window of
+    /// its own, so this is what keeps a peer that writes and never stops from filling memory. Every server-side RPC
+    /// channel has one from its open (`RTC_RPC_RECV_MAX`), set again once its head is read (`RtcRecv::limit`: a
+    /// request's body limit and some, a duplex stream's `RTC_DUPLEX_RECV_MAX`). None = no limit (the control
+    /// channel; a client's RPC answers, which its app reads).
+    recv_cap: Option<usize>,
+    /// Its unread bytes count against the session's `St::inbox_total` (a duplex stream's).
+    shared: bool,
     /// The peer's zero-length message arrived.
     fin_in: bool,
     /// The channel closed (either side).
@@ -102,6 +121,45 @@ struct Stream {
     fin_out: bool,
     /// Halves (`RtcSend`, `RtcRecv`) still held; at 0 the channel is closed and forgotten.
     handles: u8,
+    /// The credit window (docs/LINK.md「信用窗口」): both sides took it (`St::credit` when the stream began).
+    credit: Option<Credit>,
+}
+
+/// One stream's credit, both directions, in what both sides count: each non-empty binary message's length plus
+/// `RTC_MESSAGE_COST` (the FIN is free). Totals since the stream began.
+#[derive(Debug)]
+struct Credit {
+    /// Receiving: what this side allowed the peer to send (`RTC_CREDIT_INITIAL` and every grant).
+    granted: u64,
+    /// Receiving: what came.
+    received: u64,
+    /// Receiving: what the reader took out of the inbox (or was dropped: `discard`).
+    consumed: u64,
+    /// Sending: what the peer allowed (its grants).
+    peer_granted: u64,
+    /// Sending: what went.
+    sent: u64,
+}
+
+impl Credit {
+    fn new() -> Credit {
+        let initial = RTC_CREDIT_INITIAL as u64;
+        Credit { granted: initial, received: 0, consumed: 0, peer_granted: initial, sent: 0 }
+    }
+
+    /// What the peer may still send plus what waits unread: this side's commitment.
+    fn commitment(&self) -> u64 {
+        self.granted - self.consumed
+    }
+
+    /// What came and wasn't read: what this stream holds of the session's pool.
+    fn unread(&self) -> u64 {
+        self.received - self.consumed
+    }
+}
+
+fn message_cost(len: usize) -> u64 {
+    if len == 0 { 0 } else { (len + RTC_MESSAGE_COST) as u64 }
 }
 
 struct St {
@@ -114,6 +172,18 @@ struct St {
     dgram: Option<ChannelId>,
     open: HashSet<ChannelId>,
     streams: HashMap<ChannelId, Stream>,
+    /// `inbox_bytes` of every `Stream::shared` one: at most `RTC_SESSION_RECV_MAX`, past it the stream whose message
+    /// would go over is reset (32 duplex streams each just under their own cap would be ~70 MiB).
+    inbox_total: usize,
+    /// The credit window was negotiated (`credit` in both `hello` and `welcome`): streams from now on use it.
+    credit: bool,
+    /// A grant was held back for the session's pool: grants are tried again for every stream as the pool frees.
+    credit_starved: bool,
+    /// A grant's write was refused (the connection's buffer was full): tried again after the next input.
+    grants_pending: bool,
+    /// Tests (`test-hooks`): this many more grant writes are refused as if the buffer were full.
+    #[cfg(feature = "test-hooks")]
+    refuse_grants: u32,
     /// RPC channels the peer opened, not yet taken by `accept_stream`.
     incoming: VecDeque<ChannelId>,
     accepting: bool,
@@ -133,6 +203,105 @@ struct St {
     /// A writer waits for buffer space: wake waiters after the next input (SACKs free space).
     write_blocked: bool,
     changed: bool,
+}
+
+impl St {
+    /// Drops what `id`'s inbox holds (out of the session's budget too).
+    fn clear_inbox(&mut self, id: ChannelId) {
+        if let Some(s) = self.streams.get_mut(&id) {
+            if s.shared {
+                self.inbox_total -= s.inbox_bytes;
+            }
+            s.inbox.clear();
+            s.inbox_bytes = 0;
+        }
+    }
+
+    /// Forgets the stream (its unread bytes leave the session's budget; its credit frees the pool).
+    fn forget(&mut self, id: ChannelId) {
+        self.clear_inbox(id);
+        let credit = self.streams.remove(&id).is_some_and(|s| s.credit.is_some());
+        if credit && self.credit_starved {
+            self.grant_all();
+        }
+    }
+
+    /// What the streams other than `except` hold of the session's pool: what came on them and wasn't read (not credit
+    /// given and unused: an idle stream holds none). A closed stream counts until it is forgotten (its halves
+    /// dropped). The pool is for fairness (how big a new window may be); the memory bound is each stream's window:
+    /// at most `MAX_RPC_STREAMS` x `RTC_CREDIT_WINDOW` (32 MiB) unread per session.
+    fn credit_pool_used(&self, except: ChannelId) -> u64 {
+        self.streams
+            .iter()
+            .filter(|(id, _)| **id != except)
+            .filter_map(|(_, s)| s.credit.as_ref())
+            .map(Credit::unread)
+            .sum()
+    }
+
+    /// Tops up `id`'s window: to `RTC_CREDIT_WINDOW` past what was read, as far as the session's pool allows
+    /// (`RTC_SESSION_RECV_MAX` of unread bytes; every stream keeps `RTC_CREDIT_INITIAL` whatever the pool, so none
+    /// starves). Once half the window is used (at least `CREDIT_MIN_GRANT` more), or at once when the peer has less
+    /// left than a message costs. The grant is the new total, as a text message on the channel. Then, if grants were
+    /// held back and this freed the pool, the others'.
+    fn grant(&mut self, id: ChannelId) {
+        self.grant_one(id);
+        if self.credit_starved {
+            self.grant_all();
+        }
+    }
+
+    fn grant_all(&mut self) {
+        self.credit_starved = false;
+        let ids: Vec<ChannelId> = self.streams.keys().copied().collect();
+        for id in ids {
+            self.grant_one(id);
+        }
+    }
+
+    fn grant_one(&mut self, id: ChannelId) {
+        let used = self.credit_pool_used(id);
+        let Some(s) = self.streams.get_mut(&id) else { return };
+        let Some(c) = s.credit.as_mut() else { return };
+        if s.closed || s.fin_in || !self.open.contains(&id) {
+            return;
+        }
+        let room = (RTC_SESSION_RECV_MAX as u64).saturating_sub(used);
+        let target = (RTC_CREDIT_INITIAL as u64 + room).min(RTC_CREDIT_WINDOW as u64);
+        if target < RTC_CREDIT_WINDOW as u64 {
+            self.credit_starved = true;
+        }
+        let granted = c.consumed + target;
+        if granted <= c.granted {
+            return;
+        }
+        let left = c.granted - c.received;
+        let worth = c.commitment() <= RTC_CREDIT_WINDOW as u64 / 2 && granted - c.granted >= CREDIT_MIN_GRANT;
+        if !worth && left >= CREDIT_CHUNK_COST {
+            return;
+        }
+        // raised only once the grant is on its way: a refused write (str0m's buffer for the connection is full) is
+        // tried again after the next input, or the peer would wait for credit this side thinks it has
+        let grant = format!("{{\"credit\":{granted}}}");
+        #[cfg(feature = "test-hooks")]
+        let refused = match self.refuse_grants.checked_sub(1) {
+            Some(n) => {
+                self.refuse_grants = n;
+                true
+            }
+            None => false,
+        };
+        #[cfg(not(feature = "test-hooks"))]
+        let refused = false;
+        let sent = !refused
+            && self.rtc.channel(id).is_some_and(|mut ch| matches!(ch.write(false, grant.as_bytes()), Ok(true)));
+        if sent {
+            c.granted = granted;
+        } else {
+            self.grants_pending = true;
+            self.write_blocked = true;
+        }
+    }
 }
 
 pub(crate) struct Peer {
@@ -183,6 +352,12 @@ impl Peer {
                 dgram: None,
                 open: HashSet::new(),
                 streams: HashMap::new(),
+                inbox_total: 0,
+                credit: false,
+                credit_starved: false,
+                grants_pending: false,
+                #[cfg(feature = "test-hooks")]
+                refuse_grants: 0,
                 incoming: VecDeque::new(),
                 accepting: side == Side::Server,
                 dgram_out: VecDeque::new(),
@@ -318,6 +493,9 @@ impl Peer {
                 st.write_blocked = false;
                 st.changed = true;
             }
+            if std::mem::take(&mut st.grants_pending) {
+                st.grant_all();
+            }
         });
         back
     }
@@ -407,7 +585,12 @@ impl Peer {
                 // RPC channels in use (a finished one waits for the client's close without counting)
                 let rpc_streams = st.streams.values().filter(|s| s.handles > 0).count().saturating_sub(1);
                 if st.accepting && !st.ended && label == RPC_LABEL && rpc_streams < MAX_RPC_STREAMS as usize {
-                    st.streams.insert(id, Stream { handles: 2, ..Stream::default() });
+                    // bounded from the start: what arrives before `serve_one` reads (or limits) it counts
+                    let credit = st.credit.then(Credit::new);
+                    st.streams.insert(
+                        id,
+                        Stream { handles: 2, recv_cap: Some(RTC_RPC_RECV_MAX), credit, ..Stream::default() },
+                    );
                     st.open.insert(id);
                     st.incoming.push_back(id);
                     if let Some(mut ch) = st.rtc.channel(id) {
@@ -425,11 +608,73 @@ impl Peer {
                     }
                     return;
                 }
+                let mut regrant = false;
                 if let Some(s) = st.streams.get_mut(&d.id) {
+                    if let Some(c) = s.credit.as_mut() {
+                        if !d.binary {
+                            // a grant (text: the stream's bytes are binary)
+                            match serde_json::from_slice::<serde_json::Value>(&d.data)
+                                .ok()
+                                .and_then(|v| v.get("credit").and_then(serde_json::Value::as_u64))
+                            {
+                                Some(n) => c.peer_granted = c.peer_granted.max(n),
+                                None => debug!("link: rtc stream: a text message that is no grant, dropped"),
+                            }
+                            st.changed = true;
+                            return;
+                        }
+                        if !d.data.is_empty() && !s.fin_in && !s.closed {
+                            let cost = message_cost(d.data.len());
+                            c.received += cost;
+                            if c.received > c.granted {
+                                // past the window the peer was given: it broke the protocol; reset (the data still on
+                                // its way is dropped by SCTP: vendor/sctp-proto)
+                                debug!("link: rtc stream past its credit ({} > {}): reset", c.received, c.granted);
+                                s.inbox.clear();
+                                s.inbox_bytes = 0;
+                                s.closed = true;
+                                st.rtc.direct_api().close_data_channel(d.id);
+                            } else if s.discard {
+                                c.consumed += cost;
+                                regrant = true;
+                            } else {
+                                s.inbox_bytes += cost as usize;
+                                s.inbox.push_back(Bytes::from(d.data));
+                            }
+                            st.changed = true;
+                            if regrant {
+                                st.grant(d.id);
+                            }
+                            return;
+                        }
+                    }
                     if d.data.is_empty() {
                         s.fin_in = true;
-                    } else if !s.discard && !s.fin_in {
-                        s.inbox.push_back(Bytes::from(d.data));
+                    } else if !s.discard && !s.fin_in && !s.closed {
+                        let cost = d.data.len() + INBOX_ENTRY_COST;
+                        let over_stream = s.recv_cap.is_some_and(|cap| s.inbox_bytes + cost > cap);
+                        let over_session = s.shared && st.inbox_total + cost > RTC_SESSION_RECV_MAX;
+                        if over_stream || over_session {
+                            // more unread than it (or the session) may hold: reset (the peer did not wait for the
+                            // reader)
+                            debug!(
+                                "link: rtc stream over its {} receive limit: reset",
+                                if over_stream { "stream's" } else { "session's" }
+                            );
+                            if s.shared {
+                                st.inbox_total -= s.inbox_bytes;
+                            }
+                            s.inbox.clear();
+                            s.inbox_bytes = 0;
+                            s.closed = true;
+                            st.rtc.direct_api().close_data_channel(d.id);
+                        } else {
+                            s.inbox_bytes += cost;
+                            if s.shared {
+                                st.inbox_total += cost;
+                            }
+                            s.inbox.push_back(Bytes::from(d.data));
+                        }
                     }
                     st.changed = true;
                 }
@@ -445,11 +690,19 @@ impl Peer {
                 if let Some(s) = st.streams.get_mut(&id) {
                     s.closed = true;
                     if s.handles == 0 {
-                        st.streams.remove(&id);
+                        st.forget(id);
+                    } else if st.credit_starved {
+                        // its window frees the pool
+                        st.grant_all();
                     }
                 }
             }
-            Event::ChannelBufferedAmountLow(_) => st.changed = true,
+            Event::ChannelBufferedAmountLow(_) => {
+                st.changed = true;
+                if std::mem::take(&mut st.grants_pending) {
+                    st.grant_all();
+                }
+            }
             Event::PeerStats(ps) => {
                 if let Some(pair) = ps.selected_candidate_pair {
                     if pair.current_round_trip_time.is_some() {
@@ -621,6 +874,24 @@ impl RtcConn {
         Some((RtcSend { peer: self.peer.clone(), id }, RtcRecv::new(self.peer.clone(), id)))
     }
 
+    /// The credit window was negotiated (`hello` and `welcome` both say `credit`): every `rpc` channel from now on
+    /// uses it (both sides call this before any can be opened: the server before its `welcome`, the client on it).
+    pub(crate) fn enable_credit(&self) {
+        self.peer.with(|st| st.credit = true);
+    }
+
+    /// Tests (`test-hooks`): this connection's next `n` grant writes are refused as if its buffer were full.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn refuse_grant_writes(&self, n: u32) {
+        self.peer.with(|st| st.refuse_grants = n);
+    }
+
+    /// Tests (`test-hooks`): grant writes still to refuse.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn grant_writes_to_refuse(&self) -> u32 {
+        self.peer.with(|st| st.refuse_grants)
+    }
+
     /// Client: a new `rpc` channel.
     pub(crate) fn open_stream(&self) -> Result<(RtcSend, RtcRecv)> {
         let id = self.peer.with(|st| {
@@ -628,7 +899,8 @@ impl RtcConn {
                 return Err(LinkError::Closed("session ended".into()));
             }
             let id = st.rtc.direct_api().create_data_channel(rpc_config());
-            st.streams.insert(id, Stream { handles: 2, ..Stream::default() });
+            let credit = st.credit.then(Credit::new);
+            st.streams.insert(id, Stream { handles: 2, credit, ..Stream::default() });
             Ok(id)
         })?;
         Ok((RtcSend { peer: self.peer.clone(), id }, RtcRecv::new(self.peer.clone(), id)))
@@ -772,9 +1044,9 @@ fn release(peer: &Peer, id: ChannelId) {
         // a client that never closes finished channels doesn't get to pile them up
         let keep = server && s.fin_out && waiting <= MAX_FINISHED_OPEN;
         if s.closed {
-            st.streams.remove(&id);
+            st.forget(id);
         } else if !keep && Some(id) != st.control && !st.ended {
-            st.streams.remove(&id);
+            st.forget(id);
             st.rtc.direct_api().close_data_channel(id);
         }
     });
@@ -805,13 +1077,25 @@ impl RtcSend {
                 if !st.open.contains(&id) {
                     return None;
                 }
+                // the peer's window: wait for its grant (a FIN is free)
+                let cost = message_cost(data.len());
+                if let Some(c) = st.streams.get(&id).and_then(|s| s.credit.as_ref())
+                    && c.sent + cost > c.peer_granted
+                {
+                    return None;
+                }
                 let mut ch = st.rtc.channel(id)?;
                 if ch.buffered_amount() >= STREAM_HIGH {
                     st.write_blocked = true;
                     return None;
                 }
                 match ch.write(true, data) {
-                    Ok(true) => Some(Write::Done),
+                    Ok(true) => {
+                        if let Some(c) = st.streams.get_mut(&id).and_then(|s| s.credit.as_mut()) {
+                            c.sent += cost;
+                        }
+                        Some(Write::Done)
+                    }
                     Ok(false) => {
                         st.write_blocked = true;
                         None
@@ -914,6 +1198,20 @@ impl RtcRecv {
                 let ended = st.ended;
                 let Some(s) = st.streams.get_mut(&id) else { return Some(Read::Reset) };
                 if let Some(m) = s.inbox.pop_front() {
+                    s.inbox_bytes -= m.len() + INBOX_ENTRY_COST;
+                    if s.shared {
+                        st.inbox_total -= m.len() + INBOX_ENTRY_COST;
+                    }
+                    let credit = if let Some(c) = s.credit.as_mut() {
+                        // read: the peer may send as much again
+                        c.consumed += message_cost(m.len());
+                        true
+                    } else {
+                        false
+                    };
+                    if credit {
+                        st.grant(id);
+                    }
                     return Some(Read::Data(m));
                 }
                 if s.fin_in {
@@ -954,9 +1252,35 @@ impl RtcRecv {
         let id = self.id;
         self.buf.clear();
         self.peer.with(|st| {
+            st.clear_inbox(id);
             if let Some(s) = st.streams.get_mut(&id) {
                 s.discard = true;
-                s.inbox.clear();
+                // what is dropped counts as read: a peer that goes on sending gets its credit
+                if let Some(c) = s.credit.as_mut() {
+                    c.consumed = c.received;
+                }
+            }
+            st.grant(id);
+        });
+    }
+
+    /// From now on at most `cap` unread bytes (`Stream::recv_cap`); `shared`: they count against the session's
+    /// budget too (`Stream::shared`). What is already waiting counts.
+    pub(crate) fn limit(&mut self, cap: usize, shared: bool) {
+        let id = self.id;
+        self.peer.with(|st| {
+            if let Some(s) = st.streams.get_mut(&id) {
+                // under the credit window the peer can't send more than it was given: no other bound applies
+                if s.credit.is_some() {
+                    return;
+                }
+                if shared && !s.shared {
+                    st.inbox_total += s.inbox_bytes;
+                } else if !shared && s.shared {
+                    st.inbox_total -= s.inbox_bytes;
+                }
+                s.shared = shared;
+                s.recv_cap = Some(cap);
             }
         });
     }

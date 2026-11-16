@@ -15,10 +15,10 @@ struct LinkBindingTests {
     @Test func theBindingIsReadLeniently() throws {
         let b = try #require(ConnectLinkBinding(json: [
             "id": "ab", "key": "Kk==", "sig": "Ss==", "port": 47820, "relays": ["https://r1.example", 3],
-            "direct": ["192.168.50.10:47820", "[fd00::1]:47820", ["host": "93.184.216.34", "port": 47820], "nonsense", "10.0.0.1:0"],
+            "direct": ["192.168.1.10:47820", "[fd00::1]:47820", ["host": "93.184.216.34", "port": 47820], "nonsense", "10.0.0.1:0"],
         ]))
         #expect(b.port == 47820 && b.relays == ["https://r1.example"])
-        #expect(b.direct == ["192.168.50.10:47820", "[fd00::1]:47820", "93.184.216.34:47820"])
+        #expect(b.direct == ["192.168.1.10:47820", "[fd00::1]:47820", "93.184.216.34:47820"])
         #expect(ConnectLinkBinding(json: ["id": "ab", "key": "Kk=="]) == nil, "without its signature it isn't one")
         #expect(ConnectLinkBinding(json: NSNull()) == nil && ConnectLinkBinding(json: nil) == nil)
         #expect(ConnectLinkBinding.socketAddress(host: "fe80::1", port: 1) == "[fe80::1]:1")
@@ -26,7 +26,7 @@ struct LinkBindingTests {
     }
 
     @Test func theMacRemembersItsBinding() throws {
-        var mac = YoyoMac(id: "m", name: "Mac", addresses: ["192.168.50.10"], fingerprint: "sha256:00", token: "t")
+        var mac = YoyoMac(id: "m", name: "Mac", addresses: ["192.168.1.10"], fingerprint: "sha256:00", token: "t")
         let old = try JSONEncoder().encode(mac)
         #expect(try JSONDecoder().decode(YoyoMac.self, from: old).link == nil, "a record from before has none")
         mac.link = ConnectLinkBinding(id: "ab", key: "k", sig: "s", port: 47820)

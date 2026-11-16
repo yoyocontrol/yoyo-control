@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn kinds() {
         let hints: HashSet<SocketAddr> = ["93.184.216.34:47820".parse().unwrap()].into_iter().collect();
-        assert_eq!(classify(&ip("192.168.50.10:47820"), &hints).kind, PathKind::Lan);
+        assert_eq!(classify(&ip("192.168.1.10:47820"), &hints).kind, PathKind::Lan);
         assert_eq!(classify(&ip("10.1.2.3:1"), &hints).kind, PathKind::Lan);
         assert_eq!(classify(&ip("169.254.1.1:1"), &hints).kind, PathKind::Lan);
         assert_eq!(classify(&ip("[fd7a:115c::1]:1"), &hints).kind, PathKind::Lan);

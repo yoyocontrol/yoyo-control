@@ -7,6 +7,7 @@ import { browserIface, type Iface } from "./stats.js";
 import { newRestartSecret, parseAnswer, verifyAnswer, type RtcOffer } from "./verify.js";
 import { loadLinkMedia, type ClientMediaConfig, type WasmSource } from "./wasm.js";
 import { CREDIT_FEATURE } from "./credit.js";
+import { offerSdp, type CandidatePolicy } from "./candidates.js";
 
 /** What this client says it takes, in `hello.features` by default (as the iOS kit). */
 export const DEFAULT_FEATURES = ["screen", "audio", "cursor", "input"];
@@ -38,6 +39,15 @@ export interface DialRtcOptions {
   credit?: boolean;
   /** STUN servers for the browser's own reflexive candidates (default none). */
   iceServers?: RTCIceServer[];
+  /**
+   * Which gathered candidates go into the offer that is sent (the answer is checked against that offer): `"all"`
+   * (default) or `"public"` — only UDP host / server-reflexive / relay candidates on a public address and a port
+   * ≥ 1024 (no RFC 1918, ULA, CGNAT, loopback, link-local, multicast, broadcast or unspecified address, no mDNS name),
+   * with the related address blanked. For a server reached through its public address, which refuses offers naming
+   * private networks (a page with the microphone granted has its raw host addresses); the browser still connects
+   * through srflx / relay or a peer-reflexive path. Either way at most `MAX_OFFER_CANDIDATES` (32) go.
+   */
+  candidates?: CandidatePolicy;
   /**
    * The DTLS certificate(s) to use; wins over `certificateStore`. The certificate is the client key the server binds
    * a device token to (`dtls-sha256:<hex>`), so it has to stay the same between dials.
@@ -120,8 +130,10 @@ export async function dialRtc(options: DialRtcOptions): Promise<LinkSession> {
     await race(pc.setLocalDescription(await race(pc.createOffer())));
     await race(gathered(pc, options.gatherTimeoutMs ?? GATHER_TIMEOUT_MS));
     const gatheredMs = mark();
-    const sdp = pc.localDescription?.sdp;
-    if (!sdp) throw new LinkError("protocol", "no local description");
+    const local = pc.localDescription?.sdp;
+    if (!local) throw new LinkError("protocol", "no local description");
+    // what goes out (and what the answer is signed over)
+    const sdp = offerSdp(local, options.candidates ?? "all");
     let next = await race(newRestartSecret());
     let reply: unknown;
     try {
@@ -148,18 +160,19 @@ export async function dialRtc(options: DialRtcOptions): Promise<LinkSession> {
       await pc.setLocalDescription(await pc.createOffer({ iceRestart: true }));
       // gathering starts again a moment later: "complete" from the last round doesn't count
       await gathered(pc, gatherMs, true);
-      const offerSdp = pc.localDescription?.sdp;
-      if (!offerSdp) throw new LinkError("protocol", "no local description");
+      const restartLocal = pc.localDescription?.sdp;
+      if (!restartLocal) throw new LinkError("protocol", "no local description");
+      const sent = offerSdp(restartLocal, options.candidates ?? "all");
       const following = await newRestartSecret();
       let back: unknown;
       try {
-        back = await options.signal({ v: 1, offer: offerSdp, device: options.device, restart: next.secret, rk: following.key });
+        back = await options.signal({ v: 1, offer: sent, device: options.device, restart: next.secret, rk: following.key });
       } catch (e) {
         throw new LinkError("signal", `restart signaling failed: ${e instanceof Error ? e.message : String(e)}`, undefined, { cause: e });
       }
       next = following; // the server took the old secret: the next restart needs this one
       const a = parseAnswer(back);
-      await verifyAnswer(offerSdp, a, options.pinnedFingerprint);
+      await verifyAnswer(sent, a, options.pinnedFingerprint);
       await pc.setRemoteDescription({ type: "answer", sdp: a.answer });
       return a.restarts === true;
     };

@@ -98,7 +98,7 @@ before(async () => {
   svc = new YoyoLinux({ token: TOKEN, name: "Desktop", spawnFn: fake.spawn, logLine: log, maxFps: 60 });
   port = (await svc.listen(0, "127.0.0.1")).port;
   // --link-relay off: no connection to the real relay from a test
-  await startHeadlessLink(svc, ["--link", "on", "--link-home", home, "--link-port", "0", "--link-relay", "off", "--advertise", "192.168.50.151:47900"], { log });
+  await startHeadlessLink(svc, ["--link", "on", "--link-home", home, "--link-port", "0", "--link-relay", "off", "--advertise", "192.168.1.151:47900"], { log });
   client = await L.bindEndpoint({ role: "client", secretKey: L.generateLinkKey() });
 });
 after(async () => {
@@ -160,7 +160,7 @@ test("/status has the binding with its fingerprint; the keys are 0600 in a 0700 
   assert.match(st.link.id, /^[0-9a-f]{64}$/);
   assert.match(st.link.fingerprint, /^sha256:[0-9a-f]{64}$/);
   assert.equal(L.verifyBinding(st.link, st.link.fingerprint), st.link.id);
-  assert.ok(st.link.direct.includes("192.168.50.151:47900"), st.link.direct.join(","));
+  assert.ok(st.link.direct.includes("192.168.1.151:47900"), st.link.direct.join(","));
   assert.equal(st.features.link, true);
   assert.equal(statSync(home).mode & 0o777, 0o700);
   for (const f of ["link-key", "tls-key.der"]) assert.equal(statSync(join(home, f)).mode & 0o077, 0, f);

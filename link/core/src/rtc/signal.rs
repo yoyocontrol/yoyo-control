@@ -254,6 +254,26 @@ pub(crate) fn filter_candidates(sdp: &str, keep: impl Fn(SocketAddr) -> bool) ->
     sdp.split_inclusive('\n').filter(|line| !matches!(parse_candidate(line), Some(Some(c)) if !keep(c.addr))).collect()
 }
 
+/// Whether the offer names a loopback candidate (a client on this machine that gathers them).
+pub(crate) fn has_loopback(candidates: &[SdpCandidate]) -> bool {
+    candidates.iter().any(|c| c.addr.ip().to_canonical().is_loopback())
+}
+
+/// The answer without its loopback candidates unless the offer named one (`offer_loopback`), or they are all the
+/// answer has (a computer with no network: a page on it still connects). A client elsewhere can't reach them, and a
+/// browser on this machine checks from its interface addresses (it doesn't gather loopback): offering them only
+/// invites pairs that can't carry anything back (the hub drops those packets anyway: `Hub::answerable`).
+pub(crate) fn loopback_only_for_loopback(answer: &str, offer_loopback: bool) -> String {
+    let lines: Vec<&str> = answer.split_inclusive('\n').collect();
+    let is_loop =
+        |line: &str| matches!(parse_candidate(line), Some(Some(c)) if c.addr.ip().to_canonical().is_loopback());
+    let other = lines.iter().any(|l| matches!(parse_candidate(l), Some(Some(_))) && !is_loop(l));
+    if offer_loopback || !other {
+        return answer.to_string();
+    }
+    lines.into_iter().filter(|l| !is_loop(l)).collect()
+}
+
 /// The well-known NAT64 prefix (RFC 6052, `64:ff9b::/96`): most carriers' DNS64 / NAT64 use it.
 const NAT64_PREFIX: [u16; 6] = [0x64, 0xff9b, 0, 0, 0, 0];
 
@@ -317,14 +337,40 @@ pub(crate) fn with_nat64(sdp: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn loopback_candidates_only_for_a_loopback_offer() {
+        let answer = "v=0\r\na=candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host\r\n\
+                      a=candidate:2 1 udp 2130706430 ::1 5000 typ host\r\n\
+                      a=candidate:3 1 udp 2130706429 192.168.1.10 5000 typ host\r\na=end-of-candidates\r\n";
+        let ips = |sdp: &str| {
+            sdp.lines()
+                .filter_map(|l| l.strip_prefix("a=candidate:"))
+                .map(|l| l.split_whitespace().nth(4).unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ips(&loopback_only_for_loopback(answer, false)), ["192.168.1.10"]);
+        assert!(loopback_only_for_loopback(answer, false).ends_with("a=end-of-candidates\r\n"));
+        assert_eq!(ips(&loopback_only_for_loopback(answer, true)), ["127.0.0.1", "::1", "192.168.1.10"]);
+        // a computer with nothing but loopback keeps it
+        let only = "v=0\r\na=candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host\r\n";
+        assert_eq!(ips(&loopback_only_for_loopback(only, false)), ["127.0.0.1"]);
+        let (_, offer) = usable_offer("v=0\r\na=candidate:1 1 udp 1 127.0.0.1 6000 typ host\r\n");
+        assert!(has_loopback(&offer));
+        let (_, offer) = usable_offer(
+            "v=0\r\na=candidate:1 1 udp 1 192.168.1.20 6000 typ host\r\na=candidate:2 1 udp 1 x.local 6001 typ host\r\n",
+        );
+        assert!(!has_loopback(&offer));
+    }
+
     use super::*;
 
     #[test]
     fn public_ipv4_candidates_are_also_given_behind_nat64() {
         let sdp = "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
-            a=candidate:1 1 udp 2130706431 192.168.50.151 52520 typ host\r\n\
+            a=candidate:1 1 udp 2130706431 192.168.1.151 52520 typ host\r\n\
             a=candidate:2 1 udp 2130706431 93.184.216.34 52520 typ host\r\n\
-            a=candidate:3 1 udp 1694498815 93.184.216.34 52520 typ srflx raddr 192.168.50.151 rport 52520\r\n\
+            a=candidate:3 1 udp 1694498815 93.184.216.34 52520 typ srflx raddr 192.168.1.151 rport 52520\r\n\
             a=end-of-candidates\r\n";
         let out = with_nat64(sdp);
         assert!(
@@ -336,7 +382,7 @@ mod tests {
         let (_, cands) = usable_offer(&out);
         assert!(cands.iter().any(|c| c.addr == "[64:ff9b::5db8:d822]:52520".parse().unwrap()));
         assert_eq!(nat64("93.184.216.34".parse().unwrap()).to_string(), "64:ff9b::5db8:d822");
-        let lan_only = "a=candidate:1 1 udp 2130706431 192.168.50.151 52520 typ host\r\na=candidate:2 1 udp 2130706431 100.93.131.5 52520 typ host\r\n";
+        let lan_only = "a=candidate:1 1 udp 2130706431 192.168.1.151 52520 typ host\r\na=candidate:2 1 udp 2130706431 100.64.0.10 52520 typ host\r\n";
         assert_eq!(with_nat64(lan_only), lan_only);
     }
     use crate::binding::{identity_fingerprint, sign_binding};

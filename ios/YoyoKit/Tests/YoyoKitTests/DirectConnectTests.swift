@@ -10,24 +10,24 @@ import Testing
 struct DirectConnectTests {
     private let binding = ConnectLinkBinding(id: String(repeating: "cd", count: 32), key: "a2V5", sig: "c2ln", port: 47820)
     private var mac: YoyoMac {
-        YoyoMac(id: "SERVERID123456789", name: "Mac", addresses: ["192.168.50.151"],
+        YoyoMac(id: "SERVERID123456789", name: "Mac", addresses: ["192.168.1.151"],
                 fingerprint: "sha256:" + String(repeating: "ab", count: 32), token: "t", link: binding)
     }
 
     @Test func thePairingCodeCarriesTheBinding() throws {
-        let url = URL(string: "yoyocontrol://pair?v=2&id=SERVERID123456789&n=Mac&fp=sha256:ab&l=cdcd&lk=a2V5-_w&ls=c2ln&lp=47820&a=192.168.50.151,bad&c=CODE")!
+        let url = URL(string: "yoyocontrol://pair?v=2&id=SERVERID123456789&n=Mac&fp=sha256:ab&l=cdcd&lk=a2V5-_w&ls=c2ln&lp=47820&a=192.168.1.151,bad&c=CODE")!
         let invite = try #require(YoyoInvite(url: url))
         #expect(invite.id == "SERVERID123456789")
-        #expect(invite.addresses == ["192.168.50.151"])
+        #expect(invite.addresses == ["192.168.1.151"])
         #expect(invite.code == "CODE")
         #expect(invite.link == ConnectLinkBinding(id: "cdcd", key: "a2V5+/w=", sig: "c2ln", port: 47820))
         // a code without the binding, or an older one (v=1: the TLS listener's), is not one
         #expect(YoyoInvite(url: URL(string: "yoyocontrol://pair?v=2&id=SERVERID123456789&n=Mac&fp=sha256:ab&c=CODE")!) == nil)
-        #expect(YoyoInvite(url: URL(string: "yoyocontrol://pair?v=1&id=SERVERID123456789&n=Mac&a=192.168.50.151&p=47820&fp=sha256:ab&l=cdcd&lk=a2V5&ls=c2ln&c=CODE")!) == nil)
+        #expect(YoyoInvite(url: URL(string: "yoyocontrol://pair?v=1&id=SERVERID123456789&n=Mac&a=192.168.1.151&p=47820&fp=sha256:ab&l=cdcd&lk=a2V5&ls=c2ln&c=CODE")!) == nil)
     }
 
     @Test func theLinksHintsAreTheLocalAddressesOnItsPort() {
-        #expect(mac.linkHints == ["192.168.50.151:47820"])
+        #expect(mac.linkHints == ["192.168.1.151:47820"])
         var none = mac
         none.link = nil
         #expect(none.linkHints.isEmpty)
@@ -35,9 +35,9 @@ struct DirectConnectTests {
 
     @Test func aRecordFromBeforeStillDecodes() throws {
         // the TLS listener's port and candidates are left out; its binding is kept
-        let old = #"{"id":"SERVERID123456789","name":"Mac","addresses":["192.168.50.151"],"port":47820,"fingerprint":"sha256:ab","token":"t","endpoints":[{"kind":"public","host":"93.184.216.34","port":47820}]}"#
+        let old = #"{"id":"SERVERID123456789","name":"Mac","addresses":["192.168.1.151"],"port":47820,"fingerprint":"sha256:ab","token":"t","endpoints":[{"kind":"public","host":"93.184.216.34","port":47820}]}"#
         let m = try JSONDecoder().decode(YoyoMac.self, from: Data(old.utf8))
-        #expect(m.addresses == ["192.168.50.151"])
+        #expect(m.addresses == ["192.168.1.151"])
         #expect(m.link == nil)
         let again = try JSONDecoder().decode(YoyoMac.self, from: JSONEncoder().encode(mac))
         #expect(again == mac)

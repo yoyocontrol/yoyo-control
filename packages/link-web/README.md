@@ -111,6 +111,14 @@ The package also exports the file as `@yoyocontrol/link-web/uu_link_wasm_bg.wasm
   an answer nobody reads waits in the server, not in the page (the e2e test: 1 MiB in the page for an unread 50 MiB
   answer, 50 MiB without the window). A server that doesn't say `credit` gets today's behaviour.
 - Offer: non-trickle, ICE gathering capped at `gatherTimeoutMs` (1 s); `{v: 1, offer, device}` to `signal`.
+- `candidates: "public"` (default `"all"`): the offer sent names no private network — only UDP host, srflx and relay
+  candidates on a public address and a port ≥ 1024 (no RFC 1918, ULA fc00::/7, site-local fec0::/10, local-use NAT64
+  64:ff9b:1::/48, CGNAT 100.64/10, loopback, link-local, multicast, broadcast or unspecified address; IPv4-mapped
+  IPv6 (and IPv4-compatible) counted as its IPv4 address, and well-known NAT64 / 6to4 IPv6 as the IPv4 address they
+  carry when that is public or private, else not at all; no mDNS name, no TCP), `raddr` blanked. For a server reached through its public address that refuses offers naming private
+  networks (a page granted the microphone gets raw host addresses). Either way at most 32 candidates (the highest
+  priority). The answer is checked against the offer sent; the browser still connects via srflx / relay or a
+  peer-reflexive path (`offerSdp`, `addressKind` are exported).
 - Answer: `SHA-256(binding.key)` must be the pinned fingerprint, `sig` must verify (ECDSA P-256) over
   `"yoyocontrol-rtc-v1:" + sha256(offer SDP) + ":" + fingerprint`, and the answer SDP's `a=fingerprint` must be
   `fingerprint`. Only then is it applied.

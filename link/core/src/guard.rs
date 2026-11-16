@@ -706,8 +706,8 @@ mod tests {
         assert_ne!(source_key(ip("2001:db8:1:2::10")), source_key(ip("2001:db8:1:3::10")));
         assert_ne!(source_key(ip("fe80::1")), source_key(ip("fe80::2")), "link-local: each its own");
         assert_ne!(
-            source_key(ip("fdf4:9c0f:8392:4a54::1")),
-            source_key(ip("fdf4:9c0f:8392:4a54::2")),
+            source_key(ip("fd00:db8::1")),
+            source_key(ip("fd00:db8::2")),
             "unique-local: each its own"
         );
         assert_eq!(source_key(ip("::ffff:192.0.2.1")), ip("192.0.2.1"));

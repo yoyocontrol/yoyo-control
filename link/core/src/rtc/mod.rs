@@ -25,7 +25,10 @@ pub(crate) use peer::{
 pub use signal::{
     IdentityKey, IdentitySigner, RtcAnswer, RtcOffer, restart_key, sdp_fingerprint, sign_answer, verify_answer,
 };
-pub(crate) use signal::{filter_candidates, fingerprint_string, usable_offer as usable_sdp, with_nat64};
+pub(crate) use signal::{
+    filter_candidates, fingerprint_string, has_loopback, loopback_only_for_loopback, usable_offer as usable_sdp,
+    with_nat64,
+};
 
 use std::time::Duration;
 

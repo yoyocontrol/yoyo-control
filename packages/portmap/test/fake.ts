@@ -3,8 +3,8 @@
 import type { Clock, HttpRequest, HttpResponse, Network, UdpTarget } from "../src/index.js";
 import { parsePcpResponse, xmlText } from "../src/index.js";
 
-export const GATEWAY = "192.168.50.1";
-export const ME = "192.168.50.151";
+export const GATEWAY = "192.168.1.1";
+export const ME = "192.168.1.151";
 export const LOCATION = `http://${GATEWAY}:49152/47495533/gatedesc0b.xml`;
 
 export const SAGEMCOM_DESCRIPTION = `<?xml version="1.0"?>

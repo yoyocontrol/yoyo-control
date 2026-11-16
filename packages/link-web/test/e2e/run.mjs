@@ -2,6 +2,7 @@
 // (WebRTC + the wasm media layer). Prints the measurements as JSON.
 //
 //   npm -w packages/link-web run e2e -- [--probe <uu-link-probe>] [--seconds 10] [--netem <profile>] [--chrome <path>]
+//   npm -w packages/link-web run e2e -- --candidates public   # the offer names no private network (dialRtc candidates)
 //   npm -w packages/link-web run e2e -- --netem handover --netem-args "--handover-every 12 --blackout 6000"   # path lost 6 s: ICE restarts
 //   npm -w packages/link-web run e2e -- --page screen [--seconds 10] [--delay 40 --jitter 15] [--codec hevc]
 //   npm -w packages/link-web run e2e -- --signal-url <https://…/v1/rtc/<hex>> --fingerprint sha256:<hex> --credential "Pair <code>"
@@ -120,6 +121,8 @@ async function startProbe() {
   const [linkPort, rtcPort, signalPort, netemPort] = [await free(), await free(), await free(), await free()];
   const lan = Object.values(networkInterfaces()).flat().find((i) => i && i.family === "IPv4" && !i.internal)?.address ?? "127.0.0.1";
   const args = ["serve-rtc", "--port", String(linkPort), "--rtc-port", String(rtcPort), "--signal", String(signalPort)];
+  // `--probe-verbose`: the core's debug lines too (with `--probe-log`)
+  if (process.argv.includes("--probe-verbose")) args.push("-v");
   // through the proxy only: the probe binds loopback and its answer offers only the proxy's address
   if (netem) args.push("--bind", "127.0.0.1", "--advertise", `${lan}:${netemPort}`, "--advertise-only");
   const seen = await new Promise((resolve, reject) => {
@@ -196,6 +199,8 @@ const cdp = (method, params = {}, sessionId) =>
   });
 const { targetId } = await cdp("Target.createTarget", { url: `http://127.0.0.1:${webPort}/` });
 const { sessionId } = await cdp("Target.attachToTarget", { targetId, flatten: true });
+// the microphone, so the page's candidates are its raw host addresses (as a page with voice gets them)
+if (process.argv.includes("--mic")) await cdp("Browser.grantPermissions", { permissions: ["audioCapture"], origin: `http://127.0.0.1:${webPort}` }).catch(() => {});
 await cdp("Runtime.enable", {}, sessionId);
 await cdp("HeapProfiler.enable", {}, sessionId).catch(() => {});
 await cdp("Runtime.addBinding", { name: "e2eHeapAsk" }, sessionId);
@@ -207,10 +212,12 @@ for (let i = 0; i < 100; i++) {
 const config =
   page === "screen"
     ? { seconds, delayMs: Number(arg("--delay", "40")), jitterMs: Number(arg("--jitter", "15")), codec: arg("--codec", "h264") }
-    : { signal: `http://127.0.0.1:${webPort}/signal`, fingerprint: info.fingerprint, credential: info.credential ?? `Bearer ${info.token}`, seconds, real: !!realSignal, ...(arg("--speed-test", null) ? { speedTestMs: Number(arg("--speed-test", "8000")) } : {}) };
+    : { signal: `http://127.0.0.1:${webPort}/signal`, fingerprint: info.fingerprint, credential: info.credential ?? `Bearer ${info.token}`, seconds, real: !!realSignal, ...(arg("--candidates", null) ? { candidates: arg("--candidates") } : {}), mic: process.argv.includes("--mic"), ...(arg("--speed-test", null) ? { speedTestMs: Number(arg("--speed-test", "8000")) } : {}) };
 const r = await cdp("Runtime.evaluate", { expression: `e2e(${JSON.stringify(config)})`, awaitPromise: true, returnByValue: true, timeout: (seconds + 60) * 1000 }, sessionId);
 const result = r.result.value ?? { error: r.exceptionDetails?.text };
 console.log(JSON.stringify({ netem: netem ?? "none", ...result }, null, 2));
+// `--probe-log <file>`: everything the probe printed (its tracing with RUST_LOG too)
+if (arg("--probe-log", null)) (await import("node:fs")).writeFileSync(arg("--probe-log"), probeLog.join("\n") + "\n");
 const serverLines = probeLog.filter((l) => /link\[(server|phone)\]:|session (opened|closed)|rtc/.test(l));
 if (serverLines.length) console.log(`probe:\n  ${serverLines.join("\n  ")}`);
 if (arg("--devtools", null)) await cdp("Target.closeTarget", { targetId }).catch(() => {});

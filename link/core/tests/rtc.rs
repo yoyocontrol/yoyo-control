@@ -177,6 +177,11 @@ async fn server(guard: GuardConfig) -> Server {
 }
 
 async fn server_with(guard: GuardConfig, adjust: impl FnOnce(&mut ServerOptions)) -> Server {
+    server_on(guard, vec!["127.0.0.1".parse().unwrap()], adjust).await
+}
+
+/// A server on `bind` (empty: every interface, as a real computer's).
+async fn server_on(guard: GuardConfig, bind: Vec<IpAddr>, adjust: impl FnOnce(&mut ServerOptions)) -> Server {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
@@ -185,7 +190,7 @@ async fn server_with(guard: GuardConfig, adjust: impl FnOnce(&mut ServerOptions)
     let mut cfg = EndpointConfig::server(generate_link_key(), 0);
     cfg.portmapper = Some(false);
     cfg.guard = guard;
-    cfg.bind_ips = vec!["127.0.0.1".parse().unwrap()];
+    cfg.bind_ips = bind;
     cfg.rtc = Some(RtcConfig::default());
     let ep = Endpoint::bind(cfg).await.unwrap();
     let tokens = Arc::new(Tokens::default());
@@ -204,8 +209,12 @@ async fn server_with(guard: GuardConfig, adjust: impl FnOnce(&mut ServerOptions)
 }
 
 async fn client() -> Endpoint {
+    client_on(vec!["127.0.0.1".parse().unwrap()]).await
+}
+
+async fn client_on(bind: Vec<IpAddr>) -> Endpoint {
     let mut cfg = EndpointConfig::client(generate_link_key());
-    cfg.bind_ips = vec!["127.0.0.1".parse().unwrap()];
+    cfg.bind_ips = bind;
     cfg.rtc = Some(RtcConfig::default());
     Endpoint::bind(cfg).await.unwrap()
 }
@@ -985,4 +994,224 @@ async fn credit_refused_grant_goes_again() {
     let body = tokio::time::timeout(Duration::from_secs(20), r.body.read_all(n)).await.expect("not stuck").unwrap();
     assert_eq!(body.len(), n);
     assert_eq!(c.test_grant_writes_to_refuse(), 0, "grants were refused on the way");
+}
+
+/// A client whose offer names many host candidates, most of them unreachable, as Chrome's does once a page has the
+/// microphone (every interface: VM bridges, Tailscale, ULAs), with server and client on every interface of this
+/// machine. Checks from the client's interface addresses also reach the answer's loopback candidates (the OS delivers
+/// them), but nothing can be sent back from there: those pairs must never carry the session (the hub drops such
+/// packets, `answerable`). The session works, RPCs answer, nothing is lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rtc_many_host_candidates() {
+    let s = server_on(GuardConfig::default(), vec![], |_| {}).await;
+    let ep = client_on(vec![]).await;
+    // unreachable ones in the client's offer (as host candidates: what the endpoint announces as its own)
+    for addr in [
+        "192.0.2.10:40001",
+        "192.0.2.11:40002",
+        "198.51.100.12:40003",
+        "203.0.113.13:40004",
+        "100.64.0.250:40005",
+        "192.168.64.250:40006",
+        "10.255.1.2:40007",
+        "172.31.9.9:40008",
+        "[fd00:db8:1::99]:40009",
+        "[fd00:db8:2::99]:40010",
+        "[fd7a:115c:a1e0::99]:40011",
+        "[2001:db8::99]:40012",
+    ] {
+        assert!(ep.add_rtc_external_addr(addr.parse().unwrap()));
+    }
+    let (c, _srv) = dial_from(&ep, &s, "good-many").await.unwrap();
+    // long enough for every pair to be checked and nominations to settle
+    let body = vec![5u8; 64 * 1024];
+    for i in 0..30 {
+        let mut r = tokio::time::timeout(Duration::from_secs(5), c.request(&RpcRequest::new("POST", "/echo"), &body))
+            .await
+            .unwrap_or_else(|_| panic!("round {i}: no answer ({:?}, {:?})", c.path(), c.close_info()))
+            .unwrap();
+        assert!(r.body.read_all(1 << 20).await.unwrap() == body, "round {i}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(c.close_info().is_none());
+}
+
+/// The packet that broke it, sent on purpose: a check with USE-CANDIDATE (as Chrome sends once a page has the
+/// microphone and checks from all its interface addresses) from this machine's interface address to the answer's
+/// loopback candidate. The OS delivers it, but nothing can go back from 127.0.0.1 to there; a server that took it as
+/// its nominated pair went mute (every send failed: EADDRNOTAVAIL / EINVAL). It must not touch the session.
+/// (Skipped on a host without a non-loopback address.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rtc_loopback_candidate_from_elsewhere() {
+    // this machine's address on its default route (no packet is sent)
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let lan = match probe.connect("192.0.2.1:9").and_then(|_| probe.local_addr()) {
+        Ok(a) if !a.ip().is_loopback() && !a.ip().is_unspecified() => a.ip(),
+        _ => {
+            eprintln!("no non-loopback address: skipped");
+            return;
+        }
+    };
+    let s = server(GuardConfig::default()).await;
+    let ep = client().await;
+    let l = s.listener.clone();
+    let seen: Arc<std::sync::Mutex<(String, String)>> = Default::default();
+    let keep = seen.clone();
+    let c = ep
+        .dial_rtc(
+            move |offer: String| async move {
+                let answer = l.accept_rtc_offer(&offer, Some("127.0.0.1".parse().unwrap())).await?;
+                *keep.lock().unwrap() = (offer, answer.clone());
+                Ok(answer)
+            },
+            &s.fp,
+            &hello("good-loop", "web-1"),
+            &DialOptions::default(),
+        )
+        .await
+        .unwrap();
+    let _srv = tokio::time::timeout(Duration::from_secs(5), s.listener.accept()).await.unwrap().unwrap();
+    let (offer, answer) = seen.lock().unwrap().clone();
+    let sdp_of = |json: &str, key: &str| {
+        serde_json::from_str::<serde_json::Value>(json).unwrap()[key].as_str().unwrap().to_string()
+    };
+    let (offer, answer) = (sdp_of(&offer, "offer"), sdp_of(&answer, "answer"));
+    let attr = |sdp: &str, name: &str| {
+        sdp.lines().find_map(|l| l.strip_prefix(&format!("a={name}:"))).unwrap().trim().to_string()
+    };
+    let (server_ufrag, server_pwd, client_ufrag) =
+        (attr(&answer, "ice-ufrag"), attr(&answer, "ice-pwd"), attr(&offer, "ice-ufrag"));
+    let port: u16 = answer
+        .lines()
+        .filter_map(|l| l.strip_prefix("a=candidate:"))
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .find(|f| f.get(4) == Some(&"127.0.0.1"))
+        .and_then(|f| f[5].parse().ok())
+        .expect("a loopback candidate in the answer");
+    let request = stun_use_candidate(format!("{server_ufrag}:{client_ufrag}"), server_pwd);
+    let from = std::net::UdpSocket::bind((lan, 0)).unwrap();
+    for _ in 0..5 {
+        from.send_to(&request(), ("127.0.0.1", port)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for i in 0..10 {
+        let mut r =
+            tokio::time::timeout(Duration::from_secs(3), c.request(&RpcRequest::new("POST", "/echo"), b"still here"))
+                .await
+                .unwrap_or_else(|_| panic!("round {i}: the server went mute ({:?})", c.path()))
+                .unwrap();
+        assert_eq!(&r.body.read_all(1024).await.unwrap()[..], b"still here");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// A STUN binding request as a controlling ICE agent nominates with (RFC 8445): USERNAME, PRIORITY,
+/// ICE-CONTROLLING, USE-CANDIDATE, MESSAGE-INTEGRITY, FINGERPRINT; a fresh transaction id each call.
+fn stun_use_candidate(username: String, pwd: String) -> impl Fn() -> Vec<u8> {
+    move || {
+        let mut attrs = Vec::new();
+        let put = |attrs: &mut Vec<u8>, t: u16, v: &[u8]| {
+            attrs.extend_from_slice(&t.to_be_bytes());
+            attrs.extend_from_slice(&(v.len() as u16).to_be_bytes());
+            attrs.extend_from_slice(v);
+            while !attrs.len().is_multiple_of(4) {
+                attrs.push(0);
+            }
+        };
+        put(&mut attrs, 0x0006, username.as_bytes());
+        put(&mut attrs, 0x0024, &0x7eff_ffffu32.to_be_bytes());
+        put(&mut attrs, 0x802a, &u64::MAX.to_be_bytes());
+        put(&mut attrs, 0x0025, &[]);
+        let mut tid = [0u8; 12];
+        for b in &mut tid {
+            *b = rand::random();
+        }
+        let msg = |attrs: &[u8], extra: usize| {
+            let mut m = Vec::new();
+            m.extend_from_slice(&0x0001u16.to_be_bytes());
+            m.extend_from_slice(&((attrs.len() + extra) as u16).to_be_bytes());
+            m.extend_from_slice(&0x2112_a442u32.to_be_bytes());
+            m.extend_from_slice(&tid);
+            m.extend_from_slice(attrs);
+            m
+        };
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, pwd.as_bytes());
+        let mi = ring::hmac::sign(&key, &msg(&attrs, 24));
+        put(&mut attrs, 0x0008, mi.as_ref());
+        let crc = crc32(&msg(&attrs, 8)) ^ 0x5354_554e;
+        put(&mut attrs, 0x8028, &crc.to_be_bytes());
+        msg(&attrs, 0)
+    }
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut c = 0xffff_ffffu32;
+    for &b in data {
+        c ^= b as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 { (c >> 1) ^ 0xedb8_8320 } else { c >> 1 };
+        }
+    }
+    !c
+}
+
+/// The answer offers this computer's loopback candidates only to a client that offers its own (one on this machine
+/// that gathers them, as the core does); a browser doesn't gather loopback, and a client elsewhere can't reach it.
+/// (The interface-only half is skipped on a host without a non-loopback address.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rtc_loopback_candidates_only_for_loopback_offers() {
+    let s = server_on(GuardConfig::default(), vec![], |_| {}).await;
+    let answer_ips = |answer: &str| -> Vec<std::net::IpAddr> {
+        let sdp = serde_json::from_str::<serde_json::Value>(answer).unwrap()["answer"].as_str().unwrap().to_string();
+        sdp.lines()
+            .filter_map(|l| l.strip_prefix("a=candidate:"))
+            .filter_map(|l| l.split_whitespace().nth(4)?.parse().ok())
+            .collect()
+    };
+    let dial_on = |bind: std::net::IpAddr| {
+        let l = s.listener.clone();
+        let fp = s.fp.clone();
+        async move {
+            let ep = client_on(vec![bind]).await;
+            let seen: Arc<std::sync::Mutex<String>> = Default::default();
+            let keep = seen.clone();
+            let c = ep
+                .dial_rtc(
+                    move |offer: String| async move {
+                        let answer = l.accept_rtc_offer(&offer, Some("127.0.0.1".parse().unwrap())).await?;
+                        *keep.lock().unwrap() = answer.clone();
+                        Ok(answer)
+                    },
+                    &fp,
+                    &hello("good-lo", "web-1"),
+                    &DialOptions::default(),
+                )
+                .await
+                .unwrap();
+            let answer = seen.lock().unwrap().clone();
+            (c, ep, answer)
+        }
+    };
+    // a client on loopback: it gets them (and connects over them)
+    let (c, _ep, answer) = dial_on("127.0.0.1".parse().unwrap()).await;
+    assert!(answer_ips(&answer).iter().any(|ip| ip.is_loopback()), "{:?}", answer_ips(&answer));
+    let mut r = c.request(&RpcRequest::new("POST", "/echo"), b"lo").await.unwrap();
+    assert_eq!(&r.body.read_all(64).await.unwrap()[..], b"lo");
+    // a client on this machine's interface address only: none
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let Some(lan) = probe
+        .connect("192.0.2.1:9")
+        .and_then(|_| probe.local_addr())
+        .ok()
+        .map(|a| a.ip())
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+    else {
+        eprintln!("no non-loopback address: the interface half skipped");
+        return;
+    };
+    let (c, _ep2, answer) = dial_on(lan).await;
+    let ips = answer_ips(&answer);
+    assert!(!ips.is_empty() && ips.iter().all(|ip| !ip.is_loopback()), "{ips:?}");
+    let mut r = c.request(&RpcRequest::new("POST", "/echo"), b"lan").await.unwrap();
+    assert_eq!(&r.body.read_all(64).await.unwrap()[..], b"lan");
 }

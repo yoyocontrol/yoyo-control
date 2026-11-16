@@ -65,11 +65,11 @@ test("devices: cleanName, the pairing link", () => {
     fingerprint: "sha256:ab",
     code: "CODE",
     link: { id: "cd".repeat(32), key: "BA+/x==", sig: "q/+w", port: 47820 },
-    addresses: ["192.168.50.151", "100.93.131.5"],
+    addresses: ["192.168.1.151", "100.64.0.10"],
   });
-  assert.equal(link, `yoyocontrol://pair?v=2&id=srv1234567890abcd&n=Linux%20test&fp=sha256%3Aab&l=${"cd".repeat(32)}&lk=BA-_x&ls=q_-w&lp=47820&a=192.168.50.151%2C100.93.131.5&c=CODE`);
+  assert.equal(link, `yoyocontrol://pair?v=2&id=srv1234567890abcd&n=Linux%20test&fp=sha256%3Aab&l=${"cd".repeat(32)}&lk=BA-_x&ls=q_-w&lp=47820&a=192.168.1.151%2C100.64.0.10&c=CODE`);
   const u = new URL(link);
-  assert.equal(u.searchParams.get("a"), "192.168.50.151,100.93.131.5");
+  assert.equal(u.searchParams.get("a"), "192.168.1.151,100.64.0.10");
   assert.equal(u.searchParams.get("fp"), "sha256:ab");
   const bare = new URL(pairingLink({ serverId: "s", name: "n", fingerprint: "sha256:ab", code: "CODE", link: { id: "ab", key: "k", sig: "s" } }));
   assert.equal(bare.searchParams.get("a"), null);

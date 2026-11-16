@@ -447,6 +447,14 @@ skippedFrames, freezeCount, freezeMs, rateTargetMbps, rateSentMbps, rateCuts, ra
 tokio 运行时和套接字）、有完整的 ICE（服务端也打洞）、数据通道全（协商 id、部分可靠、DCEP）、纯 Rust 能交叉编到 iOS / Linux；
 webrtc-rs 自带线程和异步栈，libdatachannel 是 C++。
 
+服务端的 host 候选里有回环地址（`127.0.0.1`、`::1`：同一台机器上的页面用得上）。但回环地址只能和回环地址说话：从 `::1` / `127.0.0.1`
+发往别的地址，系统直接拒（macOS：EINVAL / EADDRNOTAVAIL）。同一台机器上的浏览器拿到麦克风权限后，从它所有的网卡地址（ULA、Tailscale、
+虚拟机网桥）往回答里的回环候选发检查，系统照收；str0m 一旦把这样的一对当成提名的（Chrome 在上面带了 USE-CANDIDATE），之后服务端发的
+每个包都失败——会话还在，服务端却哑了（RPC 没回应，ICE 重启又落回同一对）。所以 hub 把「从非回环地址发到回环地址」（及反过来）的包直接丢掉，
+不交给 str0m（`hub::answerable`）：这对永远成不了，同样的检查发到网卡地址照常（`tests/rtc.rs` 的 `rtc_loopback_candidate_from_elsewhere`）。
+另外回答里的回环候选只给 offer 里自己也有回环候选的客户端（同一台机器上、会收集回环地址的，比如 core 自己的客户端）；浏览器不收集回环地址，
+别的机器也到不了它，给了只会招来回不去的那种对。回答里除了回环再没别的候选时（这台电脑没有网络）照给（`loopback_only_for_loopback`）。
+
 | QUIC 会话的部分 | WebRTC |
 | --- | --- |
 | 控制流 | DataChannel `control`，negotiated id 0，有序、可靠；同样的帧（`u32 BE 长度` + JSON），不管消息边界 |
@@ -716,12 +724,19 @@ TEST_RUNNER_YOYO_LINK_SMOKE=$TMPDIR/serve.json TEST_RUNNER_YOYO_LINK_SMOKE_SECON
 
 浏览器开不了 UDP，也不能给 `fetch` 钉自签证书，所以浏览器走 WebRTC（「WebRTC」那一节的映射），会话协议和媒体层同上：
 
-- `dialRtc({ signal, pinnedFingerprint, credential, device, app, iceServers?, certificates?, timeoutMs?, media?, wasm? })`：
+- `dialRtc({ signal, pinnedFingerprint, credential, device, app, iceServers?, candidates?, certificates?, timeoutMs?, media?, wasm? })`：
   一个 `RTCPeerConnection`，先建好协商的 `control`（id 0）和 `dgram`（id 1，`ordered: false`、`maxRetransmits: 0`），
   等 ICE 收集（最多 1 s）后把 `{v: 1, offer, device}` 交给宿主的 `signal`（中继、本机 `POST /link/rtc`、宿主自己的后端都行），
   拿回的回答先用 WebCrypto 核对（`SHA-256(binding.key)` = 钉住的指纹、`sig` 验签、回答 SDP 的 `a=fingerprint` = `fingerprint`，
   对不上 = `LinkError("verification")`，硬失败），再 `setRemoteDescription`，然后 `hello` → `welcome`。`denied`（以及 `welcome`
   之前带 1 / 2 / 3 的 `bye`）是 `LinkError("denied")` 带 `code`。整个拨号默认 15 s。
+- `candidates`（`"all"` 默认 / `"public"`）：offer 里放哪些候选。经电脑的公网地址来的 offer，网关不收带私网候选的（会把服务端的 ICE 检查
+  引进它自己的局域网），而页面拿到麦克风权限后 Chrome 给的是原始的本机地址、不是 mDNS 名字。`"public"` 只留 UDP 的 host / srflx / relay
+  候选、公网地址、端口 ≥ 1024：不要 RFC 1918、ULA（fc00::/7）、站点本地（fec0::/10）、本地用的 NAT64（64:ff9b:1::/48）、CGNAT（100.64/10）、
+  回环、链路本地、组播、广播、未指定地址（IPv4 映射 / 兼容的 IPv6 就是那个 IPv4；知名 NAT64 `64:ff9b::/96` / 6to4 `2002::/16` 的 IPv6 按它带着的 IPv4
+  算——是公网或私网就是那个，回环之类的算「不可达」：包在里面的回环是转换器或中继的；同网关的 `addressKind`），不要 mDNS 名字和 TCP；`raddr` / `rport` 换成 `0.0.0.0` / `0`。
+  两种都最多 32 个（`MAX_OFFER_CANDIDATES`，优先级高的，网关也是这个数）。签名和核对用的是**发出去的** offer（`offerSdp`），本地描述不变：
+  浏览器照样从所有本机地址发检查，服务端从收到的检查学到对端反射的地址，所以一个候选都没有的 offer 也连得上（e2e：`--candidates public`）。
 - `LinkSession`：`sendControl` / `onControl` / `controlMessages()`；RPC 每次开一条带内的 `rpc` 通道（头帧、正文按 16 KiB 分条、
   空消息 = FIN，没有 FIN 就关 = 重置；正文看通道的缓冲发，超过 1 MiB 没发出去就等 `bufferedamountlow`——浏览器的发送队列满了会直接拒；
   30 s 的超时从请求的 FIN 起算，上传本身多长不算，只要它在动），`request()` 和 `fetch(path, init)`（给按 HTTP 写的代码，比如一个 `ScreenTransport`）；

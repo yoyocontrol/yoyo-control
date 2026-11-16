@@ -3,7 +3,7 @@
 // control round trips, an 8 MiB RPC download, a 50 Hz datagram ping (channel 14), the synthetic video through the
 // wasm media layer, input acks — and returns it as JSON.
 
-import { clientCertificate, clientKeyOf, dialRtc, indexedDbCertificateStore, type LinkSession, type MediaEvent } from "../../src/index.js";
+import { addressKind, clientCertificate, clientKeyOf, dialRtc, indexedDbCertificateStore, type LinkSession, type MediaEvent } from "../../src/index.js";
 
 interface Config {
   signal: string;
@@ -14,7 +14,14 @@ interface Config {
   real?: boolean;
   /** `--speed-test <ms>`: only the speed test (docs/LINK.md「测速」), its report. */
   speedTestMs?: number;
+  /** `--candidates public`: the offer names no private network (dialRtc's `candidates`). */
+  candidates?: "all" | "public";
+  /** `--mic`: ask for the microphone first (Chrome then gathers raw host addresses, not mDNS names). */
+  mic?: boolean;
 }
+
+/** The candidates of the offers sent (`type address`), the last one's first. */
+const offered: string[][] = [];
 
 const pct = (v: number[], p: number) => {
   if (!v.length) return null;
@@ -55,7 +62,18 @@ async function controlRtt(session: LinkSession, n: number): Promise<number[]> {
 const dial = (cfg: Config, credit = true) =>
   dialRtc({
     credit,
+    candidates: cfg.candidates,
     signal: async (offer) => {
+      offered.unshift(
+        offer.offer
+          .split(/\r?\n/)
+          .filter((l) => l.startsWith("a=candidate:"))
+          .map((l) => {
+            const f = l.slice(12).split(" ");
+            return `${f[7]} ${f[2]} ${f[4]}:${f[5]}`;
+          }),
+      );
+      console.log(`e2e: offer candidates ${offered[0]!.join(", ") || "none"}`);
       const res = await fetch(cfg.signal, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(offer) });
       if (!res.ok) throw new Error(`signal: HTTP ${res.status} ${await res.text()}`);
       return res.text();
@@ -72,8 +90,22 @@ const clientKeyOfSession = (s: LinkSession) => (s.welcome.principal as { client?
 async function run(cfg: Config) {
   (globalThis as { __linkDebug?: boolean }).__linkDebug = true;
   const result: Record<string, unknown> = { userAgent: navigator.userAgent };
+  // with the microphone granted (the runner grants it) Chrome gathers raw host addresses, not mDNS names
+  try {
+    if (!cfg.mic) throw new Error("not asked");
+    const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    result.mic = true;
+    mic.getTracks().forEach((t) => t.stop());
+  } catch (e) {
+    result.mic = `no: ${e instanceof Error ? e.name : String(e)}`;
+  }
   const t0 = performance.now();
   const session = await dial(cfg);
+  result.offerCandidates = offered[0];
+  if (cfg.candidates === "public") {
+    const bad = offered[0]!.filter((c) => addressKind(c.split(" ")[2]!.replace(/:\d+$/, "")) !== "public");
+    if (bad.length) throw new Error(`a "public" offer named ${bad.join(", ")}`);
+  }
   console.log("e2e: dialed");
   result.welcomeMs = Math.round((performance.now() - t0) * 10) / 10;
   result.timing = session.timing;

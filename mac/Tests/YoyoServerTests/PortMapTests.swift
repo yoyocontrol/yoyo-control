@@ -11,7 +11,7 @@ final class PortMapTests: XCTestCase {
         XCTAssertEqual(PortMap.classify("10.0.0.1"), .private)
         XCTAssertEqual(PortMap.classify("172.20.1.1"), .private)
         XCTAssertEqual(PortMap.classify("172.32.1.1"), .public)
-        XCTAssertEqual(PortMap.classify("192.168.50.1"), .private)
+        XCTAssertEqual(PortMap.classify("192.168.1.1"), .private)
         XCTAssertEqual(PortMap.classify("100.64.0.1"), .cgnat)
         XCTAssertEqual(PortMap.classify("100.128.0.1"), .public)
         XCTAssertEqual(PortMap.classify("0.0.0.0"), .unspecified)
@@ -34,10 +34,10 @@ final class PortMapTests: XCTestCase {
 
     func testPcpPackets() {
         let nonce = (1...12).map { UInt8($0) }
-        let m = [UInt8](PortMap.pcpMapRequest(nonce: nonce, .tcp, internal: 47820, external: 47820, externalAddress: nil, lifetime: 7200, client: "192.168.50.151"))
+        let m = [UInt8](PortMap.pcpMapRequest(nonce: nonce, .tcp, internal: 47820, external: 47820, externalAddress: nil, lifetime: 7200, client: "192.168.1.151"))
         XCTAssertEqual(m.count, 60)
         XCTAssertEqual(Array(m[0..<8]), [2, 1, 0, 0, 0, 0, 0x1c, 0x20])
-        XCTAssertEqual(Array(m[18..<24]), [0xff, 0xff, 192, 168, 50, 151])
+        XCTAssertEqual(Array(m[18..<24]), [0xff, 0xff, 192, 168, 1, 151])
         XCTAssertEqual(Array(m[24..<36]), nonce)
         XCTAssertEqual(m[36], 6)
         XCTAssertEqual(Array(m[40..<44]), [0xba, 0xcc, 0xba, 0xcc])
@@ -61,7 +61,7 @@ final class PortMapTests: XCTestCase {
         XCTAssertNil(PortMap.ssdpLocation("HTTP/1.1 200 OK\r\nLOCATION: file:///etc/passwd\r\n\r\n"))
         let services = PortMap.wanServices(description: FakeRouter.description, location: URL(string: FakeRouter.location)!)
         XCTAssertEqual(services, [PortMap.WanService(serviceType: "urn:schemas-upnp-org:service:WANIPConnection:1",
-                                                     controlURL: URL(string: "http://192.168.50.1:49152/47495533/upnp/control/WANIPConn1")!)])
+                                                     controlURL: URL(string: "http://192.168.1.1:49152/47495533/upnp/control/WANIPConn1")!)])
         let env = PortMap.soapEnvelope("urn:schemas-upnp-org:service:WANIPConnection:1", "AddPortMapping", [("NewExternalPort", "47820"), ("NewPortMappingDescription", "a<b&")])
         XCTAssertTrue(env.contains("<u:AddPortMapping xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\"><NewExternalPort>47820</NewExternalPort><NewPortMappingDescription>a&lt;b&amp;</NewPortMappingDescription></u:AddPortMapping>"))
         XCTAssertEqual(PortMap.xmlText(env, "NewPortMappingDescription"), "a<b&")
@@ -91,8 +91,8 @@ final class PortMapTests: XCTestCase {
         let (m, timers) = mapper(router)
         m.start()
         guard case .mapped(let got) = m.waitState({ $0.name == "mapped" }) else { return XCTFail("\(m.state)") }
-        XCTAssertEqual(got, PortMapper.Mapping(method: .upnp, externalAddress: "93.184.216.34", externalPort: 47820, internalAddress: "192.168.50.151", lifetime: 3600))
-        XCTAssertEqual(router.upnpTable["TCP:47820"]?.client, "192.168.50.151")
+        XCTAssertEqual(got, PortMapper.Mapping(method: .upnp, externalAddress: "93.184.216.34", externalPort: 47820, internalAddress: "192.168.1.151", lifetime: 3600))
+        XCTAssertEqual(router.upnpTable["TCP:47820"]?.client, "192.168.1.151")
         XCTAssertEqual(timers.delays.last, 1800)
         router.calls.removeAll()
         timers.fireLast()
@@ -106,12 +106,12 @@ final class PortMapTests: XCTestCase {
 
     func testUpnpSkipsAPortAnotherHostHolds() {
         let router = FakeRouter(upnp: true)
-        router.upnpTable["TCP:47820"] = ("192.168.50.20", 47820)
+        router.upnpTable["TCP:47820"] = ("192.168.1.20", 47820)
         let (m, _) = mapper(router)
         m.start()
         guard case .mapped(let got) = m.waitState({ $0.name == "mapped" }) else { return XCTFail("\(m.state)") }
         XCTAssertNotEqual(got.externalPort, 47820)
-        XCTAssertEqual(router.upnpTable["TCP:47820"]?.client, "192.168.50.20")
+        XCTAssertEqual(router.upnpTable["TCP:47820"]?.client, "192.168.1.20")
         m.stopAndWait(timeout: 2)
         XCTAssertEqual(router.upnpTable.count, 1)
     }
@@ -247,9 +247,9 @@ extension PortMapper {
     }
 }
 
-/// One gateway (192.168.50.1, this Mac 192.168.50.151) speaking any of UPnP IGD / NAT-PMP / PCP.
+/// One gateway (192.168.1.1, this Mac 192.168.1.151) speaking any of UPnP IGD / NAT-PMP / PCP.
 final class FakeRouter: PortMapNetwork, @unchecked Sendable {
-    static let location = "http://192.168.50.1:49152/47495533/gatedesc0b.xml"
+    static let location = "http://192.168.1.1:49152/47495533/gatedesc0b.xml"
     static let description = """
     <?xml version="1.0"?><root xmlns="urn:schemas-upnp-org:device-1-0"><device>
     <deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:1</deviceType><deviceList><device>
@@ -286,16 +286,16 @@ final class FakeRouter: PortMapNetwork, @unchecked Sendable {
 
     private func note(_ s: String) { lock.lock(); _calls.append(s); lock.unlock() }
 
-    func gateway() -> String? { "192.168.50.1" }
-    func localAddress(towards host: String) -> String? { host == "192.168.50.1" ? "192.168.50.151" : nil }
+    func gateway() -> String? { "192.168.1.1" }
+    func localAddress(towards host: String) -> String? { host == "192.168.1.1" ? "192.168.1.151" : nil }
 
     func ssdp(_ targets: [(host: String, port: UInt16, payload: Data)], wait: TimeInterval, localAddress: String?, preferFrom: String?) -> [(String, String)] {
         note("ssdp")
-        return upnp ? [("192.168.50.1", "HTTP/1.1 200 OK\r\nLOCATION: \(Self.location)\r\nST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n")] : []
+        return upnp ? [("192.168.1.1", "HTTP/1.1 200 OK\r\nLOCATION: \(Self.location)\r\nST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n")] : []
     }
 
     func http(_ url: URL, method: String, headers: [String: String], body: Data?, timeout: TimeInterval) throws -> (Int, String) {
-        guard upnp, url.host == "192.168.50.1" else { throw PortMapNetworkError(description: "refused") }
+        guard upnp, url.host == "192.168.1.1" else { throw PortMapNetworkError(description: "refused") }
         if method == "GET" { return url.absoluteString == Self.location ? (200, Self.description) : (404, "") }
         let action = headers["SOAPAction"].flatMap { $0.split(separator: "#").last.map { String($0.dropLast()) } } ?? ""
         let xml = String(decoding: body ?? Data(), as: UTF8.self)
@@ -324,7 +324,7 @@ final class FakeRouter: PortMapNetwork, @unchecked Sendable {
     }
 
     func udp(_ host: String, _ port: UInt16, _ payload: Data, timeouts: [TimeInterval], accept: (Data) -> Bool) -> Data? {
-        guard host == "192.168.50.1", port == 5351 else { return nil }
+        guard host == "192.168.1.1", port == 5351 else { return nil }
         let p = [UInt8](payload)
         lock.lock()
         let answer = answerPMP(p)

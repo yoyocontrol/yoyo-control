@@ -31,7 +31,7 @@ test("address classes: public, private, CGNAT, unspecified, reserved", () => {
   assert.equal(classifyIPv4("10.1.2.3"), "private");
   assert.equal(classifyIPv4("172.16.0.1"), "private");
   assert.equal(classifyIPv4("172.32.0.1"), "public");
-  assert.equal(classifyIPv4("192.168.50.1"), "private");
+  assert.equal(classifyIPv4("192.168.1.1"), "private");
   assert.equal(classifyIPv4("100.64.0.1"), "cgnat");
   assert.equal(classifyIPv4("100.127.255.255"), "cgnat");
   assert.equal(classifyIPv4("100.128.0.1"), "public");
@@ -64,16 +64,16 @@ test("NAT-PMP: the external address and map requests / responses (RFC 6886)", ()
 });
 
 test("PCP: MAP and ANNOUNCE requests, responses, and a NAT-PMP gateway's answer (RFC 6887)", () => {
-  assert.deepEqual([...ipv4Mapped("192.168.50.151")], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 50, 151]);
+  assert.deepEqual([...ipv4Mapped("192.168.1.151")], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 1, 151]);
   assert.deepEqual([...ipv4Mapped("")].slice(10), [0xff, 0xff, 0, 0, 0, 0]);
-  const a = pcpAnnounceRequest("192.168.50.151");
+  const a = pcpAnnounceRequest("192.168.1.151");
   assert.equal(a.length, 24);
   assert.deepEqual([...a.slice(0, 8)], [2, 0, 0, 0, 0, 0, 0, 0]);
   const nonce = Uint8Array.from({ length: 12 }, (_, i) => i + 1);
-  const m = pcpMapRequest({ nonce, protocol: "tcp", internalPort: 47820, externalPort: 47820, lifetime: 7200, clientAddress: "192.168.50.151" });
+  const m = pcpMapRequest({ nonce, protocol: "tcp", internalPort: 47820, externalPort: 47820, lifetime: 7200, clientAddress: "192.168.1.151" });
   assert.equal(m.length, 60);
   assert.deepEqual([...m.slice(0, 8)], [2, 1, 0, 0, 0, 0, 0x1c, 0x20]);
-  assert.deepEqual([...m.slice(20, 24)], [192, 168, 50, 151]);
+  assert.deepEqual([...m.slice(20, 24)], [192, 168, 1, 151]);
   assert.deepEqual([...m.slice(24, 36)], [...nonce]);
   assert.equal(m[36], 6);
   assert.deepEqual([...m.slice(40, 44)], [0xba, 0xcc, 0xba, 0xcc]);
@@ -116,7 +116,7 @@ test("SSDP: the search message and parsing an answer", () => {
 
 test("device description: the WAN connection service with an absolute control URL", () => {
   assert.deepEqual(parseDeviceDescription(SAGEMCOM_DESCRIPTION, LOCATION), [
-    { serviceType: "urn:schemas-upnp-org:service:WANIPConnection:1", controlURL: "http://192.168.50.1:49152/47495533/upnp/control/WANIPConn1", location: LOCATION },
+    { serviceType: "urn:schemas-upnp-org:service:WANIPConnection:1", controlURL: "http://192.168.1.1:49152/47495533/upnp/control/WANIPConn1", location: LOCATION },
   ]);
   const two = `<root><URLBase>http://10.0.0.1:5000/</URLBase><device><serviceList>
     <service><serviceType>urn:schemas-upnp-org:service:WANPPPConnection:1</serviceType><controlURL>ppp</controlURL></service>
@@ -149,17 +149,17 @@ test("SOAP: the envelope, the headers, a response's values and a UPnP fault", ()
 });
 
 test("the default gateway from route(8) and /proc/net/route", () => {
-  assert.equal(parseRouteGetDefault("   route to: default\ndestination: default\n       mask: default\n    gateway: 192.168.50.1\n  interface: en0\n"), "192.168.50.1");
+  assert.equal(parseRouteGetDefault("   route to: default\ndestination: default\n       mask: default\n    gateway: 192.168.1.1\n  interface: en0\n"), "192.168.1.1");
   assert.equal(parseRouteGetDefault("    gateway: link#22\n"), null);
   assert.equal(parseRouteGetDefault(""), null);
   const proc = [
     "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT",
-    "wlan0\t00000000\t0132A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0",
+    "wlan0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0",
     "eth0\t00000000\t0100000A\t0003\t0\t0\t100\t00000000\t0\t0\t0",
     "eth0\t0000000A\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0",
   ].join("\n");
   assert.equal(parseProcNetRoute(proc), "10.0.0.1");
-  assert.equal(parseProcNetRoute(proc.split("\n").slice(0, 2).join("\n")), "192.168.50.1");
+  assert.equal(parseProcNetRoute(proc.split("\n").slice(0, 2).join("\n")), "192.168.1.1");
   assert.equal(parseProcNetRoute("Iface\tDestination\n"), null);
 });
 
@@ -168,7 +168,7 @@ test("parseRoutePrint: Windows' active default route with the lowest metric; on-
     "===========================================================================",
     "活动路由:",
     "网络目标        网络掩码          网关       接口   跃点数",
-    "          0.0.0.0          0.0.0.0     192.168.50.1     192.168.50.10     25",
+    "          0.0.0.0          0.0.0.0     192.168.1.1     192.168.1.10     25",
     "          0.0.0.0          0.0.0.0       10.8.0.1        10.8.0.6     281",
     "          0.0.0.0          0.0.0.0            在链路上       100.64.0.2      5",
     "===========================================================================",
@@ -176,7 +176,7 @@ test("parseRoutePrint: Windows' active default route with the lowest metric; on-
     "  网络地址          网络掩码  网关地址  跃点数",
     "          0.0.0.0          0.0.0.0      192.168.9.1  默认",
   ].join("\r\n");
-  assert.equal(parseRoutePrint(out), "192.168.50.1");
+  assert.equal(parseRoutePrint(out), "192.168.1.1");
   assert.equal(parseRoutePrint("          0.0.0.0          0.0.0.0          On-link      100.64.0.2      5\r\n"), null);
   assert.equal(parseRoutePrint(""), null);
 });

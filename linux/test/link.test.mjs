@@ -38,7 +38,7 @@ async function until(f, ms = 3000) {
 before(async () => {
   if (skip) return;
   svc.clipboard.start();
-  svc.remote = new RemoteAccess({ svc, home, signalUrl: null, name: "Linux box", advertise: ["192.168.50.151:47830"], linkPort: 0, log, lingerMs: 300 });
+  svc.remote = new RemoteAccess({ svc, home, signalUrl: null, name: "Linux box", advertise: ["192.168.1.151:47830"], linkPort: 0, log, lingerMs: 300 });
   await svc.remote.start();
   const j = (await adminCall(home, "POST", "/remote/pairing")).json;
   token = svc.remote.devices.pair(j.pairing.code, "phone-0001", "Test iPhone");
@@ -113,7 +113,7 @@ test("/status has the link binding; GET /remote its endpoint", { skip }, async (
   const st = svc.status(await svc.features());
   assert.match(st.link.id, /^[0-9a-f]{64}$/);
   assert.equal(L.verifyBinding(st.link, svc.remote.identity.keyFingerprint), st.link.id);
-  assert.ok(st.link.direct.includes("192.168.50.151:47830"));
+  assert.ok(st.link.direct.includes("192.168.1.151:47830"));
   assert.equal(st.features.link, true);
   const r = (await adminCall(home, "GET", "/remote")).json;
   assert.equal(r.link.id, st.link.id);

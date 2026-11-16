@@ -54,11 +54,11 @@ test("UPnP: maps the preferred port to this host, renews at half the lease, dele
 
 test("UPnP: an external port held by another host is skipped; the next one is used and kept on renewals", async () => {
   const { router, clock, m } = setup({ upnp: true });
-  router.upnp.set("TCP:47820", { internalClient: "192.168.50.20", internalPort: 47820, description: "someone", lifetime: 0 });
+  router.upnp.set("TCP:47820", { internalClient: "192.168.1.20", internalPort: 47820, description: "someone", lifetime: 0 });
   const s = await m.start();
   assert.ok(s.status === "mapped");
   assert.notEqual(s.externalPort, 47820);
-  assert.equal(router.upnp.get("TCP:47820")!.internalClient, "192.168.50.20", "the other host's mapping is left alone");
+  assert.equal(router.upnp.get("TCP:47820")!.internalClient, "192.168.1.20", "the other host's mapping is left alone");
   assert.equal(router.upnp.get(`TCP:${s.externalPort}`)!.internalClient, ME);
   const port = s.externalPort;
   clock.advance(1800_000);
@@ -191,7 +191,7 @@ test("a network change: refresh() drops the old router's mapping and maps on the
   router.me = "10.0.0.7";
   router.upnp.clear(); // the old router is unreachable now: its table stays behind (it expires by itself)
   const s = await m.refresh();
-  assert.equal(s.status, "unsupported", "the fake's IGD lives at 192.168.50.1 only");
+  assert.equal(s.status, "unsupported", "the fake's IGD lives at 192.168.1.1 only");
   assert.deepEqual(states.map((x) => x.status), ["probing", "mapped", "unsupported"]);
   await m.stop();
 });
@@ -211,7 +211,7 @@ test("stop() during the first attempt still removes what that attempt mapped", a
 
 test("probe() reports what the gateway speaks", async () => {
   const r = await probe({ network: new FakeRouter({ upnp: true, pmp: true, pcpAsPmp: true }) });
-  assert.equal(r.gateway, "192.168.50.1");
+  assert.equal(r.gateway, "192.168.1.1");
   assert.equal(r.internalAddress, ME);
   assert.equal(r.pcp, null);
   assert.deepEqual(r.natpmp, { externalAddress: "93.184.216.34", epoch: 99 });

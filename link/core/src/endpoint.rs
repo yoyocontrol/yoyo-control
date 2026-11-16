@@ -778,6 +778,7 @@ impl Listener {
         let client_fp = rtc::sdp_fingerprint(&offer.offer)
             .ok_or_else(|| LinkError::InvalidArgument("offer without a sha-256 DTLS fingerprint".into()))?;
         let (usable, remote_candidates) = rtc::usable_sdp(&offer.offer);
+        let offer_loopback = rtc::has_loopback(&remote_candidates);
         let sdp = str0m::change::SdpOffer::from_sdp_string(&usable)
             .map_err(|e| LinkError::InvalidArgument(format!("offer SDP: {e}")))?;
         let mut r = hub.new_rtc(Instant::now());
@@ -787,7 +788,11 @@ impl Listener {
         let answer = r.sdp_api().accept_offer(sdp).map_err(|e| LinkError::InvalidArgument(format!("offer: {e}")))?;
         let fingerprint = rtc::fingerprint_string(&r.direct_api().local_dtls_fingerprint().bytes);
         let binding = binding::sign_binding_with(identity.as_ref(), &a.ep.public_key())?;
-        let answer_sdp = rtc::with_nat64(&rtc::filter_candidates(&answer.to_sdp_string(), |a| hub.announces(a)));
+        // (loopback candidates only for a client that offers its own)
+        let answer_sdp = rtc::with_nat64(&rtc::loopback_only_for_loopback(
+            &rtc::filter_candidates(&answer.to_sdp_string(), |a| hub.announces(a)),
+            offer_loopback,
+        ));
         let mut signed = rtc::sign_answer(identity.as_ref(), binding, &offer.offer, answer_sdp, fingerprint)?;
         // the offer is a sound one: now its place, in the WebRTC pool, under the signaling request's address (a real
         // one — it came over TCP; none: not counted per source)
@@ -834,11 +839,15 @@ fn restart_rtc(
         return Err(LinkError::InvalidArgument("no connection to restart".into()));
     };
     let (usable, remote_candidates) = rtc::usable_sdp(&offer.offer);
+    let offer_loopback = rtc::has_loopback(&remote_candidates);
     let sdp = str0m::change::SdpOffer::from_sdp_string(&usable)
         .map_err(|e| LinkError::InvalidArgument(format!("offer SDP: {e}")))?;
     let (answer, fingerprint) = peer.restart(sdp, remote_candidates)?;
     let binding = binding::sign_binding_with(identity, &a.ep.public_key())?;
-    let answer_sdp = rtc::with_nat64(&rtc::filter_candidates(&answer.to_sdp_string(), |x| hub.announces(x)));
+    let answer_sdp = rtc::with_nat64(&rtc::loopback_only_for_loopback(
+        &rtc::filter_candidates(&answer.to_sdp_string(), |x| hub.announces(x)),
+        offer_loopback,
+    ));
     let mut signed = rtc::sign_answer(identity, binding, &offer.offer, answer_sdp, fingerprint)?;
     if let Some(rk) = offer.rk.as_deref().filter(|k| valid_restart_key(k)) {
         a.restarts.lock().unwrap().insert(rk.to_string(), Arc::downgrade(&peer));

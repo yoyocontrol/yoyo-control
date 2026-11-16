@@ -25,7 +25,7 @@ let localPort;
 
 before(async () => {
   localPort = (await svc.listen(0, "127.0.0.1")).port;
-  svc.remote = new RemoteAccess({ svc, home, signalUrl: null, name: "Linux box", advertise: ["192.168.50.151:47830"], linkPort: 0, log, lingerMs: 300 });
+  svc.remote = new RemoteAccess({ svc, home, signalUrl: null, name: "Linux box", advertise: ["192.168.1.151:47830"], linkPort: 0, log, lingerMs: 300 });
   await svc.remote.start();
 });
 after(async () => {
@@ -66,7 +66,7 @@ test("pair: the admin socket makes a code and starts the link; the pairing link 
   const j = a.json;
   assert.match(j.fingerprint, /^sha256:[0-9a-f]{64}$/);
   assert.ok(j.pairing.code);
-  assert.deepEqual(j.addresses, ["192.168.50.151"]);
+  assert.deepEqual(j.addresses, ["192.168.1.151"]);
   assert.deepEqual(j.signal, { connected: false });
   assert.equal(j.direct.status, "off");
   if (!L) {
@@ -82,7 +82,7 @@ test("pair: the admin socket makes a code and starts the link; the pairing link 
   assert.equal(u.searchParams.get("v"), "2");
   assert.equal(u.searchParams.get("id"), j.serverId);
   assert.equal(u.searchParams.get("n"), "Linux box");
-  assert.equal(u.searchParams.get("a"), "192.168.50.151");
+  assert.equal(u.searchParams.get("a"), "192.168.1.151");
   assert.equal(u.searchParams.get("fp"), j.fingerprint);
   assert.equal(u.searchParams.get("l"), j.link.id);
   assert.equal(u.searchParams.get("lp"), String(j.link.port));

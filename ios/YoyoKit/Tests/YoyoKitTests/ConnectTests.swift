@@ -65,7 +65,7 @@ struct ConnectTests {
     }
 
     nonisolated static let fp = "sha256:" + String(repeating: "ab", count: 32)
-    nonisolated static let lan = ConnectCandidate(kind: .lan, host: "192.168.50.10", port: 47821, trust: .certificate(fp), credential: "A")
+    nonisolated static let lan = ConnectCandidate(kind: .lan, host: "192.168.1.10", port: 47821, trust: .certificate(fp), credential: "A")
     nonisolated static let pub = ConnectCandidate(kind: .direct, host: "93.184.216.34", port: 47821, trust: .certificate(fp), credential: "A")
     nonisolated static let tunnel = ConnectCandidate(id: "tunnel", kind: .tunnel)
     nonisolated static let relay = ConnectCandidate(id: "relay", kind: .relay, host: "127.0.0.1")
@@ -108,8 +108,8 @@ struct ConnectTests {
     // MARK: Candidates and pins
 
     @Test func candidatesAndTheirRoutes() {
-        #expect(Self.lan.id == "lan:192.168.50.10:47821" && Self.lan.label == "LAN" && Self.lan.isLocalNetwork)
-        #expect(Self.lan.baseURL?.absoluteString == "https://192.168.50.10:47821")
+        #expect(Self.lan.id == "lan:192.168.1.10:47821" && Self.lan.label == "LAN" && Self.lan.isLocalNetwork)
+        #expect(Self.lan.baseURL?.absoluteString == "https://192.168.1.10:47821")
         #expect(ConnectCandidate(kind: .direct, host: "2001:db8::1", port: 1).baseURL?.absoluteString == "https://[2001:db8::1]:1")
         #expect(ConnectCandidate(kind: .lan, host: "10.0.0.1", port: 0).baseURL == nil)
         let r = Self.pub.route(shortcut: true)
@@ -341,7 +341,7 @@ struct ConnectTests {
         let c = connector(net)
         // the held one's way is gone (the server restarted: a new port); the fresh one is reached
         net.supply { why in
-            if why == .held { return ConnectSupply(candidates: [ConnectCandidate(kind: .lan, host: "192.168.50.10", port: 50001)], fresh: false) }
+            if why == .held { return ConnectSupply(candidates: [ConnectCandidate(kind: .lan, host: "192.168.1.10", port: 50001)], fresh: false) }
             return Self.both(credential: "new")
         }
         net.reachable(Self.lan)
@@ -433,7 +433,7 @@ struct ConnectTests {
         await settle { net.asked.contains(.renew) }
         #expect(c.current.id == Self.lan.id)
         // the next renewal lists another port: back to the tunnel, then the new one
-        let moved = ConnectCandidate(kind: .lan, host: "192.168.50.10", port: 50999, credential: "A")
+        let moved = ConnectCandidate(kind: .lan, host: "192.168.1.10", port: 50999, credential: "A")
         net.supply { _ in ConnectSupply(candidates: [moved], fresh: true, expires: Date().addingTimeInterval(60)) }
         net.reachable(moved)
         await settle { c.current.id == moved.id }
@@ -495,7 +495,7 @@ struct ConnectTests {
         #expect(c.current.id == Self.lan.id, "the page retries on it")
         #expect(await c.fallback(from: c.current, after: URLError(.timedOut)) == nil)
         // a network change looks for it again (the same kind)
-        net.reachable(ConnectCandidate(kind: .lan, host: "192.168.50.10", port: 47821, trust: .certificate(Self.fp), credential: "A"))
+        net.reachable(ConnectCandidate(kind: .lan, host: "192.168.1.10", port: 47821, trust: .certificate(Self.fp), credential: "A"))
         c.pathUpdated(Self.cellular)
         c.pathUpdated(Self.wifi)
         await settle { net.probed.contains(Self.lan.id) }

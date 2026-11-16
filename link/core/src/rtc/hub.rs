@@ -318,6 +318,9 @@ impl Hub {
     }
 
     fn dispatch(&self, now: Instant, source: SocketAddr, destination: SocketAddr, data: &[u8]) {
+        if !answerable(source, destination) {
+            return;
+        }
         if let Some(tid) = stun::success_tid(data)
             && self.stun_pending.lock().unwrap().remove(&tid).is_some()
         {
@@ -460,5 +463,38 @@ async fn stun_loop(hub: Weak<Hub>) {
             h.query_stun().await;
         }
         tokio::time::sleep(STUN_EVERY).await;
+    }
+}
+
+/// Whether a packet that came from `source` to this side's `destination` can be answered from there. A loopback
+/// address only talks to loopback: the OS refuses to send from `::1` / `127.0.0.1` to anything else (EINVAL /
+/// EADDRNOTAVAIL on macOS). On one machine a browser with its raw interface addresses (once a page has the
+/// microphone) checks from its ULA, Tailscale or VM-bridge address towards the loopback candidates of the answer, and
+/// the OS delivers that; ICE would take such a pair as valid and, once it was nominated, every packet this side sent
+/// on it failed: the server went mute (no answers, ICE restarts that end on the same pair). Not giving str0m those
+/// packets means the pair never forms; the same check to the interface address works.
+pub(crate) fn answerable(source: SocketAddr, destination: SocketAddr) -> bool {
+    source.ip().to_canonical().is_loopback() == destination.ip().to_canonical().is_loopback()
+}
+
+#[cfg(test)]
+mod answerable_tests {
+    use super::answerable;
+
+    #[test]
+    fn loopback_only_with_loopback() {
+        let a = |s: &str| s.parse().unwrap();
+        // the pairs that broke: a browser's ULA / bridge address towards the answer's loopback candidates
+        assert!(!answerable(a("[fd00:db8::5]:52097"), a("[::1]:55758")));
+        assert!(!answerable(a("192.168.64.1:62863"), a("127.0.0.1:55758")));
+        assert!(!answerable(a("[::ffff:192.168.1.10]:5000"), a("127.0.0.1:55758")));
+        assert!(!answerable(a("127.0.0.1:5000"), a("192.168.1.10:55758")));
+        // the ones that work
+        assert!(answerable(a("127.0.0.1:5000"), a("127.0.0.1:55758")));
+        assert!(answerable(a("[::1]:5000"), a("[::1]:55758")));
+        assert!(answerable(a("[::ffff:127.0.0.1]:5000"), a("127.0.0.1:55758")));
+        assert!(answerable(a("192.168.1.10:5000"), a("192.168.1.10:55758")));
+        assert!(answerable(a("[fd07::1]:5000"), a("[fd07::2]:55758")));
+        assert!(answerable(a("8.8.8.8:5000"), a("192.168.1.10:55758")));
     }
 }

@@ -14,4 +14,5 @@ export * from "./duplex.js";
 export { CREDIT_FEATURE, CREDIT_INITIAL, CREDIT_MESSAGE_COST, CREDIT_POOL, CREDIT_WINDOW, messageCost } from "./credit.js";
 export * from "./session.js";
 export * from "./dial.js";
+export * from "./candidates.js";
 export * from "./screen.js";

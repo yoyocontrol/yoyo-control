@@ -6,6 +6,8 @@ import { LinkSession, MAX_DATAGRAM } from "./session.js";
 import { browserIface } from "./stats.js";
 import { newRestartSecret, parseAnswer, verifyAnswer } from "./verify.js";
 import { loadLinkMedia } from "./wasm.js";
+import { CREDIT_FEATURE } from "./credit.js";
+import { offerSdp } from "./candidates.js";
 /** What this client says it takes, in `hello.features` by default (as the iOS kit). */
 export const DEFAULT_FEATURES = ["screen", "audio", "cursor", "input"];
 /** The whole dial (signaling, ICE, DTLS, `welcome`) by default. */
@@ -67,9 +69,11 @@ export async function dialRtc(options) {
         await race(pc.setLocalDescription(await race(pc.createOffer())));
         await race(gathered(pc, options.gatherTimeoutMs ?? GATHER_TIMEOUT_MS));
         const gatheredMs = mark();
-        const sdp = pc.localDescription?.sdp;
-        if (!sdp)
+        const local = pc.localDescription?.sdp;
+        if (!local)
             throw new LinkError("protocol", "no local description");
+        // what goes out (and what the answer is signed over)
+        const sdp = offerSdp(local, options.candidates ?? "all");
         let next = await race(newRestartSecret());
         let reply;
         try {
@@ -86,7 +90,10 @@ export async function dialRtc(options) {
         await race(pc.setRemoteDescription({ type: "answer", sdp: answer.answer }));
         await race(opened(control, pc));
         const connectedMs = mark();
-        const hello = { credential: options.credential, device: options.device, app: options.app, features: options.features ?? DEFAULT_FEATURES };
+        const features = (options.features ?? DEFAULT_FEATURES).filter((f) => f !== CREDIT_FEATURE);
+        if (options.credit ?? true)
+            features.push(CREDIT_FEATURE);
+        const hello = { credential: options.credential, device: options.device, app: options.app, features };
         // an ICE restart over the same signaling path (docs/LINK.md「WebRTC」「换网络」): new candidates and ICE credentials
         // for the same DTLS, SCTP and channels; the session calls it when the path is lost
         const gatherMs = options.gatherTimeoutMs ?? GATHER_TIMEOUT_MS;
@@ -96,20 +103,21 @@ export async function dialRtc(options) {
             await pc.setLocalDescription(await pc.createOffer({ iceRestart: true }));
             // gathering starts again a moment later: "complete" from the last round doesn't count
             await gathered(pc, gatherMs, true);
-            const offerSdp = pc.localDescription?.sdp;
-            if (!offerSdp)
+            const restartLocal = pc.localDescription?.sdp;
+            if (!restartLocal)
                 throw new LinkError("protocol", "no local description");
+            const sent = offerSdp(restartLocal, options.candidates ?? "all");
             const following = await newRestartSecret();
             let back;
             try {
-                back = await options.signal({ v: 1, offer: offerSdp, device: options.device, restart: next.secret, rk: following.key });
+                back = await options.signal({ v: 1, offer: sent, device: options.device, restart: next.secret, rk: following.key });
             }
             catch (e) {
                 throw new LinkError("signal", `restart signaling failed: ${e instanceof Error ? e.message : String(e)}`, undefined, { cause: e });
             }
             next = following; // the server took the old secret: the next restart needs this one
             const a = parseAnswer(back);
-            await verifyAnswer(offerSdp, a, options.pinnedFingerprint);
+            await verifyAnswer(sent, a, options.pinnedFingerprint);
             await pc.setRemoteDescription({ type: "answer", sdp: a.answer });
             return a.restarts === true;
         };

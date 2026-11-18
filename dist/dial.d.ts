@@ -3,6 +3,7 @@ import { LinkSession, type Welcome } from "./session.js";
 import { type Iface } from "./stats.js";
 import { type RtcOffer } from "./verify.js";
 import { type ClientMediaConfig, type WasmSource } from "./wasm.js";
+import { type CandidatePolicy } from "./candidates.js";
 /** What this client says it takes, in `hello.features` by default (as the iOS kit). */
 export declare const DEFAULT_FEATURES: string[];
 /** The whole dial (signaling, ICE, DTLS, `welcome`) by default. */
@@ -32,8 +33,21 @@ export interface DialRtcOptions {
     };
     /** `hello.features` (default `DEFAULT_FEATURES`). */
     features?: string[];
+    /** Offer the credit window (`hello`'s `credit`, docs/LINK.md「信用窗口」; default true): a slow reader holds the
+     *  server back instead of the server's receive bounds resetting the stream, and an answer nobody reads waits in the
+     *  server, not in this page. Used when the server's `welcome` says it too. */
+    credit?: boolean;
     /** STUN servers for the browser's own reflexive candidates (default none). */
     iceServers?: RTCIceServer[];
+    /**
+     * Which gathered candidates go into the offer that is sent (the answer is checked against that offer): `"all"`
+     * (default) or `"public"` — only UDP host / server-reflexive / relay candidates on a public address and a port
+     * ≥ 1024 (no RFC 1918, ULA, CGNAT, loopback, link-local, multicast, broadcast or unspecified address, no mDNS name),
+     * with the related address blanked. For a server reached through its public address, which refuses offers naming
+     * private networks (a page with the microphone granted has its raw host addresses); the browser still connects
+     * through srflx / relay or a peer-reflexive path. Either way at most `MAX_OFFER_CANDIDATES` (32) go.
+     */
+    candidates?: CandidatePolicy;
     /**
      * The DTLS certificate(s) to use; wins over `certificateStore`. The certificate is the client key the server binds
      * a device token to (`dtls-sha256:<hex>`), so it has to stay the same between dials.

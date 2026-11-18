@@ -1,6 +1,7 @@
 import { FrameReader } from "./framing.js";
 import type { LinkMedia } from "./media.js";
 import { type ProbeReport } from "./probe.js";
+import { type DuplexResponse } from "./duplex.js";
 import { type RpcRequest, type RpcResponse } from "./rpc.js";
 import { type Iface, type LinkStats, type PathInfo } from "./stats.js";
 /** The client's `hello` (without `t` / `v`). */
@@ -61,7 +62,8 @@ export declare const IDLE_MS = 20000;
 export declare const ACTIVE_IDLE_MS = 3000;
 /** `dgram`'s send buffer: past it a datagram is dropped rather than queued (new datagrams are what matters). */
 export declare const DGRAM_BUFFER: number;
-/** RPC answers start within this long. */
+/** RPC answers start within this long of the request's end (its FIN: an upload's own length doesn't count); a
+ *  channel opens, and an upload makes progress, within it too. */
 export declare const RPC_TIMEOUT_MS = 30000;
 /** A lost path (ICE `disconnected` / `failed`: the network changed, Wi-Fi ↔ 5G) is looked for again this long by ICE
  *  restarts before the session ends (the server keeps a silent connection about 20 s). */
@@ -144,6 +146,10 @@ export declare class LinkSession {
     private restarts;
     /** The running speed test hears its `link.probe.*` replies here. */
     private probeListener;
+    /** Open RPCs and duplex streams: ended here when the session ends (not left to their channels' `close`). */
+    private readonly streams;
+    /** The credit window's pool, when both sides took it (`credit` in `hello` and `welcome`); null: none. */
+    private readonly creditPool;
     /** @internal use `dialRtc` */
     constructor(p: SessionParts);
     /**
@@ -173,6 +179,12 @@ export declare class LinkSession {
     controlMessages(): AsyncGenerator<ControlMessage>;
     /** One request (docs/LINK.md「RPC 流」); resolves with the answer once its head came. */
     request(request: RpcRequest, body?: Uint8Array): Promise<RpcResponse>;
+    /**
+     * A duplex request (a WebSocket's upgrade over the link: voice, a phone call's stream; docs/LINK.md「双工请求」):
+     * `duplex` when the server accepted it (101), else its status and body. Rejected without asking (`unsupported`)
+     * when the server's welcome doesn't list "duplex" — an older server would wait for a body that never comes.
+     */
+    requestDuplex(request: RpcRequest): Promise<DuplexResponse>;
     /**
      * `fetch` over RPC: `path` (with its query) and a `RequestInit` (method, headers, a string / bytes / Blob body;
      * `signal` cancels) → a `Response` streaming the answer's body. For code written against HTTP (a `ScreenTransport`).

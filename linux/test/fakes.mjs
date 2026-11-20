@@ -178,7 +178,8 @@ export function fakeSpawn({ width = 1280, height = 832 } = {}) {
   // `size`: what the next helper's hello says; `noDisplay`: the next helpers can't open it (exit 1 before the hello);
   // `ffmpegMs`: how long a frame capture takes (`ffmpegRunning` / `ffmpegMax`: at once, now / at most)
   // `pointer`: the pointer the next cursor helpers report first (their 'P' after the hello)
-  const state = { xdotool: [], xdotools: [], helpers: [], encodes: [], ffmpegArgs: [], size: [width, height], noDisplay: false, ffmpegMs: 0, ffmpegRunning: 0, ffmpegMax: 0, audioSpawns: [], audioHelpers: [], audioFails: false, clipHelpers: [], clipWrites: [], clipPng: null, clipStart: null, clipRefuse: false, windows: { screen: [width, height], active: 0, windows: [] }, windowsRuns: 0, windowsFail: false, escWatches: [], escFails: false, refs: false, forgets: [], pointer: { x: 640, y: 416, serial: 7, xhot: 1, yhot: 2, w: 4, h: 4 } };
+  // `secure`: the 'D' byte the next helpers send before their hello (yoyo-winvideo's secure desktop; null: none)
+  const state = { xdotool: [], xdotools: [], helpers: [], encodes: [], ffmpegArgs: [], size: [width, height], noDisplay: false, ffmpegMs: 0, ffmpegRunning: 0, ffmpegMax: 0, secure: null, audioSpawns: [], audioHelpers: [], audioFails: false, clipHelpers: [], clipWrites: [], clipPng: null, clipStart: null, clipRefuse: false, windows: { screen: [width, height], active: 0, windows: [] }, windowsRuns: 0, windowsFail: false, escWatches: [], escFails: false, refs: false, forgets: [], pointer: { x: 640, y: 416, serial: 7, xhot: 1, yhot: 2, w: 4, h: 4 } };
   const spawn = (path, args) => {
     if (path.endsWith("yoyo-x11video") && state.noDisplay) {
       const p = fakeProcess();
@@ -219,7 +220,9 @@ export function fakeSpawn({ width = 1280, height = 832 } = {}) {
       hello.writeUInt16BE(state.size[0], 0);
       hello.writeUInt16BE(state.size[1], 2);
       if (p.refs) hello[4] = 2;
+      const secure = state.secure;
       setImmediate(() => {
+        if (secure !== null) p.stdout.write(record("D", Buffer.from([secure])));
         p.stdout.write(record("H", hello));
         // the pointer right after the hello (its pixels: the first time this helper sees the serial)
         if (p.cursor) p.stdout.write(pointerRecord({ ...state.pointer, pixels: solidCursor(state.pointer.w, state.pointer.h, [100, 50, 0, 200]) }));

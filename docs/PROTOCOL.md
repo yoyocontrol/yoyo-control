@@ -629,7 +629,9 @@ PRIMARY**（同一内容：Ctrl+V / Shift+Insert 和鼠标中键贴出来的一�
 - **是谁**：`/status` 的 `app` 是 `"yoyo-windows"`，`platform` 是 **`"windows"`**（`ScreenPlatform` 是开放集合，客户端按「别的电脑」叫它：「桌面」
   「电脑」）；配对时 `welcome.server.platform`、账号声明的 `platform` 也是 `"windows"`。`version` 与 Linux 发布包的相同（同一份代码）。
 - **画面**：登录用户的桌面的主显示器（坐标 0,0 的那块），物理像素（按显示器 DPI 感知：150 % 缩放的 2560×1440 就是 2560×1440）。安全桌面
-  （UAC 的提示、锁屏、Ctrl+Alt+Del）截不到也操作不了：那时画面停在上一张，`phase` 仍是 `ready`。只有一块显示器。流最多 60 帧每秒
+  （UAC 的提示、锁屏、Ctrl+Alt+Del）截不到也操作不了：那时画面停在上一张，`phase` 仍是 `ready`；`/status` 和 `/events` 状态行的
+  `console` 说上面是什么（0.11.4 起）：`secureDesktop` 是 `"admin-prompt"`（UAC 的提示）、`"sign-in"`（登录 / 锁屏界面，`locked` 也为
+  true）或 `"other"`（开放集合），回到桌面时没有这个键。它刚开始时打开的流也照常开，第一张画面等桌面回来（不发黑的）。只有一块显示器。流最多 60 帧每秒
   （Linux 30）：有显卡编码器就由显卡编（H.264 High，BT.709 limited，同样的 Annex-B 访问单元），没有才用 x264；流开着时显示器不睡。
   `GET /frame` 的一张（0.10.2 起）取自 GDI 的合成桌面，不依赖有没有新的一帧呈现：静止的桌面、没开着流时也是当前的画面。
 - **输入**：`cmd` 修饰键当 Ctrl 发；键名同 Linux（也认 `insert`）；`type` 的每个字符按 Unicode 直接打（不经键盘布局与输入法），所以中文、

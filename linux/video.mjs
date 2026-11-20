@@ -27,11 +27,15 @@ const monotonic = () => performance.now() / 1000;
  * A helper whose hello says so keeps time for the loop (`timer`; yoyo-winvideo): Node's timers on Windows tick every
  * 15.6 ms, too coarse to pace 60 pictures a second, so a precise wait is a `T <ms> <id>` to the helper (which runs at
  * 1 ms) and its 'T' record back; a setTimeout behind it stays as the backstop.
+ *
+ * A helper that says what the secure desktop shows ('D' records, yoyo-winvideo; before its hello, then on changes)
+ * tells `onDesktop` (`"admin-prompt"`, `"sign-in"`, `"other"`, or null when the user's desktop shows).
  */
 export class VideoHelper {
-  constructor({ path, fps, env, log, spawnFn = spawn, cursor = false }) {
+  constructor({ path, fps, env, log, spawnFn = spawn, cursor = false, onDesktop = null }) {
     this.log = log;
     this.cursor = cursor;
+    this.onDesktop = onDesktop;
     /** The 'P' records' receiver (a stream's CursorFeed). */
     this.onPointer = null;
     this.pointerSeen = false;
@@ -100,6 +104,8 @@ export class VideoHelper {
         this.pointerSeen = true;
         if (this.size) this.readyResolve(this.size);
       }
+    } else if (r.type === "D") {
+      this.onDesktop?.(r.secure);
     } else if (r.type === "T") {
       // the timer asked for last (an earlier one was replaced: its waits ended, or the backstop ends them)
       if (r.id === this.timerId) for (const w of [...this.timed]) w();

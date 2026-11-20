@@ -25,7 +25,9 @@
 // (the console's, or a remote one's); a service in session 0 has none (exit 1). The picture is in physical pixels
 // (the process is per-monitor DPI aware). While the desktop can't be duplicated (the secure desktop: UAC, the lock
 // screen, Ctrl+Alt+Del; a mode change in progress) the last picture stands and duplication is tried again every
-// 250 ms; a new size ends the stream (exit 3).
+// 250 ms; a new size ends the stream (exit 3). The secure desktop is said in 'D' records (what shows on it: UAC's
+// prompt, the sign-in screen); one already up at the start is no failure: the hello comes (the monitor's size), and a
+// stream's pictures wait for the desktop (an E before the first one answers 'S', never a black picture).
 //
 // Arguments: [--preset <x264 preset>] [--threads <n>] [--fps <n>] [--cursor client] [--encoder gpu|x264].
 //   --bench <pictures> [--size <w> <h>] [--kbps <n>]
@@ -53,6 +55,9 @@
 //   'F' a frame: u8 flags (1 = key, 2 = the picture changed since the previous grab), f64 LE capture time (ms since
 //       1970), then the access unit
 //   'S' skipped: the encoder gave no picture for that E (rate control)
+//   'D' the secure desktop, once before the hello and then on every change: u8 0 = the user's desktop shows, 1 = an
+//       administrator prompt (UAC's consent.exe in this session), 2 = the sign-in screen (LogonUI.exe: the lock screen,
+//       Ctrl+Alt+Del), 3 = something else the desktop can't be duplicated for (E_ACCESSDENIED in a signed-in session)
 //   'P' the pointer (--cursor client only; one right after the hello, then on every move or shape change): i16 BE x,
 //       i16 BE y (pixels), u32 BE shape serial, u16 BE xhot, yhot, width, height, u8 flags (1 = visible, 2 = the
 //       shape's pixels follow, 4 = no shape could be read: the client's built-in arrow), then, with flag 2,
@@ -67,6 +72,7 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <wincodec.h>
+#include <wtsapi32.h>
 #include <fcntl.h>
 #include <io.h>
 #include <math.h>
@@ -459,6 +465,43 @@ static void make_textures(void) {
 static double lost_at = 0;
 static int lost_logged = 0;
 
+// ---- the secure desktop ('D' records)
+
+static int secure_shown = -1;  // what the last 'D' said; -1: none yet
+
+// What the secure desktop shows in this process's session (the 'D' byte, 1…3): UAC's prompt or the sign-in screen
+// are the processes that draw them.
+static int secure_kind(void) {
+  DWORD me = 0;
+  ProcessIdToSessionId(GetCurrentProcessId(), &me);
+  WTS_PROCESS_INFOW *p = NULL;
+  DWORD n = 0;
+  int kind = 3;
+  if (WTSEnumerateProcessesW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &p, &n)) {
+    for (DWORD i = 0; i < n; i++) {
+      if (p[i].SessionId != me || !p[i].pProcessName) continue;
+      if (!_wcsicmp(p[i].pProcessName, L"consent.exe")) kind = 1;
+      else if (kind != 1 && !_wcsicmp(p[i].pProcessName, L"LogonUI.exe")) kind = 2;
+    }
+    WTSFreeMemory(p);
+  }
+  return kind;
+}
+
+static const char *secure_name(int kind) {
+  return kind == 1 ? "an administrator prompt (UAC)" : kind == 2 ? "the sign-in screen" : "the secure desktop";
+}
+
+// A 'D' record when it says something new (never in --jpeg: stdout is the picture there).
+static void report_desktop(int kind) {
+  if (jpeg_mode || kind == secure_shown) return;
+  if (kind > 0) fprintf(stderr, "yoyo-winvideo: %s is showing: no picture until it goes; the last picture stands\n", secure_name(kind));
+  else if (secure_shown > 0) fprintf(stderr, "yoyo-winvideo: the desktop is back\n");
+  secure_shown = kind;
+  uint8_t b = (uint8_t)kind;
+  record('D', &b, 1, NULL, 0);
+}
+
 // Waits up to `ms` for the next desktop frame and takes its news: a new picture (kept on the GPU), the pointer.
 // Returns 1 when a frame came.
 static int pump(UINT ms) {
@@ -470,13 +513,15 @@ static int pump(UINT ms) {
     lost_at = now_ms();
     HRESULT hr = duplicate();
     if (FAILED(hr)) {
-      if (!lost_logged) fprintf(stderr, "yoyo-winvideo: the desktop can't be duplicated now (0x%08lx; the secure desktop?); the last picture stands\n", (unsigned long)hr);
+      if (hr == E_ACCESSDENIED) report_desktop(secure_kind());
+      else if (!lost_logged) fprintf(stderr, "yoyo-winvideo: the desktop can't be duplicated now (0x%08lx); the last picture stands\n", (unsigned long)hr);
       lost_logged = 1;
       Sleep(ms);
       return 0;
     }
-    if (lost_logged) fprintf(stderr, "yoyo-winvideo: the desktop is back\n");
+    if (lost_logged && secure_shown <= 0) fprintf(stderr, "yoyo-winvideo: the desktop is back\n");
     lost_logged = 0;
+    report_desktop(0);
   }
   DXGI_OUTDUPL_FRAME_INFO fi;
   IDXGIResource *res = NULL;
@@ -717,6 +762,12 @@ static int encode_picture(int key, int kbps, float crf, int buf, uint8_t **au, s
 }
 
 static void encode(int key, int kbps, float crf, int buf) {
+  // no picture yet (the secure desktop since the start): nothing rather than black over the client's last picture
+  wait_first_picture();
+  if (!have_image && secure_shown > 0) {
+    record('S', NULL, 0, NULL, 0);
+    return;
+  }
   EnterCriticalSection(&state);
   int changed = dirty;
   double at = now_ms();
@@ -982,20 +1033,32 @@ int main(int argc, char **argv) {
   if (jpeg && gdi_grab()) return jpeg_frame(quality, ow, oh, crop, boxes, nboxes, 1);
   make_textures();
   HRESULT hr = duplicate();
-  if (FAILED(hr)) {
-    // E_ACCESSDENIED: the secure desktop now, or no interactive desktop at all (session 0); at start this is fatal
+  DWORD session = 0;
+  ProcessIdToSessionId(GetCurrentProcessId(), &session);
+  if (FAILED(hr) && (hr != E_ACCESSDENIED || session == 0)) {
+    // no interactive desktop at all (session 0: a service, ssh)
     fprintf(stderr, "yoyo-winvideo: the desktop can't be duplicated (0x%08lx): run in the signed-in user's session\n", (unsigned long)hr);
+    return 1;
+  }
+  if (FAILED(hr) && jpeg) {
+    fprintf(stderr, "yoyo-winvideo: %s is showing: no picture until it goes\n", secure_name(secure_kind()));
     return 1;
   }
   if (jpeg) return jpeg_frame(quality, ow, oh, crop, boxes, nboxes, 0);
 
+  // E_ACCESSDENIED in a signed-in session: the secure desktop is up (the hello still comes: the monitor's size is known)
+  if (FAILED(hr)) {
+    lost_logged = 1;
+    lost_at = now_ms();
+  }
+  report_desktop(FAILED(hr) ? secure_kind() : 0);
   uint8_t hello[5] = {(uint8_t)(width >> 8), (uint8_t)width, (uint8_t)(height >> 8), (uint8_t)height, 1};
   record('H', hello, 5, NULL, 0);
   // someone is watching: the display stays awake, and one asleep (it presents nothing: no picture) is woken
   SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
   // the first frame carries the picture and the pointer's shape: the client draws the pointer from the first part on
-  for (int i = 0; i < 25 && !have_image; i++) pump(10);
-  if (!have_image) {
+  for (int i = 0; i < 25 && !have_image && secure_shown <= 0; i++) pump(10);
+  if (!have_image && secure_shown <= 0) {
     fprintf(stderr, "yoyo-winvideo: no picture from the desktop yet (the display is asleep?); waking it\n");
     INPUT in = {0};
     in.type = INPUT_MOUSE;

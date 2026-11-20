@@ -38,10 +38,14 @@ export function streamPart({ boundary, contentType, body, size, seq, time, kind,
  * yoyo-x11video's records, from its stdout in chunks split anywhere: `{ type: "H", width, height, timer }` (`timer`:
  * the helper keeps time for the server — `T <ms> <id>` on its stdin, a `{ type: "T", id }` back; yoyo-winvideo), `{ type: "C" }`,
  * `{ type: "F", key, changed, time, number, au }` (`number`: the picture's, from a helper that keeps earlier pictures —
- * the hello's `refs` — else null), `{ type: "S" }`, `{ type: "P", x, y, serial, xhot, yhot, w, h, visible,
+ * the hello's `refs` — else null), `{ type: "S" }`, `{ type: "D", secure }` (yoyo-winvideo: what the secure desktop
+ * shows — SECURE_DESKTOP's names, null when the user's desktop does), `{ type: "P", x, y, serial, xhot, yhot, w, h, visible,
  * none, pixels? }` (the pointer, `--cursor client`; `pixels`: premultiplied RGBA). A record larger than `max` is a
  * broken helper: throws.
  */
+/** A 'D' record's byte → what shows on the secure desktop (0: nothing, the user's desktop shows). */
+export const SECURE_DESKTOP = Object.freeze([null, "admin-prompt", "sign-in", "other"]);
+
 export class RecordReader {
   constructor(max = 32 * 1024 * 1024) {
     this.max = max;
@@ -63,6 +67,7 @@ export class RecordReader {
         out.push({ type, width: body.readUInt16BE(0), height: body.readUInt16BE(2), timer: (flags & 1) !== 0, refs: (flags & 2) !== 0 });
       }
       else if (type === "C" || type === "S") out.push({ type });
+      else if (type === "D" && len >= 1) out.push({ type, secure: SECURE_DESKTOP[body[0]] ?? (body[0] ? "other" : null) });
       else if (type === "T" && len >= 4) out.push({ type, id: body.readUInt32BE(0) });
       else if (type === "F" && len > 9) {
         // flag 4: the picture's number (the helper's count of E commands) after the time

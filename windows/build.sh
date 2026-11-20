@@ -47,7 +47,7 @@ fi
 F=(-O2 -Wall -Wextra -Wno-unused-function -Wno-unused-parameter -Wno-missing-field-initializers -static -s -I$DEPS/include -L$DEPS/lib)
 cd $HERE
 # winvideo.c includes winhw.h (the GPU encoder: Media Foundation is loaded at run time, only its GUIDs are linked)
-$CC $F -Wno-missing-braces -o $OUT/yoyo-winvideo.exe winvideo.c -lx264 -ld3d11 -ldxgi -lole32 -loleaut32 -lwindowscodecs -lmfuuid -lstrmiids -ldxguid -luuid -lwinmm -lgdi32
+$CC $F -Wno-missing-braces -o $OUT/yoyo-winvideo.exe winvideo.c -lx264 -ld3d11 -ldxgi -lole32 -loleaut32 -lwindowscodecs -lmfuuid -lstrmiids -ldxguid -luuid -lwinmm -lgdi32 -lwtsapi32
 $CC $F -o $OUT/yoyo-winaudio.exe winaudio.c -lopus -lole32 -lwinmm -luuid -lksuser
 $CC $F -o $OUT/yoyo-winclip.exe winclip.c -lole32 -loleaut32 -lwindowscodecs -luuid -lshell32
 $CC $F -o $OUT/yoyo-winwindows.exe winwindows.c -ldwmapi

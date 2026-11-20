@@ -42,7 +42,7 @@ import { drawboxes, hitAnswer, maskBoxes, parseCrop, parseHide, parseVisible, pi
 
 /** `/status.app` of this process: "yoyo-linux", or "yoyo-windows" on Windows (platform.mjs). */
 export const APP = hostPlatform().app;
-export const VERSION = "0.11.3";
+export const VERSION = "0.11.4";
 /** The Yoyo Control HTTP API version this speaks (`/status` `api`; +1 only on an incompatible change). */
 export const API = 1;
 /** The one display's id (`/status` displays, `/stream`, `/input`). */
@@ -131,6 +131,11 @@ export class YoyoLinux {
     this.sizeAt = 0;
     this.sizeError = null;
     this.sizing = null;
+    /**
+     * What the secure desktop shows now, as the newest video helper said (Windows: `"admin-prompt"` — UAC's —,
+     * `"sign-in"`, `"other"`); null: the user's desktop (or a helper that never says: Linux).
+     */
+    this.secureDesktop = null;
     /** /frame captures running, and the ones waiting for a turn (FRAME_SLOTS at a time). */
     this.frames = { running: 0, waiting: [] };
     this.since = Date.now();
@@ -214,7 +219,7 @@ export class YoyoLinux {
     if (this.size && Date.now() - this.sizeAt < maxAgeMs) return this.size;
     if (!this.sizing) {
       this.sizing = (async () => {
-        const h = new VideoHelper({ path: this.videoHelper, fps: 1, env: this.env, log: this.log, spawnFn: this.spawn });
+        const h = new VideoHelper({ path: this.videoHelper, fps: 1, env: this.env, log: this.log, spawnFn: this.spawn, onDesktop: (s) => this.setSecureDesktop(s) });
         try {
           this.setSize(await Promise.race([h.ready, new Promise((_, rej) => setTimeout(() => rej(new Error("the video helper did not answer in 5 s")), 5000))]));
         } catch (err) {
@@ -239,6 +244,23 @@ export class YoyoLinux {
     this.size = size;
     this.sizeAt = Date.now();
     this.sizeError = null;
+  }
+
+  /** A video helper's 'D': the secure desktop came or went (`/status.console`, a `state` line on /events). */
+  setSecureDesktop(secure) {
+    if (secure === this.secureDesktop) return;
+    this.secureDesktop = secure;
+    this.log(secure ? `the secure desktop shows ${secure === "admin-prompt" ? "an administrator prompt" : secure === "sign-in" ? "the sign-in screen" : "something"}: no new pictures until it goes` : "the desktop is back");
+    this.publish({ type: "state", states: this.size ? [this.state()] : [], console: this.console() });
+  }
+
+  /**
+   * `/status.console`: the sign-in screen is the lock screen (`locked`); `secureDesktop` while the secure desktop shows
+   * (a Windows extension: `"admin-prompt"` | `"sign-in"` | `"other"`, an open set). Null without a display.
+   */
+  console() {
+    if (!this.size) return null;
+    return { locked: this.secureDesktop === "sign-in", ...(this.secureDesktop ? { secureDesktop: this.secureDesktop } : {}) };
   }
 
   /** The display can't be had (or changed under a helper): nothing known about it until it is asked again. */
@@ -284,7 +306,7 @@ export class YoyoLinux {
       session: { loggedIn: true },
       displays: [{ id: DISPLAY_ID, width, height, scale: 1, main: true, asleep: false, kind: "builtin", name: this.name }],
       states: [this.state()],
-      console: { locked: false },
+      console: this.console(),
     };
   }
 
@@ -400,7 +422,7 @@ export class YoyoLinux {
 
   eventsRoute(req, res) {
     res.writeHead(200, { "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache", Connection: "close" });
-    res.write(`${JSON.stringify({ type: "state", states: this.size ? [this.state()] : [], console: this.size ? { locked: false } : null })}\n`);
+    res.write(`${JSON.stringify({ type: "state", states: this.size ? [this.state()] : [], console: this.console() })}\n`);
     // the clipboard's summary right after it (then a line per change)
     const clip = this.clipboard.running ? this.clipboard.summary() : null;
     if (clip) res.write(`${JSON.stringify({ type: "clipboard", ...clip })}\n`);
@@ -583,7 +605,7 @@ export class YoyoLinux {
    * 'P', right after the hello). `done()` gives both back.
    */
   openHelper({ fps, cursor }) {
-    const helper = new VideoHelper({ path: this.videoHelper, fps, env: this.env, log: this.log, spawnFn: this.spawn, cursor });
+    const helper = new VideoHelper({ path: this.videoHelper, fps, env: this.env, log: this.log, spawnFn: this.spawn, cursor, onDesktop: (s) => this.setSecureDesktop(s) });
     this.streams.add(helper);
     const s = { helper, feed: null };
     if (cursor) {

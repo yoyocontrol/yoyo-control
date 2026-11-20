@@ -220,6 +220,52 @@ test("a display that can't be opened is `ok: false`; a new size (from the next h
   fake.state.size = [1280, 832];
 });
 
+test("the secure desktop (yoyo-winvideo's 'D'): `ok` stays, `console` says what shows, a state line on /events", async () => {
+  const { res, req } = await call("GET", "/events", { stream: true });
+  const got = [];
+  let buf = "";
+  res.setEncoding("utf8");
+  res.on("data", (s) => {
+    buf += s;
+    for (let i; (i = buf.indexOf("\n")) >= 0; buf = buf.slice(i + 1)) got.push(JSON.parse(buf.slice(0, i)));
+  });
+  const states = async (n) => {
+    for (let i = 0; i < 100 && got.filter((m) => m.type === "state").length < n; i++) await new Promise((r) => setTimeout(r, 10));
+    return got.filter((m) => m.type === "state");
+  };
+  try {
+    assert.deepEqual((await states(1))[0].console, { locked: false });
+    // a helper that starts on UAC's prompt still says the monitor's size
+    fake.state.secure = 1;
+    svc.sizeAt = 0;
+    const up = await call("GET", "/status");
+    assert.equal(up.json.ok, true);
+    assert.equal(up.json.displays.length, 1);
+    assert.deepEqual(up.json.console, { locked: false, secureDesktop: "admin-prompt" });
+    assert.deepEqual((await states(2))[1].console, { locked: false, secureDesktop: "admin-prompt" });
+    // input maps on: no helper started for it (none failed)
+    const helpers = fake.state.helpers.length;
+    assert.deepEqual((await call("POST", "/input", { body: { type: "click", x: 0.5, y: 0.5 } })).json, { ok: true });
+    assert.equal(fake.state.helpers.length, helpers);
+    // the sign-in screen is the lock screen
+    fake.state.secure = 2;
+    svc.sizeAt = 0;
+    assert.deepEqual((await call("GET", "/status")).json.console, { locked: true, secureDesktop: "sign-in" });
+    // the desktop is back: said once
+    fake.state.secure = 0;
+    svc.sizeAt = 0;
+    assert.deepEqual((await call("GET", "/status")).json.console, { locked: false });
+    svc.sizeAt = 0;
+    await call("GET", "/status");
+    const all = await states(4);
+    assert.equal(all.length, 4);
+    assert.deepEqual(all[3].console, { locked: false });
+  } finally {
+    fake.state.secure = null;
+    req.destroy();
+  }
+});
+
 /** Open a stream and collect its bytes: `parts()` parsed so far, `until(pred)`, `close()`. */
 async function openStream(path, headers = { accept: "application/vnd.yoyo-control.stream" }) {
   const { res, req } = await call("GET", path, { headers, stream: true });

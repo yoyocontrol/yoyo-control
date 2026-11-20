@@ -4,6 +4,7 @@
 // per-monitor DPI aware: pixels are physical pixels everywhere).
 #pragma once
 #include <windows.h>
+#include <wtsapi32.h>
 #include <fcntl.h>
 #include <io.h>
 #include <stdarg.h>
@@ -48,6 +49,22 @@ static int follow_input_desktop(desk_t *d, int *changed) {
 }
 
 static int desk_is_secure(const desk_t *d) { return d->h && _wcsicmp(d->name, L"Default") != 0; }
+
+// This process's session locked (1), not (0), or Windows won't say (-1): WTSSessionInfoEx's SessionFlags. Needs
+// wtsapi32. (Windows 7 / Server 2008 R2 had the two flags swapped; this needs Windows 10 1809 or newer anyway.)
+static int session_locked(void) {
+  LPWSTR buf = NULL;
+  DWORD n = 0;
+  if (!WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSSessionInfoEx, &buf, &n) || !buf) return -1;
+  int r = -1;
+  const WTSINFOEXW *x = (const WTSINFOEXW *)buf;
+  if (n >= sizeof *x && x->Level == 1) {
+    LONG f = x->Data.WTSInfoExLevel1.SessionFlags;
+    r = f == WTS_SESSIONSTATE_LOCK ? 1 : f == WTS_SESSIONSTATE_UNLOCK ? 0 : -1;
+  }
+  WTSFreeMemory(buf);
+  return r;
+}
 
 // ms since 1970 (UTC), sub-millisecond
 static double now_ms(void) {

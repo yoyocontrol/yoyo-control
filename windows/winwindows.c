@@ -4,6 +4,7 @@
 //
 //   yoyo-winwindows                 one shot: the top-level windows as one JSON object on stdout, then exit 0
 //   yoyo-winwindows --esc [--xtest] long-running: a line per Escape pressed (see below) until stdin ends
+//   yoyo-winwindows --session        long-running: whether this session is locked, a line now and one per change
 //
 // One shot. The top-level windows in Z order, bottom → top (EnumWindows gives top → bottom), only the visible ones
 // that are not cloaked (another virtual desktop's, a suspended Store app's), not click-through and have an area.
@@ -206,16 +207,48 @@ static int esc_watch(void) {
   return 0;
 }
 
+// ---- --session
+//
+// "L locked\n" / "L unlocked\n" (or "L unknown\n" when Windows won't say) at the start and on every change, asked every
+// 250 ms (WTSQuerySessionInformation's WTSSessionInfoEx: a local call, no window or message loop needed); exit 0 at
+// stdin's end. The lock screen is a property of the session, so this is right whether or not anything is captured.
+
+static volatile LONG stdin_done = 0;
+
+static DWORD WINAPI note_stdin_end(LPVOID unused) {
+  (void)unused;
+  while (in_byte() >= 0) {
+  }
+  InterlockedExchange(&stdin_done, 1);
+  return 0;
+}
+
+static int session_watch(void) {
+  CreateThread(NULL, 0, note_stdin_end, NULL, 0, NULL);
+  int last = -2;
+  while (!stdin_done) {
+    int now = session_locked();
+    if (now != last) {
+      const char *w = now == 1 ? "L locked\n" : now == 0 ? "L unlocked\n" : "L unknown\n";
+      write_all(w, strlen(w));
+      last = now;
+    }
+    Sleep(250);
+  }
+  return 0;
+}
+
 int main(int argc, char **argv) {
   helper_init();
-  int esc = 0;
+  int esc = 0, session = 0;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--esc")) esc = 1;
+    else if (!strcmp(argv[i], "--session")) session = 1;
     else if (!strcmp(argv[i], "--xtest")) count_injected = 1;
     else {
-      fprintf(stderr, "usage: yoyo-winwindows [--esc [--xtest]]\n");
+      fprintf(stderr, "usage: yoyo-winwindows [--esc [--xtest] | --session]\n");
       return 2;
     }
   }
-  return esc ? esc_watch() : one_shot();
+  return session ? session_watch() : esc ? esc_watch() : one_shot();
 }

@@ -50,8 +50,8 @@ cd $HERE
 $CC $F -Wno-missing-braces -o $OUT/yoyo-winvideo.exe winvideo.c -lx264 -ld3d11 -ldxgi -lole32 -loleaut32 -lwindowscodecs -lmfuuid -lstrmiids -ldxguid -luuid -lwinmm -lgdi32 -lwtsapi32
 $CC $F -o $OUT/yoyo-winaudio.exe winaudio.c -lopus -lole32 -lwinmm -luuid -lksuser
 $CC $F -o $OUT/yoyo-winclip.exe winclip.c -lole32 -loleaut32 -lwindowscodecs -luuid -lshell32
-$CC $F -o $OUT/yoyo-winwindows.exe winwindows.c -ldwmapi
-$CC $F -o $OUT/yoyo-wininput.exe wininput.c
+$CC $F -o $OUT/yoyo-winwindows.exe winwindows.c -ldwmapi -lwtsapi32
+$CC $F -o $OUT/yoyo-wininput.exe wininput.c -lwtsapi32
 # the secure-desktop broker (docs/BROKER.md): a service; with YOYO_BROKER_SIGN_KEY (a P-256 key's PEM) the package
 # carries broker\ — the broker and the two helpers it may start, a signed manifest and the key's public half. A build
 # without the key has no broker\ (the feature is absent: the server says not-installed).

@@ -97,6 +97,26 @@ Ctrl+Cmd+Q（要辅助功能权限）。显示器保持亮着。等锁上（≤ 
 
 两条成功后 `/status` 的 `console` 和 `/events` 的状态行立即反映结果（不等控制台监视那 1.5 s 的稳定时间，`docs/PROTOCOL.md`「连接状态」）。
 
+### Windows（yoyo-windows 0.13.0 起）
+
+同样的两个接口、同样的请求和回答，在 Windows 服务端的令牌端口上（`Authorization: Bearer <令牌>`；配对的手机经 Link 来是 404）。Linux 没有（404）。
+
+- **锁屏**：在这个用户的会话里跑 `rundll32 user32.dll,LockWorkStation`，等会话锁上（≤ 3 s）。`reason`：`timeout`、`failed`。
+- **解锁**：要安全桌面的代理（`docs/BROKER.md`）：只有它起的输入辅助程序（SYSTEM，在这个会话里）够得着登录界面。没有它（没装、没授权、
+  没准备好）：`{ ok: false, unlocked: false, reason: "no-secure-desktop" }`，一个字都不输。有它时，服务起一个那样的输入辅助程序，
+  把密码按 UTF-16 单元写进它的 stdin（`windows/wininput.c` 的 `unlock`；不进 argv、不进日志），它这样做：
+  1. 会话没锁：`already`，一个字都不输。
+  2. 挪一下指针（相对移动 1 像素再回来：叫醒睡着的显示器，什么也点不到），等 0.6 s。进不了此刻的输入桌面或会话不锁着了：
+     解开了就 `already`，否则 `no-secure-desktop`。（Windows 10 / 11 的锁屏和它的 PIN 框就在会话的 `Default` 桌面上，锁着时用户的程序
+     拿不到键盘；`Winlogon` 桌面是 UAC 和 Ctrl+Alt+Del 的。用户自己的输入进不了锁屏的 PIN 框，只有代理起的 SYSTEM 辅助程序能。）
+  3. 按一下 Ctrl（不打字的键）让锁屏的「幕布」（时钟）让开、露出 PIN / 密码框，等 1.3 s。
+  4. 一个单元一个单元地输，**每个之前都再看一次**会话还锁着：解开了就立刻停（`already`；进不了输入桌面了是 `interrupted`），
+     剩下的不会打进解开后桌面上的哪个窗口。数字用数字键（PIN 框认它），别的字符按 Unicode 打。
+  5. PIN 输完会自己登录：全是数字时等 3 s 看它解没解开（太早按回车会落到解开后的桌面上），否则等 0.4 s；仍在登录界面才按回车，再等 ≤ 6 s。
+  6. 解开了：`{ ok: true, unlocked: true }`；没解开：`wrong-password`——Windows 不给程序读失败的原因，按输错报，让调用方停手（PIN 输错几次会被锁住）。
+- 一次只跑一个；不重试。请求体照 Mac 的规矩查（`password` 是 1…1024 个 UTF-16 单元、没有控制字符，否则 400）。密码在 Node 里是一个
+  JS 字符串（清不掉，只活在这一个请求里），在辅助程序里用完清零。成功后 `console.locked` 立即是 false。
+
 ## 别处来的输入：`input-elsewhere`
 
 服务在跑、有辅助功能权限时，它看着这台 Mac 上所有的键盘 / 鼠标 / 触控板输入（按键、修饰键、各个键的按下 / 抬起 / 拖动、

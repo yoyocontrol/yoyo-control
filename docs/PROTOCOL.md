@@ -618,7 +618,7 @@ PRIMARY**（同一内容：Ctrl+V / Shift+Insert 和鼠标中键贴出来的一�
 `agentControl`。`esc: true` = 正在用 XInput 2 看这块 X 显示的键盘：不是 XTEST 发的 Esc（不带 Shift / Ctrl / Alt / Super）关掉自动化并在
 `/events` 写 `abort`；这个 Esc **不被吞掉**（前面的程序也收到）。本服务的 `/input` 与手机的键走 XTEST，不算。没有 XInput 2 时 `esc: false`。
 
-**没有的接口**（404）：`/console/unlock`、`/console/lock`（Mac 本机 socket 才有，`docs/LOCAL-API.md`「锁屏与解锁」）、`/focus`、`/control`（`--remote` 时配对的手机有）、`/app/windows`、`/app/screenshot`、
+**没有的接口**（404）：`/console/unlock`、`/console/lock`（Mac 本机 socket 和 Windows 的令牌端口才有，`docs/LOCAL-API.md`「锁屏与解锁」）、`/focus`、`/control`（`--remote` 时配对的手机有）、`/app/windows`、`/app/screenshot`、
 `/app/ax`、`/permissions/request`、`/remote*`。
 
 ## Windows 服务端
@@ -637,6 +637,9 @@ PRIMARY**（同一内容：Ctrl+V / Shift+Insert 和鼠标中键贴出来的一�
   `not-allowed`、`not-user`、`not-console`、`no-version`、`floor`、`signature`、`failed`：开放集合）。只有一块显示器。流最多 60 帧每秒
   （Linux 30）：有显卡编码器就由显卡编（H.264 High，BT.709 limited，同样的 Annex-B 访问单元），没有才用 x264；流开着时显示器不睡。
   `GET /frame` 的一张（0.10.2 起）取自 GDI 的合成桌面，不依赖有没有新的一帧呈现：静止的桌面、没开着流时也是当前的画面。
+- **锁屏**（0.13.0 起）：`console.locked` 是这个会话自己锁没锁（`yoyo-winwindows --session` 一直看着，`WTSSessionInfoEx` 的 SessionFlags），
+  不看有没有在截屏：没人看屏幕时锁上、解开，`/status` 和 `/events` 的状态行照样跟着变。本机的 `POST /console/lock` / `/console/unlock`
+  也有了（只给令牌的持有者，配对的手机是 404；`docs/LOCAL-API.md`「锁屏与解锁」的「Windows」）。
 - **输入**：`cmd` 修饰键当 Ctrl 发；键名同 Linux（也认 `insert`）；`type` 的每个字符按 Unicode 直接打（不经键盘布局与输入法），所以中文、
   emoji 都一样快。**粘贴键是 Ctrl+V**（客户端在 `platform: "windows"` 时用它）。输入进不了以管理员身份运行的窗口，除非服务本身也以管理员
   身份运行（安装脚本在管理员安装时这样设）。

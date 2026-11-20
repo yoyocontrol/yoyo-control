@@ -32,6 +32,7 @@ import { besideServer, hostPlatform, maxFpsFor } from "./platform.mjs";
 import { AUDIO, AudioCapture, audioCookie, audioPart } from "./audio.mjs";
 import { Automation, parseAutomation } from "./automation.mjs";
 import { Broker, DEFAULT_PIPE } from "./broker.mjs";
+import { checkPassword, WindowsConsole } from "./console.mjs";
 import { Clipboard, sendClipboardFile } from "./clipboard.mjs";
 import { CursorFeed, CursorShapes } from "./cursor.mjs";
 import { TUNING, limitedTuning, parsePlayoutReport } from "./flow.mjs";
@@ -43,7 +44,7 @@ import { drawboxes, hitAnswer, maskBoxes, parseCrop, parseHide, parseVisible, pi
 
 /** `/status.app` of this process: "yoyo-linux", or "yoyo-windows" on Windows (platform.mjs). */
 export const APP = hostPlatform().app;
-export const VERSION = "0.12.0";
+export const VERSION = "0.13.0";
 /** The Yoyo Control HTTP API version this speaks (`/status` `api`; +1 only on an incompatible change). */
 export const API = 1;
 /** The one display's id (`/status` displays, `/stream`, `/input`). */
@@ -171,6 +172,25 @@ export class YoyoLinux {
     this.windowsHelper = windowsHelper ?? besideServer(platform.helpers.windows);
     /** The windows helper could be started the last time it was (`features.windows`). */
     this.windowsOk = true;
+    /**
+     * Windows: the session's lock (console.mjs) — `/status.console.locked` whether or not anything is captured — and the
+     * local API's POST /console/lock, /console/unlock (the password typed through the broker's input helper).
+     */
+    this.winConsole =
+      platform.id === "windows"
+        ? new WindowsConsole({
+            windowsHelper: this.windowsHelper,
+            spawnFn: this.spawn,
+            env,
+            log: this.log,
+            inputHelper: async () => {
+              if (!this.broker) return null;
+              if (!this.broker.ready) await this.broker.probe(true);
+              return this.broker.ready ? this.broker.spawn("input") : null;
+            },
+            onChange: () => this.publish({ type: "state", states: this.size ? [this.state()] : [], console: this.console() }),
+          })
+        : null;
     this.automation = new Automation({ path: this.windowsHelper, env, spawnFn: this.spawn, log: this.log, onAbort: () => this.publish({ type: "abort", reason: "esc" }) });
     this.xdo = { pointer: null, keys: null };
     this.input = null;
@@ -189,6 +209,7 @@ export class YoyoLinux {
   listen(port, host) {
     this.clipboard.start();
     void this.broker?.probe(true);
+    this.winConsole?.start();
     return new Promise((resolve, reject) => {
       this.server.once("error", reject);
       this.server.listen(port, host, () => resolve(this.server.address()));
@@ -196,6 +217,7 @@ export class YoyoLinux {
   }
 
   close() {
+    this.winConsole?.stop();
     void this.remote?.stop();
     void this.link?.stop();
     this.linkAuthority?.detach();
@@ -289,7 +311,9 @@ export class YoyoLinux {
    */
   console() {
     if (!this.size) return null;
-    return { locked: this.secureDesktop === "sign-in", ...(this.secureDesktop ? { secureDesktop: this.secureDesktop } : {}) };
+    // Windows: the session's own lock when the watcher says it (the sign-in screen is also seen without a capture)
+    const locked = this.winConsole?.locked ?? this.secureDesktop === "sign-in";
+    return { locked, ...(this.secureDesktop ? { secureDesktop: this.secureDesktop } : {}) };
   }
 
   /** The display can't be had (or changed under a helper): nothing known about it until it is asked again. */
@@ -407,6 +431,16 @@ export class YoyoLinux {
         return this.inputRoute(req, res, client);
       case "POST /control":
         return this.controlRoute(req, res, client);
+      case "POST /console/lock":
+      case "POST /console/unlock": {
+        // Windows, and only for the token's holder (a program on this computer): never a paired phone
+        if (!this.winConsole || client.kind === "remote") return json(res, 404, { error: "not found" });
+        if (route === "POST /console/lock") return json(res, 200, await this.winConsole.lock());
+        const body = await readBody(req, 16 * 1024);
+        const bad = checkPassword(body);
+        if (bad) throw new InputError(bad);
+        return json(res, 200, await this.winConsole.unlock(body.password));
+      }
       case "GET /link/authority":
       case "POST /link/authority/answer":
       case "POST /link/control":

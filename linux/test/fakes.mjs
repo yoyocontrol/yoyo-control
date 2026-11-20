@@ -179,7 +179,11 @@ export function fakeSpawn({ width = 1280, height = 832 } = {}) {
   // `ffmpegMs`: how long a frame capture takes (`ffmpegRunning` / `ffmpegMax`: at once, now / at most)
   // `pointer`: the pointer the next cursor helpers report first (their 'P' after the hello)
   // `secure`: the 'D' byte the next helpers send before their hello (yoyo-winvideo's secure desktop; null: none)
-  const state = { xdotool: [], xdotools: [], helpers: [], encodes: [], ffmpegArgs: [], size: [width, height], noDisplay: false, ffmpegMs: 0, ffmpegRunning: 0, ffmpegMax: 0, secure: null, audioSpawns: [], audioHelpers: [], audioFails: false, clipHelpers: [], clipWrites: [], clipPng: null, clipStart: null, clipRefuse: false, windows: { screen: [width, height], active: 0, windows: [] }, windowsRuns: 0, windowsFail: false, escWatches: [], escFails: false, refs: false, forgets: [], pointer: { x: 640, y: 416, serial: 7, xhot: 1, yhot: 2, w: 4, h: 4 } };
+  const state = { xdotool: [], xdotools: [], helpers: [], encodes: [], ffmpegArgs: [], size: [width, height], noDisplay: false, ffmpegMs: 0, ffmpegRunning: 0, ffmpegMax: 0, secure: null, audioSpawns: [], audioHelpers: [], audioFails: false, clipHelpers: [], clipWrites: [], clipPng: null, clipStart: null, clipRefuse: false, windows: { screen: [width, height], active: 0, windows: [] }, windowsRuns: 0, windowsFail: false, escWatches: [], escFails: false, session: "unlocked", sessionWatches: [], locks: 0, lockIgnored: false, refs: false, forgets: [], pointer: { x: 640, y: 416, serial: 7, xhot: 1, yhot: 2, w: 4, h: 4 } };
+  state.setSession = (v) => {
+    state.session = v;
+    for (const p of state.sessionWatches) if (p.exitCode === null) p.stdout.write(`L ${v}\n`);
+  };
   const spawn = (path, args) => {
     if (path.endsWith("yoyo-x11video") && state.noDisplay) {
       const p = fakeProcess();
@@ -229,6 +233,23 @@ export function fakeSpawn({ width = 1280, height = 832 } = {}) {
         p.stdout.write(record("C"));
       });
       state.helpers.push(p);
+      return p;
+    }
+    if (args.includes("--session")) {
+      // Windows' session watcher: "L <state.session>" now, and again on every `setSession()`
+      const p = fakeProcess();
+      state.sessionWatches.push(p);
+      setImmediate(() => p.stdout.write(`L ${state.session}\n`));
+      return p;
+    }
+    if (path === "rundll32.exe") {
+      // LockWorkStation: the session locks (unless `lockIgnored`)
+      state.locks++;
+      const p = fakeProcess();
+      setImmediate(() => {
+        if (!state.lockIgnored) state.setSession("locked");
+        p.exit(0);
+      });
       return p;
     }
     if (path.endsWith("yoyo-x11windows") && args.includes("--esc")) {

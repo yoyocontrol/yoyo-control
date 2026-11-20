@@ -11,8 +11,8 @@
 | --- | --- |
 | `winvideo.c` | `yoyo-winvideo.exe`：DXGI 桌面复制（Desktop Duplication）看主显示器的变化与指针，收到命令才取最新的一张、画上指针、编一帧（BT.709 limited）——`linux/x11video.c` 的同一套参数、命令与记录；有显卡编码器就用它（`winhw.h`），没有才读回 CPU 用 x264；`--cursor client` 时指针走 `'P'` 记录；`--jpeg`：`/frame` 的一张（盖住、切、缩放，WIC 编 JPEG）；`--bench`：不要桌面的编码测速 |
 | `winhw.h` | `yoyo-winvideo.exe` 的显卡那条路：画面不离开显卡——显卡的视频处理器 BGRA → NV12，显卡自己的 H.264 编码器（NVENC / AMF / Quick Sync，经 Media Foundation 的硬件编码器，各家同一套代码）出一帧 |
-| `wininput.c` | `yoyo-wininput.exe`：读 `linux/input.mjs` 写给 xdotool 的那些行（`mousemove`、`click`、`key`、`keydown`…），用 SendInput 放出来；`U<hex>` 的字符按 Unicode 直接打 |
-| `winwindows.c` | `yoyo-winwindows.exe`：一次性列出顶层窗口（同 `x11windows.c` 的 JSON：程序名、窗口类、pid、类型、外框）；`--esc`：低级键盘钩子，用户按的 Esc 报一行 |
+| `wininput.c` | `yoyo-wininput.exe`：读 `linux/input.mjs` 写给 xdotool 的那些行（`mousemove`、`click`、`key`、`keydown`…），用 SendInput 放出来；`U<hex>` 的字符按 Unicode 直接打；`console` / `unlock`：锁屏的状态、在登录界面输密码（`docs/LOCAL-API.md`「锁屏与解锁」） |
+| `winwindows.c` | `yoyo-winwindows.exe`：一次性列出顶层窗口（同 `x11windows.c` 的 JSON：程序名、窗口类、pid、类型、外框）；`--esc`：低级键盘钩子，用户按的 Esc 报一行；`--session`：这个会话锁没锁，现在一行、每次变化一行（`console.locked`） |
 | `winclip.c` | `yoyo-winclip.exe`：剪贴板（格式监听，60 ms 去抖）：文件（CF_HDROP → file: URI）、PNG（"PNG" 或位图经 WIC 编）、文字（CF_UNICODETEXT）；写入文字、文件（+ 一张图） |
 | `winaudio.c` | `yoyo-winaudio.exe`：默认输出设备的 WASAPI 回环，重采样到 48 kHz 立体声，libopus 20 ms 一包（同 `pa-opus.c` 的记录） |
 | `common.h` | 辅助程序共用：墙钟、记录、stdin 的读线程、DPI 感知 |

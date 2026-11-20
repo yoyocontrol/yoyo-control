@@ -11,6 +11,11 @@
 //   key [--clearmodifiers] [--delay <ms>] <combo>…   each combo `ctrl+shift+a` pressed and released in turn
 //   sleep <seconds>
 //
+// And two of its own, for the lock screen (docs/LOCAL-API.md「锁屏与解锁」, Windows): `console` answers one line on stdout,
+// `console locked|unlocked|unknown <the input desktop's name, or ->`; `unlock` reads the next line — the password, its
+// UTF-16 units as `U<hex>` words — types it on the sign-in screen and answers `unlock <result>` (unlock_flow below).
+// Only through the broker (SYSTEM) does what it types reach the lock screen's PIN box.
+//
 // Keys are X keysym names (Return, BackSpace, Prior, F5, a, minus…, linux/input.mjs KEYS), the modifiers ctrl, alt,
 // shift, super; `U<hex>` is a Unicode character, typed as itself (KEYEVENTF_UNICODE: any language, no keyboard layout
 // or IME in between). The ⌘ of a Mac keyboard arrives as ctrl (input.mjs).
@@ -229,6 +234,110 @@ static void run(char *line) {
   }
 }
 
+// ---- the lock screen
+
+static void say(const char *s) { write_all(s, strlen(s)); }
+
+static void key_tap(WORD vk) {
+  vkey(vk, 0, 1);
+  vkey(vk, 0, 0);
+}
+
+// A pointer move there and back (relative: it wakes a sleeping display and lands on nothing).
+static void nudge(void) {
+  INPUT in[2] = {0};
+  in[0].type = in[1].type = INPUT_MOUSE;
+  in[0].mi.dx = 1;
+  in[1].mi.dx = -1;
+  in[0].mi.dwFlags = in[1].mi.dwFlags = MOUSEEVENTF_MOVE;
+  send(in, 2);
+}
+
+// The sign-in screen is in front: this session is locked and this process is on the input desktop of the moment. (On
+// Windows 10 / 11 that is the session's Default desktop: the lock screen and its PIN box are there while it is locked,
+// and nothing of the user's gets the keyboard; Winlogon's desktop is UAC's and Ctrl+Alt+Del's.) Only the broker's
+// SYSTEM helper is let through to the lock screen's box: this user's own input is refused there.
+static int on_lock_screen(desk_t *d) {
+  int changed = 0;
+  if (!follow_input_desktop(d, &changed)) return 0;
+  return session_locked() == 1;
+}
+
+static int wait_unlocked(int ms) {
+  for (int t = 0; t < ms; t += 100) {
+    if (session_locked() == 0) return 1;
+    Sleep(100);
+  }
+  return session_locked() == 0;
+}
+
+static void console_state(desk_t *d) {
+  int changed = 0;
+  int ok = follow_input_desktop(d, &changed);
+  int l = session_locked();
+  char name[64] = "-";
+  if (ok && !WideCharToMultiByte(CP_UTF8, 0, d->name, -1, name, sizeof name, NULL, NULL)) strcpy(name, "?");
+  char line[128];
+  snprintf(line, sizeof line, "console %s %s\n", l == 1 ? "locked" : l == 0 ? "unlocked" : "unknown", name);
+  say(line);
+}
+
+// Types `pw` on the sign-in screen. Before every unit it looks again that the sign-in screen is still in front, so
+// nothing of the password ever goes to a window of the user's desktop; it is never retried (Windows locks a PIN out after
+// a few wrong ones). Results: ok, already (not locked, or unlocked meanwhile by someone else: nothing more typed),
+// no-secure-desktop (the sign-in screen can't be reached: not through the broker), interrupted (the screen changed
+// midway, still locked), wrong-password (still locked after it: Windows says nothing a program can read about why).
+static const char *unlock_flow(desk_t *d, const unsigned *pw, int n) {
+  if (session_locked() == 0) return "already";
+  int changed = 0;
+  follow_input_desktop(d, &changed);
+  nudge();
+  Sleep(600);
+  if (!on_lock_screen(d)) return session_locked() == 0 ? "already" : "no-secure-desktop";
+  // the lock screen's curtain (the clock) gives way to the sign-in box with a key that types nothing
+  key_tap(VK_CONTROL);
+  Sleep(1300);
+  int digits = 1;
+  for (int i = 0; i < n; i++) {
+    if (!on_lock_screen(d)) return session_locked() == 0 ? "already" : "interrupted";
+    if (pw[i] >= '0' && pw[i] <= '9') {
+      key_tap((WORD)pw[i]);
+    } else {
+      digits = 0;
+      unicode(pw[i]);
+    }
+    Sleep(40);
+  }
+  // a PIN signs in by itself once complete (give it time: a Return after it would land on the user's desktop); a
+  // password takes Return
+  if (wait_unlocked(digits ? 3000 : 400)) return "ok";
+  if (!on_lock_screen(d)) return session_locked() == 0 ? "ok" : "interrupted";
+  key_tap(VK_RETURN);
+  if (wait_unlocked(6000)) return "ok";
+  return "wrong-password";
+}
+
+static void unlock_cmd(desk_t *d) {
+  static char pwl[8192];
+  static unsigned pw[1100];
+  int n = 0;
+  if (in_line(pwl, sizeof pwl)) {
+    for (char *t = strtok(pwl, " "); t && n < 1100; t = strtok(NULL, " ")) {
+      if (t[0] != 'U') continue;
+      unsigned long v = strtoul(t + 1, NULL, 16);
+      if (v > 0 && v <= 0xFFFF) pw[n++] = (unsigned)v;
+    }
+  }
+  SecureZeroMemory(pwl, sizeof pwl);
+  if (in_pos == in_have) SecureZeroMemory(in_buf, sizeof in_buf);
+  const char *r = n ? unlock_flow(d, pw, n) : "bad-request";
+  SecureZeroMemory(pw, sizeof pw);
+  fprintf(stderr, "yoyo-wininput: unlock: %s\n", r);
+  char line[64];
+  snprintf(line, sizeof line, "unlock %s\n", r);
+  say(line);
+}
+
 int main(void) {
   helper_init();
   char line[4096];
@@ -237,7 +346,9 @@ int main(void) {
     // the input desktop of the moment (UAC's prompt, the sign-in screen) when this process may open it
     int changed = 0;
     if (follow_input_desktop(&desk, &changed) && changed) fprintf(stderr, "yoyo-wininput: input goes to the %ls desktop\n", desk.name);
-    run(line);
+    if (!strcmp(line, "console")) console_state(&desk);
+    else if (!strcmp(line, "unlock")) unlock_cmd(&desk);
+    else run(line);
   }
   return 0;
 }

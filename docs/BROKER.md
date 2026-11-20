@@ -86,8 +86,12 @@ yoyo-broker.exe uninstall [--user <SID>]   提升后运行：去掉这个 SID；
 `features.secureDesktop`（准备好了为 true）和 `secureDesktopHelper: { ok, version? , reason? }`。安全桌面显示着时，`/windows`、`/hit` 是空的，
 `/frame?visible=` 整张遮住（窗口列表属于另一个桌面）。`YOYO_BROKER=off` 不用它，`YOYO_BROKER_PIPE` 换管道（测试）。
 
+## 解锁
+
+0.13.0 起，Windows 服务端的 `POST /console/unlock`（`docs/LOCAL-API.md`「锁屏与解锁」的「Windows」）经代理起一个输入辅助程序，在登录界面输
+密码 / PIN：代理这边什么都没变（还是 `input`，请求里没有密码；密码只在辅助程序的 stdin 上）。
+
 ## 还没有
 
-- 在登录界面自动输入密码解锁（Mac 的 `/console/unlock` 那样）：下一轮。现在登录界面能看、能点、能打字（手机上自己输 PIN）。
 - Ctrl+Alt+Del（`SendSAS`）：家用 Windows 的锁屏用不着，需要机器策略，不做。
 - 代码签名证书（Authenticode）：不需要；只有 Defender / SmartScreen 拦的时候才考虑（要花钱）。

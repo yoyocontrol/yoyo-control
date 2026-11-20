@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 import { besideServer, hostPlatform, maxFpsFor } from "./platform.mjs";
 import { AUDIO, AudioCapture, audioCookie, audioPart } from "./audio.mjs";
 import { Automation, parseAutomation } from "./automation.mjs";
+import { Broker, DEFAULT_PIPE } from "./broker.mjs";
 import { Clipboard, sendClipboardFile } from "./clipboard.mjs";
 import { CursorFeed, CursorShapes } from "./cursor.mjs";
 import { TUNING, limitedTuning, parsePlayoutReport } from "./flow.mjs";
@@ -42,7 +43,7 @@ import { drawboxes, hitAnswer, maskBoxes, parseCrop, parseHide, parseVisible, pi
 
 /** `/status.app` of this process: "yoyo-linux", or "yoyo-windows" on Windows (platform.mjs). */
 export const APP = hostPlatform().app;
-export const VERSION = "0.11.4";
+export const VERSION = "0.12.0";
 /** The Yoyo Control HTTP API version this speaks (`/status` `api`; +1 only on an incompatible change). */
 export const API = 1;
 /** The one display's id (`/status` displays, `/stream`, `/input`). */
@@ -112,7 +113,7 @@ async function readBody(req, max) {
  * stream. Exported for the tests (the server's own entry is at the bottom).
  */
 export class YoyoLinux {
-  constructor({ token, platform = hostPlatform(), name = platform.name, env = process.env, videoHelper, audioHelper, clipboardHelper, windowsHelper, xdotool, ffmpeg, maxKbps, maxFps, logLine = log, spawnFn = spawn, audioLingerMs }) {
+  constructor({ token, platform = hostPlatform(), name = platform.name, env = process.env, videoHelper, audioHelper, clipboardHelper, windowsHelper, xdotool, ffmpeg, maxKbps, maxFps, logLine = log, spawnFn = spawn, audioLingerMs, brokerConnect, brokerDir }) {
     // null: no token listener (remote access only)
     if (token !== null && (typeof token !== "string" || token.length < 16)) throw new Error("a token of at least 16 characters is needed");
     this.token = token === null ? null : Buffer.from(token);
@@ -127,6 +128,21 @@ export class YoyoLinux {
     this.maxFps = Math.min(Math.max(maxFps || maxFpsFor(platform, availableParallelism()) || 30, 1), TUNING.maxFPS);
     this.log = logLine;
     this.spawn = spawnFn;
+    /**
+     * Windows: the secure-desktop broker (broker.mjs, docs/BROKER.md) — when it is ready the video and input helpers run
+     * through it (SYSTEM in this session: UAC's prompt and the sign-in screen are seen and driven); else as before.
+     * `YOYO_BROKER=off` leaves it out; `YOYO_BROKER_PIPE` names another pipe.
+     */
+    this.broker =
+      platform.id === "windows" && env.YOYO_BROKER !== "off"
+        ? new Broker({ version: VERSION, packageDir: brokerDir ?? besideServer("broker"), pipe: env.YOYO_BROKER_PIPE || DEFAULT_PIPE, log: (l) => this.log(l), ...(brokerConnect ? { connect: brokerConnect } : {}) })
+        : null;
+    if (this.broker) {
+      // the input helpers already running were started without it (or with it): the next input starts them again
+      this.broker.onChange = () => {
+        for (const ch of Object.keys(this.xdo ?? {})) this.xdo[ch]?.kill();
+      };
+    }
     this.size = null;
     this.sizeAt = 0;
     this.sizeError = null;
@@ -172,6 +188,7 @@ export class YoyoLinux {
 
   listen(port, host) {
     this.clipboard.start();
+    void this.broker?.probe(true);
     return new Promise((resolve, reject) => {
       this.server.once("error", reject);
       this.server.listen(port, host, () => resolve(this.server.address()));
@@ -219,7 +236,7 @@ export class YoyoLinux {
     if (this.size && Date.now() - this.sizeAt < maxAgeMs) return this.size;
     if (!this.sizing) {
       this.sizing = (async () => {
-        const h = new VideoHelper({ path: this.videoHelper, fps: 1, env: this.env, log: this.log, spawnFn: this.spawn, onDesktop: (s) => this.setSecureDesktop(s) });
+        const h = new VideoHelper({ path: this.videoHelper, fps: 1, env: this.env, log: this.log, spawnFn: this.helperSpawn("video"), onDesktop: (s) => this.setSecureDesktop(s) });
         try {
           this.setSize(await Promise.race([h.ready, new Promise((_, rej) => setTimeout(() => rej(new Error("the video helper did not answer in 5 s")), 5000))]));
         } catch (err) {
@@ -246,11 +263,23 @@ export class YoyoLinux {
     this.sizeError = null;
   }
 
+  /**
+   * spawn() for the video helper (`role` "video": streams, the size, /frame) or the input helper ("input"): through the
+   * secure-desktop broker while it is ready, else here (and the broker is asked again, at most every 10 s).
+   */
+  helperSpawn(role) {
+    return (path, args, opts) => {
+      if (this.broker?.ready) return this.broker.spawn(role, role === "video" ? args : []);
+      if (this.broker) void this.broker.probe();
+      return this.spawn(path, args, opts);
+    };
+  }
+
   /** A video helper's 'D': the secure desktop came or went (`/status.console`, a `state` line on /events). */
   setSecureDesktop(secure) {
     if (secure === this.secureDesktop) return;
     this.secureDesktop = secure;
-    this.log(secure ? `the secure desktop shows ${secure === "admin-prompt" ? "an administrator prompt" : secure === "sign-in" ? "the sign-in screen" : "something"}: no new pictures until it goes` : "the desktop is back");
+    this.log(secure ? `the secure desktop shows ${secure === "admin-prompt" ? "an administrator prompt" : secure === "sign-in" ? "the sign-in screen" : "something"}${this.broker?.ready ? " (through the broker: seen and driven)" : ": no new pictures until it goes"}` : "the desktop is back");
     this.publish({ type: "state", states: this.size ? [this.state()] : [], console: this.console() });
   }
 
@@ -276,7 +305,7 @@ export class YoyoLinux {
    * window list (/windows, /hit, /frame?visible=: its helper could be started last time), automation (always).
    */
   async features() {
-    return { clipboard: this.clipboard?.running ?? false, audio: await this.audio.available(), cursor: true, focus: false, link: !!this.linkListener, windows: this.windowsOk, automation: true };
+    return { clipboard: this.clipboard?.running ?? false, audio: await this.audio.available(), cursor: true, focus: false, link: !!this.linkListener, windows: this.windowsOk, automation: true, ...(this.broker ? { secureDesktop: this.broker.ready } : {}) };
   }
 
   /** The link listener running now: remote access's, or the headless one (authority mode). */
@@ -297,6 +326,8 @@ export class YoyoLinux {
       // the uu Link binding and endpoint (docs/LINK.md「身份与信任」): while its listener runs
       ...(this.linkListener?.json() ? { link: this.linkListener.json() } : {}),
       ...(features ? { features } : {}),
+      // Windows: whether the secure desktop is seen and driven (the broker), and why not
+      ...(this.broker ? { secureDesktopHelper: this.broker.json() } : {}),
     };
     if (!this.size) return { ...base, ok: false, error: this.sizeError ?? "no display", session: { loggedIn: true }, displays: [], states: [], console: null };
     const [width, height] = this.size;
@@ -321,7 +352,7 @@ export class YoyoLinux {
   sendInput(lines, channel = "pointer") {
     let p = this.xdo[channel];
     if (!p || p.exitCode !== null || p.killed) {
-      p = this.spawn(this.xdotool, ["-"], { stdio: ["pipe", "ignore", "pipe"], env: this.env });
+      p = this.helperSpawn("input")(this.xdotool, ["-"], { stdio: ["pipe", "ignore", "pipe"], env: this.env });
       this.xdo[channel] = p;
       const proc = p;
       p.stdin.on("error", () => {});
@@ -493,6 +524,8 @@ export class YoyoLinux {
 
   /** The windows helper's answer now (windows.mjs; 503 when it can't be had). */
   readWindows() {
+    // the secure desktop shows: none of the user's windows is on the screen (a visible= mask covers it all)
+    if (this.secureDesktop && this.size) return Promise.resolve({ screen: [...this.size], active: 0, windows: [] });
     return readWindows({ path: this.windowsHelper, env: this.env, spawnFn: this.spawn, onSpawn: (ok) => (this.windowsOk = ok) });
   }
 
@@ -535,7 +568,7 @@ export class YoyoLinux {
         ? [this.videoHelper, ["--jpeg", String(quality), "--size", String(outW), String(outH), ...(crop ? ["--crop", cut.x, cut.y, cut.w, cut.h].map(String) : []), ...boxes.flatMap((b) => ["--box", b.x, b.y, b.w, b.h].map(String))]]
         : [this.ffmpeg, ["-hide_banner", "-loglevel", "error", "-f", "x11grab", "-draw_mouse", "1", "-video_size", `${w}x${h}`, "-i", this.env.DISPLAY ?? ":0", "-frames:v", "1", "-vf", [...drawboxes(boxes), ...(crop ? [`crop=${cut.w}:${cut.h}:${cut.x}:${cut.y}`] : []), `scale=${outW}:${outH}:flags=area`].join(","), "-q:v", String(q), "-f", "mjpeg", "pipe:1"]];
     const jpeg = await new Promise((resolve, reject) => {
-      const p = this.spawn(tool, args, { stdio: ["ignore", "pipe", "pipe"], env: this.env });
+      const p = (this.platform.frame === "helper" ? this.helperSpawn("video") : this.spawn)(tool, args, { stdio: ["ignore", "pipe", "pipe"], env: this.env });
       const out = [];
       let err = "";
       p.stdout.on("data", (d) => out.push(d));
@@ -605,7 +638,7 @@ export class YoyoLinux {
    * 'P', right after the hello). `done()` gives both back.
    */
   openHelper({ fps, cursor }) {
-    const helper = new VideoHelper({ path: this.videoHelper, fps, env: this.env, log: this.log, spawnFn: this.spawn, cursor, onDesktop: (s) => this.setSecureDesktop(s) });
+    const helper = new VideoHelper({ path: this.videoHelper, fps, env: this.env, log: this.log, spawnFn: this.helperSpawn("video"), cursor, onDesktop: (s) => this.setSecureDesktop(s) });
     this.streams.add(helper);
     const s = { helper, feed: null };
     if (cursor) {

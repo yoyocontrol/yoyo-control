@@ -1,6 +1,7 @@
 # Installs Yoyo Control for Windows from this folder (windows/README.md「安装」): the files into a program folder,
 # a scheduled task that starts it (yoyo-control.exe: the tray icon and the service) whenever the user signs in, and —
-# when run as administrator — the firewall rule that lets the iPhone reach uu Link on this network. Run again to update.
+# when run as administrator — the firewall rule that lets the iPhone reach uu Link on this network and the secure-desktop
+# broker (UAC's prompt and the sign-in screen seen and driven: docs/BROKER.md). Run again to update.
 #
 #   powershell -ExecutionPolicy Bypass -File install.ps1 [-User <name>] [-Dir <folder>] [-StateDir <folder>]
 #                                                        [-LocalPort <n>] [-NoStart]
@@ -79,6 +80,14 @@ if ($admin) {
   $node = Join-Path $Dir "node.exe"
   Get-NetFirewallRule -DisplayName "Yoyo Control (uu Link)" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
   New-NetFirewallRule -DisplayName "Yoyo Control (uu Link)" -Direction Inbound -Action Allow -Protocol UDP -Program $node -Profile Any | Out-Null
+  # the secure desktop (UAC's prompt, the sign-in screen) for this user: the broker service (docs/BROKER.md), when the
+  # package carries it (a build signed with a broker key)
+  $broker = Join-Path $Dir "broker\yoyo-broker.exe"
+  if (Test-Path $broker) {
+    $sid = (New-Object Security.Principal.NTAccount($User)).Translate([Security.Principal.SecurityIdentifier]).Value
+    & $broker install --user $sid
+    if ($LASTEXITCODE -ne 0) { Write-Host "The secure-desktop broker did not install (exit $LASTEXITCODE): UAC prompts stay out of reach." }
+  }
 } else {
   Write-Host "Not an administrator: no firewall rule. Windows asks once whether node.exe may use the network; allow it for private networks, or run this again as administrator."
 }

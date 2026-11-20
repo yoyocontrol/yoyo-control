@@ -412,17 +412,21 @@ static void protect_context(void) {
   }
 }
 
+// The input desktop this thread is on (duplicate() moves it; per thread: the start's and the capture thread's).
+static __thread desk_t thread_desk;
+static __thread int thread_desk_ok;
+
+// What the 'D' record says for the desktop this thread duplicates now: the secure desktop's kind when it is that one.
+static int desk_kind(void);
+
 static HRESULT duplicate(void) {
   if (dupl) {
     IDXGIOutputDuplication_Release(dupl);
     dupl = NULL;
   }
-  // the secure desktop (UAC, the lock screen) is its own desktop: follow the input desktop when allowed
-  HDESK in = OpenInputDesktop(0, FALSE, GENERIC_ALL);
-  if (in) {
-    SetThreadDesktop(in);
-    CloseDesktop(in);
-  }
+  // the secure desktop (UAC, the lock screen) is its own desktop: followed when this process may (the broker's SYSTEM
+  // helper), else a user's helper gets E_ACCESSDENIED there
+  thread_desk_ok = follow_input_desktop(&thread_desk, NULL);
   HRESULT hr = IDXGIOutput1_DuplicateOutput(output, (IUnknown *)dev, &dupl);
   if (FAILED(hr)) return hr;
   fresh_dupl = 1;
@@ -492,10 +496,13 @@ static const char *secure_name(int kind) {
   return kind == 1 ? "an administrator prompt (UAC)" : kind == 2 ? "the sign-in screen" : "the secure desktop";
 }
 
+static int desk_kind(void) { return thread_desk_ok && desk_is_secure(&thread_desk) ? secure_kind() : 0; }
+
 // A 'D' record when it says something new (never in --jpeg: stdout is the picture there).
 static void report_desktop(int kind) {
   if (jpeg_mode || kind == secure_shown) return;
-  if (kind > 0) fprintf(stderr, "yoyo-winvideo: %s is showing: no picture until it goes; the last picture stands\n", secure_name(kind));
+  if (kind > 0 && thread_desk_ok && desk_is_secure(&thread_desk)) fprintf(stderr, "yoyo-winvideo: %s is showing (followed: the picture goes on)\n", secure_name(kind));
+  else if (kind > 0) fprintf(stderr, "yoyo-winvideo: %s is showing: no picture until it goes; the last picture stands\n", secure_name(kind));
   else if (secure_shown > 0) fprintf(stderr, "yoyo-winvideo: the desktop is back\n");
   secure_shown = kind;
   uint8_t b = (uint8_t)kind;
@@ -521,7 +528,7 @@ static int pump(UINT ms) {
     }
     if (lost_logged && secure_shown <= 0) fprintf(stderr, "yoyo-winvideo: the desktop is back\n");
     lost_logged = 0;
-    report_desktop(0);
+    report_desktop(desk_kind());
   }
   DXGI_OUTDUPL_FRAME_INFO fi;
   IDXGIResource *res = NULL;
@@ -568,10 +575,31 @@ static void wait_first_picture(void) {
 // lock, and the encoding thread would stand still for as long. Every ms while frames come, every 4 ms on a still desktop.
 static DWORD WINAPI capture_thread(LPVOID unused) {
   (void)unused;
-  double frame_at = 0;
+  double frame_at = 0, desk_at = 0;
+  // onto the input desktop too (the start's duplication was made on the main thread's)
+  thread_desk_ok = follow_input_desktop(&thread_desk, NULL);
   for (;;) {
     if (pump(0)) frame_at = now_ms();
     else Sleep(now_ms() - frame_at < 250 ? 1 : 4);
+    // the input desktop moved (UAC's prompt came or went) and the duplication didn't say so: made again on it
+    if (thread_desk_ok && now_ms() - desk_at >= 500) {
+      desk_at = now_ms();
+      desk_t probe = thread_desk;
+      HDESK in = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+      if (in) {
+        wchar_t name[64] = {0};
+        DWORD need = 0;
+        GetUserObjectInformationW(in, UOI_NAME, name, sizeof name - sizeof *name, &need);
+        CloseDesktop(in);
+        if (wcscmp(name, probe.name) && dupl) {
+          EnterCriticalSection(&state);
+          IDXGIOutputDuplication_Release(dupl);
+          dupl = NULL;
+          lost_at = 0;
+          LeaveCriticalSection(&state);
+        }
+      }
+    }
   }
   return 0;
 }
@@ -1030,6 +1058,7 @@ int main(int argc, char **argv) {
   open_output();
   jpeg_mode = jpeg;
   // one picture: the composed desktop from GDI (a still desktop gives a new duplication nothing to show)
+  if (jpeg) thread_desk_ok = follow_input_desktop(&thread_desk, NULL);
   if (jpeg && gdi_grab()) return jpeg_frame(quality, ow, oh, crop, boxes, nboxes, 1);
   make_textures();
   HRESULT hr = duplicate();
@@ -1051,7 +1080,7 @@ int main(int argc, char **argv) {
     lost_logged = 1;
     lost_at = now_ms();
   }
-  report_desktop(FAILED(hr) ? secure_kind() : 0);
+  report_desktop(FAILED(hr) ? secure_kind() : desk_kind());
   uint8_t hello[5] = {(uint8_t)(width >> 8), (uint8_t)width, (uint8_t)(height >> 8), (uint8_t)height, 1};
   record('H', hello, 5, NULL, 0);
   // someone is watching: the display stays awake, and one asleep (it presents nothing: no picture) is woken
@@ -1106,8 +1135,17 @@ int main(int argc, char **argv) {
       double ms = 0;
       unsigned id = 0;
       if (line[0] == 'Q') goto done;
-      if (line[0] == 'E' && sscanf(line + 1, "%d %d %f %d", &key, &kbps, &crf, &buf) >= 2) encode(key, kbps, crf, buf);
-      else if (line[0] == 'T' && sscanf(line + 1, "%lf %u", &ms, &id) == 2) timer_due = now_ms() + (ms > 0 ? ms : 0) + 1e-6, timer_id = id;
+      if (line[0] == 'E' && sscanf(line + 1, "%d %d %f %d", &key, &kbps, &crf, &buf) >= 2) {
+        // in range: this process may run as SYSTEM (the broker's), its stdin is a boundary
+        if (kbps < 50) kbps = 50;
+        if (kbps > 200000) kbps = 200000;
+        if (!(crf >= 0 && crf <= 51)) crf = 23;
+        if (buf < 0 || buf > 1000000) buf = 0;
+        encode(key ? 1 : 0, kbps, crf, buf);
+      } else if (line[0] == 'T' && sscanf(line + 1, "%lf %u", &ms, &id) == 2) {
+        if (!(ms >= 0 && ms <= 60000)) ms = 0;
+        timer_due = now_ms() + ms + 1e-6, timer_id = id;
+      }
       else fprintf(stderr, "yoyo-winvideo: bad command \"%s\"\n", line);
     }
     if (r < 0) break;

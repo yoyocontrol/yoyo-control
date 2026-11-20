@@ -71,6 +71,9 @@ powershell -ExecutionPolicy Bypass -File install.ps1           # 给自己装：
   安全桌面另有 `D` 记录（hello 之前一条，之后每次变化一条：0 桌面、1 UAC 的提示、2 登录界面、3 别的；按这个会话里有没有
   `consent.exe` / `LogonUI.exe` 分）。启动时就在安全桌面上不算失败（以前以 1 退出，服务端就当没有显示器、每次输入都再起一个辅助程序）：
   照样发 hello（显示器的大小），没有画面前的 `E` 回 `S`。会话 0（服务、ssh）里仍以 1 退出。
+- 安全桌面的代理（`broker.c` → `yoyo-broker.exe`，0.12.0 起，`docs/BROKER.md`）：一个 SYSTEM 服务，在用户的会话里以 SYSTEM 起视频、输入两个
+  辅助程序，它们跟着输入桌面走，UAC 的提示和登录界面就能看、能点。装：`install.ps1` 以管理员运行，或 `broker\yoyo-broker.exe install --user <SID>`；
+  发布包要设 `YOYO_BROKER_SIGN_KEY`（P-256 私钥的 PEM）才带它。
 - 编码：**显卡编**（缺省）——画面留在显卡上，视频处理器转成 NV12，显卡的 H.264 编码器出一帧：2560×1440 一帧 3–5 ms，几乎不占 CPU
   （x264 读回 + 转色彩 + 编码要 20–30 ms，还吃满各个核）。码率、缓冲随 `E` 即时改；`crf` 在这里是码率控制可用的最低 QP（`crf − 3`）；
   关键帧只在 `E 1` 时出。没有硬件编码器（虚拟机、没有 Media Foundation 的 Windows N / Server）或它中途失败：改用 x264，stderr 有一行说明

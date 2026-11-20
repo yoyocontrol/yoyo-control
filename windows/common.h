@@ -12,6 +12,43 @@
 #include <stdlib.h>
 #include <string.h>
 
+// ---- the input desktop
+
+// The desktop that gets the keyboard and shows on the screen now: "Default", or "Winlogon" while UAC's prompt, the
+// sign-in screen or Ctrl+Alt+Del show (the secure desktop). A helper the secure-desktop broker started (SYSTEM, in the
+// user's session: docs/BROKER.md) may open either and follows it; a helper of the user may open only "Default".
+// Per thread (SetThreadDesktop is): the calling thread is moved onto it when it changed.
+typedef struct {
+  HDESK h;
+  wchar_t name[64];
+} desk_t;
+
+// 1: the calling thread is on the input desktop (`d->name` says which; `*changed` when it moved now); 0: it can't be
+// opened (a user's helper on the secure desktop) — the thread stays where it was.
+static int follow_input_desktop(desk_t *d, int *changed) {
+  if (changed) *changed = 0;
+  HDESK in = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+  if (!in) return 0;
+  wchar_t name[64] = {0};
+  DWORD need = 0;
+  GetUserObjectInformationW(in, UOI_NAME, name, sizeof name - sizeof *name, &need);
+  if (d->h && !wcscmp(name, d->name)) {
+    CloseDesktop(in);
+    return 1;
+  }
+  if (!SetThreadDesktop(in)) {
+    CloseDesktop(in);
+    return 0;
+  }
+  if (d->h) CloseDesktop(d->h);  // no thread of ours is on it any more
+  d->h = in;
+  wcscpy(d->name, name);
+  if (changed) *changed = 1;
+  return 1;
+}
+
+static int desk_is_secure(const desk_t *d) { return d->h && _wcsicmp(d->name, L"Default") != 0; }
+
 // ms since 1970 (UTC), sub-millisecond
 static double now_ms(void) {
   FILETIME ft;

@@ -52,6 +52,10 @@ $CC $F -o $OUT/yoyo-winaudio.exe winaudio.c -lopus -lole32 -lwinmm -luuid -lksus
 $CC $F -o $OUT/yoyo-winclip.exe winclip.c -lole32 -loleaut32 -lwindowscodecs -luuid -lshell32
 $CC $F -o $OUT/yoyo-winwindows.exe winwindows.c -ldwmapi
 $CC $F -o $OUT/yoyo-wininput.exe wininput.c
+# the secure-desktop broker (docs/BROKER.md): a service; with YOYO_BROKER_SIGN_KEY (a P-256 key's PEM) the package
+# carries broker\ — the broker and the two helpers it may start, a signed manifest and the key's public half. A build
+# without the key has no broker\ (the feature is absent: the server says not-installed).
+$CC $F -o $B/yoyo-broker.exe broker.c -lwtsapi32 -ladvapi32 -lbcrypt -lcrypt32
 $HOST-windres launcher.rc -O coff -o $B/launcher.res
 $CC $F -municode -mwindows -o $OUT/yoyo-control.exe launcher.c $B/launcher.res -lshell32 -lole32 -luuid
 
@@ -64,6 +68,14 @@ NAPI_SYS=$(cd $ROOT/link && cargo metadata --format-version 1 2>/dev/null | pyth
 $HOST-dlltool -d $LIBNODE/node.def -l $LIBNODE/libnode.a -D node.exe
 (cd $ROOT/link && LIBNODE_PATH=$LIBNODE CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$CC CC_x86_64_pc_windows_gnu=$CC \
   CXX_x86_64_pc_windows_gnu=$HOST-g++ AR_x86_64_pc_windows_gnu=$HOST-ar cargo build -q --release -p uu-link-node --target x86_64-pc-windows-gnu)
+
+if [[ -n ${YOYO_BROKER_SIGN_KEY:-} ]]; then
+  mkdir -p $OUT/broker
+  cp $B/yoyo-broker.exe $OUT/yoyo-winvideo.exe $OUT/yoyo-wininput.exe $OUT/broker/
+  node $HERE/sign-broker.mjs $YOYO_BROKER_SIGN_KEY $OUT/broker $VERSION $(cat $HERE/broker-floor)
+else
+  echo "build.sh: no YOYO_BROKER_SIGN_KEY: the package has no secure-desktop broker" >&2
+fi
 
 # ---- node.exe
 NODE_ZIP=$DEPS/src/node-v$NODE_VERSION-win-x64.zip

@@ -16,7 +16,10 @@
 // or IME in between). The ⌘ of a Mac keyboard arrives as ctrl (input.mjs).
 //
 // Runs in the signed-in user's session; input to a window of an elevated program needs this process elevated too
-// (Windows' UIPI), and the secure desktop (UAC, the lock screen) takes none. Exit 0 at stdin's end. stderr: log lines.
+// (Windows' UIPI), and the secure desktop (UAC, the lock screen) takes none — unless the secure-desktop broker started
+// it (SYSTEM in the user's session, docs/BROKER.md): then each command goes to the input desktop of the moment, the
+// secure one included. Its stdin is then a privilege boundary: every count and wait is capped. Exit 0 at stdin's end.
+// stderr: log lines.
 #define WIN32_LEAN_AND_MEAN
 #define _WIN32_WINNT 0x0A00
 #include <windows.h>
@@ -189,6 +192,8 @@ static void run(char *line) {
     int b = atoi(argv[i]);
     if (repeat < 1) repeat = 1;
     if (repeat > 200) repeat = 200;
+    if (delay < 0) delay = 0;
+    if (delay > 1000) delay = 1000;
     for (int r = 0; r < repeat; r++) {
       if (r && delay > 0) Sleep((DWORD)delay);
       button(b, 1);
@@ -205,6 +210,8 @@ static void run(char *line) {
       else if (!strcmp(argv[i], "--delay") && i + 1 < argc) delay = atoi(argv[++i]);
       else break;
     }
+    if (delay < 0) delay = 0;
+    if (delay > 1000) delay = 1000;
     // strtok is not reentrant: copy each combo first
     for (; i < argc; i++) {
       char c[64];
@@ -225,6 +232,12 @@ static void run(char *line) {
 int main(void) {
   helper_init();
   char line[4096];
-  while (in_line(line, sizeof line)) run(line);
+  desk_t desk = {0};
+  while (in_line(line, sizeof line)) {
+    // the input desktop of the moment (UAC's prompt, the sign-in screen) when this process may open it
+    int changed = 0;
+    if (follow_input_desktop(&desk, &changed) && changed) fprintf(stderr, "yoyo-wininput: input goes to the %ls desktop\n", desk.name);
+    run(line);
+  }
   return 0;
 }

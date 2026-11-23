@@ -17,7 +17,9 @@ import { DeviceStore, pairingLink } from "@yoyocontrol/remote/devices";
 const identity = loadOrCreateIdentity(home);                     // tls-key.der made there (0700 / 0600)
 const devices = new DeviceStore(`${home}/devices.json`);
 // the link listener signs its binding with identity.key; in its authenticate: "Pair <code>" → devices.pair(code, id,
-// name) then devices.authenticateLink(token, clientKey); "Bearer <token>" → devices.authenticateLink(token, clientKey)
+// name) then devices.authenticateLink(token, clientKey); "Bearer <token>" → devices.authenticateLink(token, clientKey);
+// "Ticket <ticket>" (a device of the computer's account, @yoyocontrol/account's redeem) → devices.admit(id, name,
+// clientKey, { acc, dev, tat, sx }); the account's list changed → devices.prune((g) => member.ticketValid(g))
 const signal = new SignalClient({ identity });
 signal.setLink({ id, key, sig, relays, direct });                // the binding, as the listener publishes it
 signal.start();

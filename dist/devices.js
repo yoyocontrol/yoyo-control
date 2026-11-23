@@ -2,7 +2,10 @@
 // `devices.json` (0600) with the paired devices and the SHA-256 of their tokens (each bound to the link key it first
 // came with), a one-time pairing code (128 bits, 5 min, used once, 10 wrong tries end it), at most 32 devices, and the
 // pairing link. Phones pair over the uu Link (`hello.credential = "Pair <code>"`: `pair`, then `authenticateLink`).
-// A product with its own credentials (tickets, sessions) doesn't need this.
+// Devices of the computer's account (docs/ACCOUNT-LIB.md) come in with a ticket instead of a code: `admit` gives them a
+// token the same way, marked with what it was given for (`grant`: the account, its device, when, until when), so that
+// it ends with the device's sign-in and goes when the account's list says so (`prune`).
+// A product with its own credentials (sessions) doesn't need this.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { writePrivate } from "./identity.js";
@@ -42,6 +45,10 @@ export class DeviceStore {
     get list() {
         return this.devices.map(({ tokenHash: _, linkKey: __, ...d }) => d);
     }
+    /** Whether `id` was paired here (with a code), not let in by an account's ticket. */
+    isPaired(id) {
+        return this.devices.some((d) => d.id === id && !d.account);
+    }
     get isEmpty() {
         return this.devices.length === 0;
     }
@@ -57,7 +64,8 @@ export class DeviceStore {
             return null;
         const hash = sha256hex(token);
         const d = this.devices.find((x) => safeEqual(x.tokenHash, hash));
-        if (!d)
+        // (a ticket's token ends with the device's sign-in at the account server)
+        if (!d || (d.account && d.account.sx * 1000 <= this.now()))
             return null;
         const t = this.now();
         const write = d.lastSeenAt === undefined || t - d.lastSeenAt >= SEEN_WRITE_EVERY_MS;
@@ -155,6 +163,42 @@ export class DeviceStore {
         this.onChange?.();
         return token;
     }
+    /**
+     * A device of this computer's account, its ticket taken (`grant`: what it was for): its token (shown once), bound to
+     * the link key `linkKey` it came with. Replaces whatever `id` had here — a pairing too: the device chose to come in
+     * by its account.
+     */
+    admit(id, name, linkKey, grant) {
+        if (!validDeviceId(id))
+            throw new PairError("bad-device", "device.id must be 8–64 of A–Z a–z 0–9 _ -");
+        const key = linkKey.toLowerCase();
+        if (!/^[0-9a-f]{64}$/.test(key))
+            throw new PairError("bad-device", "the link key must be 64 hex digits");
+        if (typeof grant?.acc !== "string" || typeof grant.dev !== "string" || !Number.isInteger(grant.tat) || !Number.isInteger(grant.sx))
+            throw new PairError("bad-device", "grant is { acc, dev, tat, sx }");
+        this.devices = this.devices.filter((d) => d.id !== id);
+        if (this.devices.length >= MAX_DEVICES)
+            throw new PairError("full", "too many devices");
+        const token = randomToken(32);
+        const t = this.now();
+        this.devices.push({ id, name: cleanName(name), pairedAt: t, lastSeenAt: t, tokenHash: sha256hex(token), linkKey: key, account: { acc: grant.acc, dev: grant.dev, tat: grant.tat, sx: grant.sx } });
+        this.save();
+        this.onChange?.();
+        return token;
+    }
+    /** The devices let in by an account whose grant no longer counts (`counts` says; a sign-in that ended always goes):
+     *  forgotten. How many went. */
+    prune(counts) {
+        const t = this.now();
+        const before = this.devices.length;
+        this.devices = this.devices.filter((d) => !d.account || (d.account.sx * 1000 > t && counts(d.account)));
+        const gone = before - this.devices.length;
+        if (gone) {
+            this.save();
+            this.onChange?.();
+        }
+        return gone;
+    }
     /** Forgets the device: its token stops working at once. false when it wasn't paired. */
     remove(id) {
         const before = this.devices.length;
@@ -168,7 +212,7 @@ export class DeviceStore {
     save() {
         const body = {
             version: 1,
-            devices: this.devices.map((d) => ({ id: d.id, name: d.name, pairedAt: d.pairedAt, ...(d.lastSeenAt !== undefined ? { lastSeenAt: d.lastSeenAt } : {}), tokenHash: d.tokenHash, ...(d.linkKey ? { linkKey: d.linkKey } : {}) })),
+            devices: this.devices.map((d) => ({ id: d.id, name: d.name, pairedAt: d.pairedAt, ...(d.lastSeenAt !== undefined ? { lastSeenAt: d.lastSeenAt } : {}), tokenHash: d.tokenHash, ...(d.linkKey ? { linkKey: d.linkKey } : {}), ...(d.account ? { account: d.account } : {}) })),
         };
         try {
             writePrivate(this.path, `${JSON.stringify(body, null, 2)}\n`);
@@ -186,7 +230,12 @@ function load(path) {
         return j.devices.flatMap((d) => {
             if (typeof d.id !== "string" || typeof d.tokenHash !== "string" || d.tokenHash.length !== 64 || typeof d.pairedAt !== "number")
                 return [];
-            return [{ id: d.id, name: typeof d.name === "string" ? d.name : d.id, pairedAt: d.pairedAt, ...(typeof d.lastSeenAt === "number" ? { lastSeenAt: d.lastSeenAt } : {}), tokenHash: d.tokenHash, ...(typeof d.linkKey === "string" && /^[0-9a-f]{64}$/.test(d.linkKey) ? { linkKey: d.linkKey } : {}) }];
+            const g = d.account;
+            const account = g && typeof g.acc === "string" && typeof g.dev === "string" && Number.isInteger(g.tat) && Number.isInteger(g.sx) ? { account: { acc: g.acc, dev: g.dev, tat: g.tat, sx: g.sx } } : {};
+            // (one that says it came by an account but cannot say how: not taken)
+            if (d.account !== undefined && !("account" in account))
+                return [];
+            return [{ id: d.id, name: typeof d.name === "string" ? d.name : d.id, pairedAt: d.pairedAt, ...(typeof d.lastSeenAt === "number" ? { lastSeenAt: d.lastSeenAt } : {}), tokenHash: d.tokenHash, ...(typeof d.linkKey === "string" && /^[0-9a-f]{64}$/.test(d.linkKey) ? { linkKey: d.linkKey } : {}), ...account }];
         });
     }
     catch {

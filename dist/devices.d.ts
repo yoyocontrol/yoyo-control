@@ -4,11 +4,21 @@ export declare const MAX_DEVICES = 32;
 /** An invitation's life (`invite`, docs/ACCOUNT.md「批准」), and how many may wait. */
 export declare const INVITE_TTL_MS: number;
 export declare const MAX_INVITES = 8;
+/** What a token given for an account's ticket was given for (@yoyocontrol/account `ticketValid` takes it as it is):
+ *  the account `acc`, its device `dev`, the ticket's time `tat` and the end of the device's sign-in `sx` (unix s). */
+export interface AccountGrant {
+    acc: string;
+    dev: string;
+    tat: number;
+    sx: number;
+}
 export interface Device {
     id: string;
     name: string;
     pairedAt: number;
     lastSeenAt?: number;
+    /** Came in with an account's ticket (not paired here): what for. Its token ends at `sx`. */
+    account?: AccountGrant;
 }
 export interface PairingCode {
     code: string;
@@ -36,6 +46,8 @@ export declare class DeviceStore {
     private invites;
     constructor(path: string, opts?: DeviceStoreOptions);
     get list(): Device[];
+    /** Whether `id` was paired here (with a code), not let in by an account's ticket. */
+    isPaired(id: string): boolean;
     get isEmpty(): boolean;
     /** The live pairing code, if any. */
     get pairingCode(): PairingCode | null;
@@ -68,6 +80,15 @@ export declare class DeviceStore {
      * its `linkKey`): its token (shown once). The code is used up.
      */
     pair(code: string, id: string, name: string, linkKey?: string): string;
+    /**
+     * A device of this computer's account, its ticket taken (`grant`: what it was for): its token (shown once), bound to
+     * the link key `linkKey` it came with. Replaces whatever `id` had here — a pairing too: the device chose to come in
+     * by its account.
+     */
+    admit(id: string, name: string, linkKey: string, grant: AccountGrant): string;
+    /** The devices let in by an account whose grant no longer counts (`counts` says; a sign-in that ended always goes):
+     *  forgotten. How many went. */
+    prune(counts: (grant: AccountGrant) => boolean): number;
     /** Forgets the device: its token stops working at once. false when it wasn't paired. */
     remove(id: string): boolean;
     private save;

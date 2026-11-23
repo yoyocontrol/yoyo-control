@@ -126,6 +126,9 @@ export interface ComputerSelf {
   origins: string[];
   /** The signaling service it waits for browsers' offers at (an origin): where a hosted web client sends its offer. */
   signal?: string | null;
+  /** What the product's own clients need to know of it (a JSON object of 2 KiB at most, opaque to the account server:
+   *  its own ids, its platform, how it proves who it is…), listed with it. */
+  info?: Record<string, unknown> | null;
 }
 
 export interface PendingJoin {
@@ -783,8 +786,8 @@ export class AccountMember {
 }
 
 function selfBody(s: ComputerSelf) {
-  // (`signal`: an account server from before the hosted web client ignores it)
-  return { name: s.name, fingerprint: s.fingerprint ?? null, relays: s.relays.slice(0, 4), direct: s.direct.filter((d) => d.length <= 64).slice(0, 16), origins: s.origins.slice(0, 16), signal: s.signal ?? null };
+  // (`signal`: an account server from before the hosted web client ignores it; `info`, one before 0.2.0)
+  return { name: s.name, fingerprint: s.fingerprint ?? null, relays: s.relays.slice(0, 4), direct: s.direct.filter((d) => d.length <= 64).slice(0, 16), origins: s.origins.slice(0, 16), signal: s.signal ?? null, ...(s.info !== undefined ? { info: s.info } : {}) };
 }
 
 export { TicketError };

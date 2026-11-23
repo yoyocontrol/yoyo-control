@@ -1,6 +1,6 @@
 {
   "name": "@yoyocontrol/account",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A computer's half of an account: join an account server, pin its owner, take its tickets, follow its signed revocation list",
   "type": "module",
   "license": "Apache-2.0",

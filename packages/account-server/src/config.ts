@@ -1,8 +1,10 @@
 // The account server's settings (docs/ACCOUNT-LIB.md), from the environment. Three of them say which IdP:
-// ACCOUNT_OIDC_ISSUER, ACCOUNT_OIDC_CLIENT_ID, ACCOUNT_OIDC_CLIENT_SECRET (or _FILE). Everything else has a default
+// ACCOUNT_OIDC_ISSUER, ACCOUNT_OIDC_CLIENT_ID, ACCOUNT_OIDC_CLIENT_SECRET (or _FILE); an app's native Sign in with Apple
+// (ACCOUNT_APPLE_AUDIENCES) is another way in, beside it or instead of it. Everything else has a default
 // except the server's own public origin. Pure: main.ts reads the environment and the secret file and hands them here.
 // A program that embeds the server builds an AccountConfig itself instead (its `services` are any it lends).
 import { Wire } from "@yoyocontrol/account";
+import { APPLE_ISSUER, type AppleClient } from "./apple.js";
 
 /**
  * One thing this server lends the computers of its accounts (GET /v1/computer/services), under `name` there. `fixed`:
@@ -39,8 +41,26 @@ export interface Allow {
   domains: string[];
 }
 
+/** An app's native Sign in with Apple (POST /v1/auth/apple): its identity token goes straight to this server. */
+export interface AppleSignIn {
+  /** The apps' bundle ids (the token's `aud` is one of them). */
+  audiences: string[];
+  /** The Sign in with Apple key: with it, an account deleted from the app has its Apple grant revoked (Apple's rule);
+   *  without it nothing is revoked. Its `clientId` is the first audience. */
+  client: AppleClient | null;
+}
+
+/** App Store subscriptions (POST /v1/entitlements/appstore): an app's StoreKit 2 transactions of these products. */
+export interface AppStoreEntitlements {
+  bundleId: string;
+  products: string[];
+}
+
 export interface AccountConfig {
+  /** The OpenID Connect provider's issuer; without one (an app's native Sign in with Apple alone), Apple's. */
   issuer: string;
+  /** Whether an OpenID Connect provider is set up (GET /v1/signin; false: only the native sign-ins). */
+  oidc: boolean;
   clientId: string;
   clientSecret: string;
   /** The account server's public origin, https://account.example.com (no path). */
@@ -74,6 +94,10 @@ export interface AccountConfig {
    *  `speech` (ACCOUNT_SPEECH_URL), `signal` (ACCOUNT_SIGNAL_URL + ACCOUNT_SIGNAL_KEY or _FILE: with the relay only,
    *  never its token) and `web` (the first of ACCOUNT_WEB_REDIRECTS' origin). */
   services: ServiceSpec[];
+  /** ACCOUNT_APPLE_AUDIENCES (+ ACCOUNT_APPLE_TEAM_ID, ACCOUNT_APPLE_KEY_ID, ACCOUNT_APPLE_KEY or _FILE): null = off. */
+  apple: AppleSignIn | null;
+  /** ACCOUNT_APPSTORE_BUNDLE_ID + ACCOUNT_APPSTORE_PRODUCTS: null = off. */
+  appstore: AppStoreEntitlements | null;
 }
 
 export class ConfigError extends Error {}
@@ -132,10 +156,11 @@ export function allowed(allow: Allow | null, issuer: string, claims: { sub: stri
 }
 
 /** Why this configuration must not start (an open IdP nobody narrowed), or null. */
-export function opennessProblem(cfg: Pick<AccountConfig, "issuer" | "allow" | "open">): string | null {
+export function opennessProblem(cfg: Pick<AccountConfig, "issuer" | "allow" | "open"> & { apple?: AppleSignIn | null }): string | null {
   if (cfg.allow || cfg.open) return null;
-  if (!OPEN_ISSUERS.some((re) => re.test(normalizeIssuer(cfg.issuer)))) return null;
-  return `${cfg.issuer} lets anyone sign in: set ACCOUNT_ALLOW (subs, or @domain) or, if anyone with an account there may have one here, ACCOUNT_OPEN=1`;
+  const issuer = cfg.apple ? APPLE_ISSUER : cfg.issuer;
+  if (!OPEN_ISSUERS.some((re) => re.test(normalizeIssuer(cfg.issuer)) || re.test(issuer))) return null;
+  return `${cfg.apple ? "Sign in with Apple" : cfg.issuer} lets anyone sign in: set ACCOUNT_ALLOW (subs, or @domain) or, if anyone with an account there may have one here, ACCOUNT_OPEN=1`;
 }
 
 /** An https origin and nothing after it (http for a loopback host: tests). */
@@ -145,22 +170,46 @@ function originOf(name: string, v: string): string {
   return u;
 }
 
+const BUNDLE_RE = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
+
+/** The native Sign in with Apple settings: the audiences, and (all three, or none) the key to revoke grants with. */
+function appleFromEnv(env: Record<string, string | undefined>, list: (k: string) => string[], keyFromFile?: string): AppleSignIn | null {
+  const audiences = list("ACCOUNT_APPLE_AUDIENCES");
+  const teamId = env.ACCOUNT_APPLE_TEAM_ID?.trim() ?? "";
+  const keyId = env.ACCOUNT_APPLE_KEY_ID?.trim() ?? "";
+  let key = env.ACCOUNT_APPLE_KEY?.trim() || keyFromFile?.trim() || "";
+  if (!audiences.length) {
+    if (teamId || keyId || key) throw new ConfigError("ACCOUNT_APPLE_TEAM_ID / _KEY_ID / _KEY without ACCOUNT_APPLE_AUDIENCES");
+    return null;
+  }
+  for (const a of audiences) if (!BUNDLE_RE.test(a)) throw new ConfigError(`ACCOUNT_APPLE_AUDIENCES: ${a} is not a bundle id`);
+  if (!teamId && !keyId && !key) return { audiences, client: null };
+  if (!/^[A-Z0-9]{10}$/.test(teamId) || !/^[A-Z0-9]{10}$/.test(keyId) || !key) throw new ConfigError("ACCOUNT_APPLE_TEAM_ID, ACCOUNT_APPLE_KEY_ID (10 of A-Z 0-9 each) and ACCOUNT_APPLE_KEY (or _FILE) go together");
+  // (the .p8 as it was downloaded, or that file's base64)
+  if (!key.includes("-----BEGIN")) key = Buffer.from(key, "base64").toString("utf8");
+  if (!key.includes("-----BEGIN PRIVATE KEY-----")) throw new ConfigError("ACCOUNT_APPLE_KEY is the .p8 (PEM, or its base64)");
+  return { audiences, client: { teamId, keyId, clientId: audiences[0]!, privateKey: key } };
+}
+
 const RELAY_TOKEN_RE = /^[A-Za-z0-9_-]{16,128}$/;
 
 /** `relayTokenFile` / `signalKeyFile`: read ACCOUNT_RELAY_TOKEN_FILE / ACCOUNT_SIGNAL_KEY_FILE as they are now (main.ts:
  *  again when the file changed). */
-export function configFromEnv(env: Record<string, string | undefined>, secretFromFile?: string, relayTokenFile?: () => string | null, signalKeyFile?: () => string | null): AccountConfig {
+/** `appleKeyFromFile`: ACCOUNT_APPLE_KEY_FILE's content (main.ts reads it). */
+export function configFromEnv(env: Record<string, string | undefined>, secretFromFile?: string, relayTokenFile?: () => string | null, signalKeyFile?: () => string | null, appleKeyFromFile?: string): AccountConfig {
   const need = (k: string) => {
     const v = env[k]?.trim();
     if (!v) throw new ConfigError(`${k} is needed`);
     return v;
   };
-  const issuer = normalizeIssuer(httpsUrl("ACCOUNT_OIDC_ISSUER", need("ACCOUNT_OIDC_ISSUER"), { path: true }));
-  const clientId = need("ACCOUNT_OIDC_CLIENT_ID");
-  const clientSecret = (env.ACCOUNT_OIDC_CLIENT_SECRET?.trim() || secretFromFile?.trim()) ?? "";
-  if (!clientSecret) throw new ConfigError("ACCOUNT_OIDC_CLIENT_SECRET (or ACCOUNT_OIDC_CLIENT_SECRET_FILE) is needed: the account server is a confidential client");
-  const publicUrl = httpsUrl("ACCOUNT_PUBLIC_URL", need("ACCOUNT_PUBLIC_URL"));
   const list = (k: string) => (env[k] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const apple = appleFromEnv(env, list, appleKeyFromFile);
+  const oidc = !!env.ACCOUNT_OIDC_ISSUER?.trim() || !apple;
+  const issuer = oidc ? normalizeIssuer(httpsUrl("ACCOUNT_OIDC_ISSUER", need("ACCOUNT_OIDC_ISSUER"), { path: true })) : APPLE_ISSUER;
+  const clientId = oidc ? need("ACCOUNT_OIDC_CLIENT_ID") : "";
+  const clientSecret = oidc ? ((env.ACCOUNT_OIDC_CLIENT_SECRET?.trim() || secretFromFile?.trim()) ?? "") : "";
+  if (oidc && !clientSecret) throw new ConfigError("ACCOUNT_OIDC_CLIENT_SECRET (or ACCOUNT_OIDC_CLIENT_SECRET_FILE) is needed: the account server is a confidential client");
+  const publicUrl = httpsUrl("ACCOUNT_PUBLIC_URL", need("ACCOUNT_PUBLIC_URL"));
   const appRedirects = list("ACCOUNT_APP_REDIRECTS");
   for (const r of appRedirects) {
     let u: URL;
@@ -236,8 +285,13 @@ export function configFromEnv(env: Record<string, string | undefined>, secretFro
     const url = new URL(webRedirects[0]).origin;
     services.push({ name: "web", kind: "fixed", value: () => ({ url }) });
   }
+  const appstoreBundle = env.ACCOUNT_APPSTORE_BUNDLE_ID?.trim();
+  const appstoreProducts = list("ACCOUNT_APPSTORE_PRODUCTS");
+  if (!!appstoreBundle !== appstoreProducts.length > 0) throw new ConfigError("ACCOUNT_APPSTORE_BUNDLE_ID and ACCOUNT_APPSTORE_PRODUCTS go together");
+  if (appstoreBundle && !BUNDLE_RE.test(appstoreBundle)) throw new ConfigError(`ACCOUNT_APPSTORE_BUNDLE_ID: ${appstoreBundle} is not a bundle id`);
   const cfg: AccountConfig = {
     issuer,
+    oidc,
     clientId,
     clientSecret,
     publicUrl,
@@ -247,7 +301,7 @@ export function configFromEnv(env: Record<string, string | undefined>, secretFro
     appRedirects,
     webRedirects,
     appleAppIds,
-    idpName: env.ACCOUNT_IDP_NAME?.trim() || new URL(issuer).host,
+    idpName: env.ACCOUNT_IDP_NAME?.trim() || (oidc ? new URL(issuer).host : "Apple"),
     serverName: env.ACCOUNT_SERVER_NAME?.trim() || new URL(publicUrl).host,
     dataDir: env.ACCOUNT_DATA_DIR?.trim() || "/data",
     host: env.ACCOUNT_HOST?.trim() || "127.0.0.1",
@@ -255,6 +309,8 @@ export function configFromEnv(env: Record<string, string | undefined>, secretFro
     trustProxy: flag("ACCOUNT_TRUST_PROXY"),
     wire,
     services,
+    apple,
+    appstore: appstoreBundle ? { bundleId: appstoreBundle, products: appstoreProducts } : null,
   };
   const open = opennessProblem(cfg);
   if (open) throw new ConfigError(open);

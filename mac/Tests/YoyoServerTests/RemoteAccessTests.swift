@@ -18,6 +18,29 @@ final class RemoteDevicesTests: XCTestCase {
 
     private func make() -> RemoteDevices { RemoteDevices(path: path, now: { [unowned self] in clock }) }
 
+    func testAnAccountsDeviceIsAdmittedForItsGrantAndGoesWithIt() throws {
+        let d = make()
+        let key = String(repeating: "ab", count: 32)
+        let now = Int(clock.timeIntervalSince1970)
+        let grant = AccountGrant(acc: "a_0123456789ab", dev: "d_0123456789ab", tat: now, sx: now + 3600)
+        let token = try d.admit(id: "phone-ipad-01", name: "iPad", linkKey: key, grant: grant)
+        XCTAssertEqual(d.list.first?.account, grant)
+        XCTAssertFalse(d.isPaired("phone-ipad-01"))
+        XCTAssertEqual(d.authenticateLink(token: token, key: key), .accepted(d.list[0]))
+        if case .otherKey = d.authenticateLink(token: token, key: String(repeating: "cd", count: 32)) {} else { XCTFail("bound to its key") }
+        XCTAssertEqual(RemoteDevices(path: path).list.first?.account, grant, "kept on disk")
+        let code = d.startPairing()
+        _ = try d.pair(code: code.code, id: "phone-paired-1", name: "iPhone")
+        XCTAssertTrue(d.isPaired("phone-paired-1"))
+        XCTAssertEqual(d.prune { _ in true }, 0)
+        XCTAssertEqual(d.prune { $0.dev != grant.dev }, 1)
+        XCTAssertEqual(d.list.map(\.id), ["phone-paired-1"])
+        let t2 = try d.admit(id: "phone-ipad-01", name: "iPad", linkKey: key, grant: grant)
+        clock = clock.addingTimeInterval(3601)
+        XCTAssertNil(d.authenticate(token: t2), "the sign-in's end is the token's")
+        XCTAssertEqual(d.prune { _ in true }, 1)
+    }
+
     func testPairOnceWithTheLiveCode() throws {
         let d = make()
         XCTAssertThrowsError(try d.pair(code: "x", id: "phone-0001", name: "iPhone")) { XCTAssertEqual($0 as? RemoteDevices.PairError, .badCode) }
@@ -217,24 +240,9 @@ final class RemoteListenerTests: XCTestCase {
         XCTAssertEqual(access.json["listening"] as? Bool, false)
     }
 
-    func testJoiningAnAccountSignsForItAndIsRemembered() throws {
-        XCTAssertTrue(access.json["account"] is NSNull)
-        XCTAssertThrowsError(try access.join(account: "not-an-account"))
-        let account = String(repeating: "0a", count: 16)
-        let statement = try access.join(account: account)
-        let fp = try XCTUnwrap(access.json["fingerprint"] as? String)
-        XCTAssertEqual(statement["fp"] as? String, String(fp.dropFirst("sha256:".count)))
-        XCTAssertEqual(statement["account"] as? String, account)
-        XCTAssertEqual(statement["serverId"] as? String, access.json["serverId"] as? String)
-        let key = try P256.Signing.PublicKey(x963Representation: try XCTUnwrap(Data(base64Encoded: statement["key"] as! String)))
-        let sig = try P256.Signing.ECDSASignature(rawRepresentation: try XCTUnwrap(Data(base64Encoded: statement["sig"] as! String)))
-        XCTAssertTrue(key.isValidSignature(sig, for: Data("yoyocontrol-account-v1:\(account):\(statement["fp"] as! String)".utf8)))
-        XCTAssertEqual(RemoteIdentity.fingerprint(ofKey: key.x963Representation), fp)
-        XCTAssertEqual(RemoteSettings.load(home + "/remote.json").account, account, "remembered")
-        XCTAssertEqual((access.json["account"] as? [String: Any])?["id"] as? String, account)
-        access.leaveAccount()
-        XCTAssertNil(RemoteSettings.load(home + "/remote.json").account)
-        XCTAssertTrue(access.json["account"] is NSNull)
+    func testNotInAnAccountAtFirst() throws {
+        XCTAssertEqual((access.json["account"] as? [String: Any])?["account"] is NSNull, true)
+        XCTAssertEqual(access.membership?.joined, false)
     }
 
     func testTurningItOffStopsTheListenerAndDirectIsRemembered() throws {

@@ -3,3 +3,4 @@
 // member computer's signed request). Never for anything real.
 export * from "./idp.js";
 export * from "./harness.js";
+export * from "./apple.js";

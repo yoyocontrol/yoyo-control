@@ -38,12 +38,13 @@
 | --- | --- | --- |
 | `@yoyocontrol/account-server`（`packages/account-server`） | 运营者的服务器 | 账号服务器本身：登录、目录、入场券、撤销名单、设备锁的链、服务、订阅、管理命令 |
 | `@yoyocontrol/account`（`packages/account`） | 电脑（Node：Linux、Windows 服务端，及任何 Node 写的服务）；借出服务的那一端 | 电脑这一半（`AccountMember`）：加入 / 退出、钉主人、验入场券和背书、跟撤销名单、取服务；服务验服务票（`ServiceKeys`） |
-| `YoyoServer` 里的 `AccountMembership` | 电脑（Mac） | 同上，Swift |
-| YoyoKit 的 `YoyoAccount` | iPhone / iPad | 登录、电脑清单、拿入场券、扫码添加电脑、锁钥匙和批准 |
+| `YoyoServer` 里的 `AccountMembership` | 电脑（Mac） | 同上，Swift，同一份成员文件；还没有：加入码、服务 |
+| YoyoKit 的 `YoyoAccount` | iPhone / iPad | `AccountClient`：通过 Apple 登录、电脑清单、入场券、加入钥匙、订阅、设备、退出、删除（还没有：扫码添加电脑、锁钥匙和批准） |
 | `@yoyocontrol/account-web`（`packages/account-web`） | 浏览器 | 网页的登录（会话绑在不可导出的设备钥匙上，每个请求签名）、清单、入场券 |
 
 电脑这一半给服务端的只是一个判断：「这个 hello 带的入场券（和背书）放不放行，放行的是账号里的哪部设备」，以及撤销名单变了时「哪些令牌作废」。
-令牌怎么发、存在哪仍是服务端自己的事（Mac / Linux 的 `devices.json`，或使用方自己的登录模块）。
+令牌怎么发、存在哪仍是服务端自己的事（Mac / Linux 的 `devices.json`：`RemoteDevices.admit` / `@yoyocontrol/remote` 的 `DeviceStore.admit` 发、
+`prune` 跟着名单删，或使用方自己的登录模块）。
 
 ## 账号服务器
 
@@ -55,17 +56,24 @@
 
 - `oidc`：任意 OpenID Connect（自己的、Keycloak、Google、微软……）：发现文档、授权码 + PKCE、nonce。账号 = `iss` + `sub`。
   谁都能注册的登录系统必须给 `allow`（`sub` 或 `@域名`）或明说 `open`。
-- `apple`：iOS 上的原生「通过 Apple 登录」（`ASAuthorization` 给的 identityToken 直接交给服务器验：Apple 的公钥、`aud` 在运营者给的 bundle id 里、nonce）。
-  Apple 也是 OIDC 提供方，网页走 `oidc` 那条。删除账号时撤销 Apple 授权（运营者给 Sign in with Apple 的钥匙才做）。
+- `apple`：iOS 上的原生「通过 Apple 登录」（`POST /v1/auth/apple { identityToken, nonce, name?, device }`：服务器验 Apple 的公钥、`aud` 在
+  `ACCOUNT_APPLE_AUDIENCES` 里、nonce 的 SHA-256）。只有它时不用配 OIDC（`/v1/signin` 404）。Apple 谁都能注册：要 `ACCOUNT_OPEN=1` 或 `ACCOUNT_ALLOW`。
+  Apple 也是 OIDC 提供方，网页走 `oidc` 那条（同一个 `iss` + `sub`，同一个账号）。删除账号时撤销 Apple 授权（`ACCOUNT_APPLE_TEAM_ID` +
+  `_KEY_ID` + `_KEY`，三个一起给才做）。
 - 设备拿到的会话：令牌只存 SHA-256；App 最长 90 天，网页 30 天且绑在设备钥匙上。
+- 删除账号（`DELETE /v1/me { authorizationCode? }`，账号自己的人）：撤销名单标记停用、列出它的电脑，账号删掉；不留墓碑（重新登录是新账号）。
+  管理员的 `remove` 留墓碑。
 
 **电脑加入**（都由那台电脑自己的 Link 钥匙签名证明它是谁）：
 
 - 加入码：电脑要一个码，显示二维码；已登录的设备扫码同意；电脑再确认一次是谁同意的（名字和登录系统里的编号），坐在电脑前的人说「是」才算。
 - 事先说好是谁（`expect`）：没有屏幕的电脑声明期望的账号，对的账号同意后自动确认。
 - 加入钥匙：管理员给某个账号造的一次性钥匙，电脑凭它直接加入。
-- 经已配对的设备：已经和电脑配对过的设备（经 Link，已有电脑自己的令牌）让电脑签一份「我加入账号 X」，交给账号服务器。用户登录后，App 把本机
+- 经已配对的设备：已经和电脑配对过的设备（经 Link，已有电脑自己的令牌）向账号服务器要一把一次性的加入钥匙（`POST /v1/join-keys`，
+  只给 App 的会话，10 分钟，同时最多 16 把），经它们之间的连接交给电脑，电脑凭它加入（和管理员的加入钥匙同一条路）。用户登录后，App 把本机
   配对过的电脑逐台这样加进来，什么都不用点。
+- 电脑说自己的时候可以带一个 `info`（JSON 对象，≤ 2 KiB，账号服务器不看）：产品自己的客户端要的东西（服务器编号、平台、怎么证明它是谁），
+  清单里原样给出（`ComputerSelf.info`）。
 
 **入场券**：`POST /v1/tickets { computer }` → EdDSA 签名的 JWT：`iss`、`sub`（账号）、`aud`（电脑的 Link id）、`dev`（设备 id、名字、公钥摘要）、
 `sx`（设备在账号服务器的登录何时到期）、`jti`，120 秒。电脑发的令牌从不超过 `sx`。凭入场券进来的设备不能再替别人出配对码。
@@ -85,8 +93,9 @@
 之后每 6 小时、自己的票快到期时），`AccountMember.services()` 按名字给出；电脑端的 `validServices` 只留完整的条目，使用方自己的规则
 （这个要跟着那个）用 `options.validServices` 加。
 
-**订阅**（可选，`entitlements`）：`appstore`：验 StoreKit 的交易 JWS（证书链到 Apple Root CA - G3、bundle id 和产品 id 由运营者给），一份订阅归最后上报的账号。
-结果放在账号的 `entitlements` 里给设备和运营者自己的服务看。以后加别的来源（网页支付）也是同一个位置。
+**订阅**（可选，`entitlements`）：`appstore`：`POST /v1/entitlements/appstore { jws }` 验 StoreKit 的交易 JWS（证书链到 Apple Root CA - G3、
+`ACCOUNT_APPSTORE_BUNDLE_ID` 和 `ACCOUNT_APPSTORE_PRODUCTS`），一份订阅归最后上报的账号。`GET /v1/me` 的 `entitlements.appstore`：
+`{ active, productId, expiresAt, sandbox }`（没撤销的里最久的那份）。以后加别的来源（网页支付）也是同一个位置。
 
 **签名钥匙**：Ed25519，第一次启动时生成；轮换时新钥匙由上一把背书，电脑只接受能从它钉住的公钥一路背书过来的。
 
@@ -106,9 +115,13 @@
 
 1. **账号服务器和 Node 的电脑端进库**：`packages/account-server`、`packages/account`（0.1.0，还没按 `git-dist.sh` 发布），以现有最完整的实现为底子，
    去掉具体产品的名字，测试跟着进来，另加电脑端对着真服务器的测试（`account-server/test/member.test.ts`）。（有，2026-11-22）
-2. **第一个使用方换成用库**：行为不变，证明库能直接用；之后那边不再有自己的账号代码。（没做）
-3. **Yoyo Control 自己换过来**：signal1 用 `account-server`（Apple 登录、Pro 订阅、锁默认开），Mac 的 `AccountMembership`、Linux / Windows 用 `@yoyocontrol/account`，
-   iOS 用 `YoyoAccount`；现有账号按 Apple 的 `sub` 保留，电脑由已配对的 iPhone 自动重新加入；现在的「定向码」批准换成设备锁的背书。（没做）
+2. **第一个使用方换成用库**：行为不变，证明库能直接用；之后那边不再有自己的账号代码。两个包发布为 `account-v0.1.0`、`account-server-v0.1.0`
+   （公开仓库的 tag）；那边用原来的命名空间，库、钥匙、电脑上的成员文件原样接着用；它的测试改用 `@yoyocontrol/account-server/testing`。（有，2026-11-22；
+   它的线上部署换镜像、重启还没做）
+3. **Yoyo Control 自己换过来**：`account.yoyocontrol.com`（relay1）跑 `account-server`（Apple 登录、Pro 订阅），Mac 的 `AccountMembership`、Linux / Windows
+   用 `@yoyocontrol/account`，iOS 用 `YoyoAccount`；电脑由已配对的 iPhone 自动加入（加入钥匙）；「定向码」批准删了。库为此加了 Apple 原生登录、
+   App 的加入钥匙、电脑的 `info`、App Store 订阅、自己删账号（0.2.0）。和 nest 一样先不开设备锁（入场券就够），锁在第 4 步。旧的 signal1 账号
+   只有一个测试账号、没有电脑，没有迁移。（有，2026-11-23；Mac / Linux / Windows / TestFlight 的新版本还没发）
 4. **设备锁**：链、背书、关锁密钥，账号服务器、电脑端、iOS、网页一起。（没做）
 5. **`account-web`**：网页的登录和清单。（没做）
 

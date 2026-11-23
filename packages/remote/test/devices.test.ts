@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -109,4 +109,34 @@ test("devices: an invitation pairs only its phone, from its link key, once, and 
   now += 10 * 60_000 + 1;
   assert.throws(() => s.pair(late.code, "phone-0004", "x", key), bad, "expired");
   assert.throws(() => s.invite("phone-0004", "nothex"), (e: PairError) => e.kind === "bad-device");
+});
+
+test("an account's device: admitted with its grant, its token bound to its link key, gone when the grant no longer counts or its sign-in ends", () => {
+  const dir = mkdtempSync(join(tmpdir(), "devices-acct-"));
+  let t = 1_000_000_000_000;
+  const store = new DeviceStore(join(dir, "devices.json"), { now: () => t });
+  const key = "ab".repeat(32);
+  const grant = { acc: "a_0123456789ab", dev: "d_0123456789ab", tat: t / 1000, sx: t / 1000 + 3600 };
+  const token = store.admit("phone-ipad-0001", "iPad", key, grant);
+  assert.deepEqual(store.list[0]!.account, grant);
+  assert.equal(store.isPaired("phone-ipad-0001"), false);
+  assert.equal(store.authenticateLink(token, key).kind, "accepted");
+  assert.equal(store.authenticateLink(token, "cd".repeat(32)).kind, "other-key");
+  // kept on disk as it is
+  assert.deepEqual(new DeviceStore(join(dir, "devices.json")).list[0]!.account, grant);
+  // a paired one is not touched by prune
+  store.startPairing();
+  store.pair(store.pairingCode!.code, "phone-paired-01", "iPhone");
+  assert.equal(store.isPaired("phone-paired-01"), true);
+  assert.equal(store.prune(() => true), 0);
+  assert.equal(store.prune((g) => g.dev !== grant.dev), 1);
+  assert.deepEqual(store.list.map((d) => d.id), ["phone-paired-01"]);
+  // the sign-in's end is the token's
+  const t2 = store.admit("phone-ipad-0001", "iPad", key, grant);
+  t += 3601_000;
+  assert.equal(store.authenticate(t2), null);
+  assert.equal(store.prune(() => true), 1);
+  assert.throws(() => store.admit("x", "x", key, grant), /device.id/);
+  assert.throws(() => store.admit("phone-ipad-0002", "x", "nothex", grant), /link key/);
+  rmSync(dir, { recursive: true, force: true });
 });

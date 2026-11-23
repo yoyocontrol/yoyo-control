@@ -6,8 +6,9 @@
 // - Runs while remote access listens (remote.mjs starts and stops it); UDP `port` (default 47820) on every interface.
 //   The link key is `<home>/link-key`, its binding signed with remote access's identity key: `/status` `link` and the
 //   signaling server's `{"type":"link", …}` carry it.
-// - Who enters: `Bearer <token>` of a paired device (bound to the first link key it comes with), or `Pair <code>` with
-//   the pairing code being shown (pairs, binds the key, hands the token back in `welcome.principal`).
+// - Who enters: `Bearer <token>` of a paired device (bound to the first link key it comes with), `Pair <code>` with
+//   the pairing code being shown (pairs, binds the key, hands the token back in `welcome.principal`), or `Ticket
+//   <ticket>` of a device of this computer's account (account.mjs: the same, by its account server's word).
 // - The router maps the UDP port (remote.mjs, with its port-mapping options); the mapped address and the `--advertise`
 //   ones go to the endpoint as external addresses (a container's own addresses are not where a phone reaches it).
 // - A lost picture costs a small one, not a key frame: the video helper keeps earlier pictures (x264enc.h), so a
@@ -262,6 +263,9 @@ export class LinkServer {
     }
     const pair = /^Pair\s+(\S+)\s*$/i.exec(r.hello?.credential ?? "");
     if (pair) return this.pair(pair[1], r, source ?? "?");
+    // a device of this computer's account (account.mjs): the ticket its account server signed for it
+    const ticket = /^Ticket\s+(\S+)\s*$/i.exec(r.hello?.credential ?? "");
+    if (ticket) return this.remote.account.redeem(ticket[1], r, source ?? "?");
     const m = /^Bearer\s+(\S+)\s*$/i.exec(r.hello?.credential ?? "");
     const a = this.remote.devices.authenticateLink(m?.[1], r.clientKey);
     if (a.kind === "unknown") return { ok: false, code: "unauthorized", message: "unknown device token" };
@@ -345,7 +349,7 @@ export class LinkServer {
       } catch {
         return res.json(400, { error: "body must be JSON" });
       }
-      const a = this.remote.accountRoute(route, parsed, device);
+      const a = await this.remote.accountRoute(route, parsed, device);
       return res.json(a.status, a.json);
     }
     if (!REMOTE_ROUTES.has(`${req.method.toUpperCase()} ${path}`)) return res.json(404, { error: `no such endpoint ${path}` });

@@ -14,7 +14,7 @@
 //   DISPLAY=:0 node server.mjs --host … --port … --link on --link-home <dir> [--link-port 47820] [--advertise ip[:port],…]
 //                              [--link-bind ip,…] < token
 //                              # uu Link without remote access: the token's holder is its authority (/link/*, link.mjs)
-//   node server.mjs pair --remote <home>        # a pairing link (and a QR code with qrencode); also devices, remove <id>, disconnect, account [leave]
+//   node server.mjs pair --remote <home>        # a pairing link (and a QR code with qrencode); also devices, remove <id>, disconnect, account [join|confirm|leave]
 //
 // The token is the first line of stdin, or of the file `--token-file` names (never argv or the environment: both are
 // readable by other processes of the machine). Env: YOYO_VIDEO_MAX_KBPS (bit-rate ceiling), YOYO_LINUX_MAX_FPS (default 30), YOYO_X11VIDEO (the video
@@ -44,7 +44,7 @@ import { drawboxes, hitAnswer, maskBoxes, parseCrop, parseHide, parseVisible, pi
 
 /** `/status.app` of this process: "yoyo-linux", or "yoyo-windows" on Windows (platform.mjs). */
 export const APP = hostPlatform().app;
-export const VERSION = "0.13.0";
+export const VERSION = "0.14.0";
 /** The Yoyo Control HTTP API version this speaks (`/status` `api`; +1 only on an incompatible change). */
 export const API = 1;
 /** The one display's id (`/status` displays, `/stream`, `/input`). */
@@ -881,7 +881,7 @@ function endpoint(value, name) {
   return { host: m[1], port: m[2] ? Number(m[2]) : undefined };
 }
 
-/** The commands that talk to a running server's admin socket: `pair`, `devices`, `remove <id>`, `disconnect`, `status`, `account [leave]`. */
+/** The commands that talk to a running server's admin socket: `pair`, `devices`, `remove <id>`, `disconnect`, `status`, `account [join|confirm|leave]`. */
 async function command(cmd, argv) {
   const home = arg(argv, "--remote");
   if (!home) throw new Error(`usage: node server.mjs ${cmd} --remote <home>${cmd === "remove" ? " <device id>" : ""}`);
@@ -940,13 +940,30 @@ async function command(cmd, argv) {
       ok(await adminCall(home, "POST", "/remote/disconnect"));
       return out("Control taken back.");
     case "account": {
-      // docs/ACCOUNT.md: an iPhone signed in to its account puts this computer there; `account leave` takes it out
-      if (argv.includes("leave")) {
+      // docs/ACCOUNT.md: a phone paired here and signed in to its account puts this computer there by itself; on the
+      // computer: `account join --key <key> <server>` (an admin's key), `account join <server>` (a code the account's
+      // phone approves) then `account confirm`, `account leave`
+      const words = argv.filter((a, i) => !a.startsWith("--") && argv[i - 1] !== "--remote" && argv[i - 1] !== "--key" && a !== "account");
+      const show = (j) => {
+        const a = j.account;
+        if (a?.pending?.state === "waiting") out(`Approve on the account's phone (Add a Computer): ${a.pending.userCode}\n${a.pending.qr}`);
+        if (a?.pending?.state === "approved") out(`Approved by ${a.pending.claimant?.account?.name ?? a.pending.claimant?.account?.id}${a.pending.claimant?.by ? ` (${a.pending.claimant.by})` : ""}: \`account confirm\` if that is you.`);
+        if (a?.pending?.state === "failed") out(`The join failed: ${a.pending.error}`);
+        if (a?.account) return out(`In the account of ${a.account.name ?? a.account.id} at ${a.account.server} since ${new Date(a.account.joinedAt).toISOString()}${a.account.disabled ? " (the account is disabled)" : ""}${a.error ? `; the account server: ${a.error}` : ""}. \`account leave\` takes it out.`);
+        if (!a?.pending) out("Not in an account. A phone paired with this computer and signed in to its account puts it there by itself.");
+      };
+      if (words[0] === "leave") {
         ok(await adminCall(home, "POST", "/remote/account/leave"));
-        return out("Left the account. Paired iPhones stay paired.");
+        return out("Left the account. Phones paired here stay paired; the account's other devices are let in no more.");
       }
-      const j = ok(await adminCall(home, "GET", "/remote"));
-      return out(j.account ? `In a Yoyo Control account since ${new Date(j.account.since).toISOString()} (\`account leave\` to leave it).` : "Not in a Yoyo Control account (an iPhone signed in to one puts it there).");
+      if (words[0] === "confirm") return show(ok(await adminCall(home, "POST", "/remote/account/confirm")));
+      if (words[0] === "join") {
+        const server = words[1];
+        if (!server) throw new Error("usage: node server.mjs account join --remote <home> [--key <join key>] <account server>");
+        const key = arg(argv, "--key");
+        return show(ok(await adminCall(home, "POST", "/remote/account/join", { server, ...(key ? { key } : {}) })));
+      }
+      return show(ok(await adminCall(home, "GET", "/remote")));
     }
   }
 }

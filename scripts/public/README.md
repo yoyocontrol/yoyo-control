@@ -18,8 +18,8 @@ and is not in this repository.
 | `mac/` | The Mac's screen service as a Swift library (`YoyoServer`: ScreenCaptureKit capture, CGEvent input, Core Audio → Opus, the clipboard, an HTTP API on a unix socket, the uu Link listener) and `yoyo-server`, the service on its own (`mac/README.md`) |
 | `linux/` | The Linux server (headless or a real X11 session): the same HTTP API and uu Link, Node + small C helpers (`linux/README.md`) |
 | `windows/` | The Windows server: the same server code with Windows helpers (DXGI capture, SendInput, WASAPI loopback, the clipboard), run in the signed-in user's desktop session (`windows/README.md`) |
-| `ios/YoyoKit/` | The iOS kits (root `Package.swift`): YoyoCore, YoyoScreen (the Screen page), YoyoClipboard, YoyoConnect, YoyoDirect, YoyoLink / YoyoLinkClient (`ios/README.md`) |
-| `packages/` | TypeScript kits: `@yoyocontrol/local`, `remote`, `link`, `link-web`, `screen-web`, `screen-ui`, `direct-web`, `portmap` |
+| `ios/YoyoKit/` | The iOS kits (root `Package.swift`): YoyoCore, YoyoScreen (the Screen page), YoyoClipboard, YoyoConnect, YoyoDirect, YoyoAccount (a device's side of an account server), YoyoLink / YoyoLinkClient (`ios/README.md`) |
+| `packages/` | TypeScript kits: `@yoyocontrol/local`, `remote`, `link`, `link-web`, `screen-web`, `screen-ui`, `direct-web`, `portmap`; accounts: `account-server` (sign-in, an account's computers and devices, tickets, revocations) and `account` (a computer's half), `docs/ACCOUNT-LIB.md` |
 | `link/` | uu Link's Rust core (iroh / QUIC, the media layer, WebRTC for browsers), with its Swift, Node and WebAssembly bindings |
 | `docs/` | The protocol (`PROTOCOL.md`), the local API (`LOCAL-API.md`), remote access (`REMOTE.md`), uu Link (`LINK.md`), relays and signaling (`RELAY.md`), the architecture (`ARCHITECTURE.md`). Mostly in Chinese |
 

@@ -20,6 +20,7 @@ export const PUSH_SERVICE = DEFAULT_WIRE.service("push");
 export const SPEECH_SERVICE = DEFAULT_WIRE.service("speech");
 import { Store } from "../store.js";
 import { TestIdp } from "./idp.js";
+import type { TestApple } from "./apple.js";
 
 export interface LinkKey {
   id: string;
@@ -49,16 +50,16 @@ export interface Harness {
 
 const running: Harness[] = [];
 
-export async function harness(o: { env?: Record<string, string>; limits?: Partial<Limits>; dbFile?: string; idp?: (idp: TestIdp) => void } = {}): Promise<Harness> {
+/** `apple`: a stand-in for Apple (identity tokens, StoreKit) — give ACCOUNT_APPLE_AUDIENCES in `env` too;
+ *  `appleFetch`: Apple's token endpoints, for revoking. `oidc: false`: no IdP (Apple only). */
+export async function harness(o: { env?: Record<string, string>; limits?: Partial<Limits>; dbFile?: string; idp?: (idp: TestIdp) => void; apple?: TestApple; appleFetch?: typeof fetch; oidc?: boolean } = {}): Promise<Harness> {
   const idp = await new TestIdp().start();
   o.idp?.(idp);
   const server: Server = createServer();
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const cfg = configFromEnv({
-    ACCOUNT_OIDC_ISSUER: idp.issuer,
-    ACCOUNT_OIDC_CLIENT_ID: idp.clientId,
-    ACCOUNT_OIDC_CLIENT_SECRET: idp.clientSecret,
+    ...(o.oidc === false ? {} : { ACCOUNT_OIDC_ISSUER: idp.issuer, ACCOUNT_OIDC_CLIENT_ID: idp.clientId, ACCOUNT_OIDC_CLIENT_SECRET: idp.clientSecret }),
     ACCOUNT_PUBLIC_URL: url,
     ACCOUNT_APP_REDIRECTS: "example://account",
     ...o.env,
@@ -70,7 +71,11 @@ export async function harness(o: { env?: Record<string, string>; limits?: Partia
   const clock = { t: null as number | null };
   const now = () => clock.t ?? Date.now();
   const oidc = new OidcClient(cfg);
-  const svc = new AccountService({ cfg, store, idp: oidc, ring, limits: o.limits ?? {}, now, log: (l) => logs.push(l), deliver: (n) => void notices.push(n) });
+  const svc = new AccountService({
+    cfg, store, idp: o.oidc === false ? null : oidc, ring, limits: o.limits ?? {}, now, log: (l) => logs.push(l), deliver: (n) => void notices.push(n),
+    ...(o.apple ? { appleKeys: o.apple.keys, storeKit: o.apple.storeKit } : {}),
+    ...(o.appleFetch ? { appleFetch: o.appleFetch } : {}),
+  });
   const recheck = new Rechecker(store, oidc, { now, log: (l) => logs.push(l), onEnded: (s) => svc.sessionEnded(s) });
   server.on("request", svc.handle);
   const h: Harness = {
@@ -133,6 +138,15 @@ export async function appSignIn(h: Harness, o: { device?: Record<string, unknown
 }
 
 /** A computer starts a join. */
+/** An app's native Sign in with Apple through the stand-in (`h` made with `apple`): its device session. */
+export async function appleSignIn(h: Harness, apple: TestApple, o: { sub?: string; name?: string; email?: string; device?: Record<string, unknown>; aud?: string } = {}) {
+  const nonce = randomBytes(16).toString("base64url");
+  const aud = o.aud ?? h.cfg.apple?.audiences[0] ?? "com.example.app";
+  const r = await post(`${h.url}/v1/auth/apple`, { identityToken: apple.token({ sub: o.sub ?? "apple-alice", nonce, aud, ...(o.email ? { email: o.email } : {}) }), nonce, ...(o.name ? { name: o.name } : {}), device: o.device ?? { name: "iPhone", platform: "ios" } });
+  if (r.status !== 200) throw new Error(`Apple sign-in: ${r.status} ${await r.text()}`);
+  return (await r.json()) as { session: string; account: { id: string; name: string | null }; device: { id: string } };
+}
+
 export async function enroll(h: Harness, k: LinkKey, extra: Record<string, unknown> = {}) {
   const r = await post(`${h.url}/v1/computers/enroll`, { linkId: k.id, name: "Study PC", fingerprint: "sha-256 AB:CD:EF:01:23", relays: ["https://relay.example.com/?token=t0k"], ...extra });
   return { status: r.status, body: (await r.json()) as { device_code: string; user_code: string; qr: string; interval: number; error?: string } };

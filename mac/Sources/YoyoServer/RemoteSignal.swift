@@ -15,10 +15,6 @@ import Foundation
 /// A browser's WebRTC offer (docs/RELAY.md「WebRTC」) arrives as `{ type: "rtc", id, offer, from? }`; the link
 /// listener answers it (`LinkRtcSignaling`) and the answer goes back as `{ type: "rtc-answer", id, answer }`, or
 /// `{ type: "rtc-error", id, status, message }`.
-///
-/// The account this Mac is in (docs/ACCOUNT.md, nil: none) goes as `{ type: "account", id }` after `ready` and when
-/// it changes; the room answers `{ type: "account", state: "linked" | "unlinked" }` (and says "unlinked" whenever a
-/// phone takes the Mac out of the account's directory): `onUnlinked` then.
 final class RemoteSignal: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
     static let pingInterval: TimeInterval = 30
     static let pongTimeout: TimeInterval = 45
@@ -46,11 +42,8 @@ final class RemoteSignal: NSObject, URLSessionWebSocketDelegate, @unchecked Send
     private var lastPong = Date()
     private var pinger: DispatchSourceTimer?
     private var _link: [String: Any]?
-    private var _account: String?
     /// Called on the queue when `isRegistered` changes.
     var onChange: (() -> Void)?
-    /// Called on the queue when the room says this Mac isn't in the account it named.
-    var onUnlinked: (() -> Void)?
 
     init(key: P256.Signing.PrivateKey, base: URL) {
         self.key = key
@@ -102,29 +95,6 @@ final class RemoteSignal: NSObject, URLSessionWebSocketDelegate, @unchecked Send
                 if isRegistered, let task = control, let m = Self.linkMessage(newValue) { task.send(.string(m)) { _ in } }
             }
         }
-    }
-
-    /// The account told to the room (nil: none); sent again when it changes.
-    var account: String? {
-        get { queue.sync { _account } }
-        set {
-            queue.async { [self] in
-                guard _account != newValue else { return }
-                _account = newValue
-                if isRegistered, let task = control { sendAccount(task) }
-            }
-        }
-    }
-
-    private func sendAccount(_ task: URLSessionWebSocketTask) {
-        task.send(.string(Self.accountMessage(_account))) { _ in }
-    }
-
-    /// `{"id":…,"type":"account"}` (`"id":null` for none).
-    static func accountMessage(_ id: String?) -> String {
-        let body: [String: Any] = ["type": "account", "id": id ?? NSNull()]
-        let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
-        return String(decoding: data, as: UTF8.self)
     }
 
     /// `{"direct":[…],"id":…,"key":…,"relays":[…],"sig":…,"type":"link"}` (keys sorted); nil without a link.
@@ -187,16 +157,10 @@ final class RemoteSignal: NSObject, URLSessionWebSocketDelegate, @unchecked Send
             setRegistered(true)
             startPinging(task)
             sendLink(task)
-            sendAccount(task)
             log("remote: signal: registered (\(base.host() ?? "?"))")
         case "rtc":
             guard let id = json["id"] as? String, id.count == 32, id.allSatisfy(\.isHexDigit) else { return }
             answerRtc(id: id, offer: json["offer"], from: json["from"] as? String, task)
-        case "account":
-            if json["state"] as? String == "unlinked", _account != nil {
-                _account = nil
-                onUnlinked?()
-            }
         default:
             break
         }

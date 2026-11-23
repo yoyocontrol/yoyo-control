@@ -12,6 +12,13 @@ ACCOUNT_DATA_DIR=/data yoyo-account-server          # listens on 127.0.0.1:4490 
 yoyo-account-admin accounts                          # the same environment: list, join-key, disable, rotate-key…
 ```
 
+An app that signs in natively with Apple needs no IdP at all: `ACCOUNT_APPLE_AUDIENCES=<bundle ids>` (+ `ACCOUNT_OPEN=1`),
+`POST /v1/auth/apple { identityToken, nonce, name?, device }`; with `ACCOUNT_APPLE_TEAM_ID` / `_KEY_ID` / `_KEY` (the Sign in with Apple
+.p8) a deleted account's grant is revoked (`DELETE /v1/me { authorizationCode }`). App Store subscriptions: `ACCOUNT_APPSTORE_BUNDLE_ID`
++ `ACCOUNT_APPSTORE_PRODUCTS`, `POST /v1/entitlements/appstore { jws }`, `GET /v1/me`'s `entitlements`. A signed-in app gets a one-use join
+key for a computer it is paired with (`POST /v1/join-keys`); a computer may say what its product's clients need of it (`info`, listed as
+it is).
+
 All settings are in `src/main.ts`'s header (`config.ts` reads them); `ACCOUNT_NAMESPACE` names everything on the wire
 (default `yoyo`; computers use the same with `@yoyocontrol/account`). An IdP anyone can sign up at needs
 `ACCOUNT_ALLOW` (subs or `@domain`) or `ACCOUNT_OPEN=1`.
@@ -26,8 +33,9 @@ const svc = new AccountService({ cfg, store, ring, idp: new OidcClient(cfg) });
 http.createServer(svc.handle).listen(cfg.port, cfg.host);
 ```
 
-Testing against it: `@yoyocontrol/account-server/testing` has a stand-in OpenID provider (`TestIdp`) and a whole server on
-loopback (`harness()`, with `appSignIn`, `joinComputer`, `computerCall`, `linkKey`…; `h.cfg.wire` is its namespace).
+Testing against it: `@yoyocontrol/account-server/testing` has a stand-in OpenID provider (`TestIdp`), a stand-in Apple (`TestApple`:
+identity tokens, StoreKit transactions) and a whole server on loopback (`harness()`, with `appSignIn`, `appleSignIn`, `joinComputer`,
+`computerCall`, `linkKey`…; `h.cfg.wire` is its namespace). `scripts/interop.mjs` runs one for another language's tests (the Mac's).
 Trying things out: `yoyo-account-dev [--port 4490] [--data <dir>] [--join-keys 2] [--namespace …] [--app-redirect …]`
 runs one in front of the stand-in provider, which signs in "Alice" by itself — never for anything real.
 

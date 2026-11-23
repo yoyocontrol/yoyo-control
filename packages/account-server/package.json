@@ -1,6 +1,6 @@
 {
   "name": "@yoyocontrol/account-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "An account server: OpenID Connect sign-in, an account's computers and devices, tickets into each computer, a signed revocation list",
   "type": "module",
   "license": "Apache-2.0",
@@ -30,7 +30,7 @@
   ],
   "sideEffects": false,
   "dependencies": {
-    "@yoyocontrol/account": "0.1.0",
+    "@yoyocontrol/account": "0.2.0",
     "jose": "^6.0.0"
   },
   "scripts": {

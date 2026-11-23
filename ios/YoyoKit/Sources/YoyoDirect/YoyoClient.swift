@@ -45,12 +45,23 @@ public enum YoyoClient {
     /// Pairs over the link (`hello.credential = "Pair <code>"`, docs/LINK.md「配对」): the Mac hands the token back in
     /// `welcome.principal`, bound to this install's link key.
     public static func pair(_ invite: YoyoInvite, deviceId: String, deviceName: String) async throws -> YoyoMac {
+        try await enter(invite, credential: "Pair \(invite.code)", deviceId: deviceId, deviceName: deviceName)
+    }
+
+    /// Comes into a computer of this phone's account with a ticket its account server signed for it (`hello.credential
+    /// = "Ticket <ticket>"`, docs/ACCOUNT.md): the computer gives this phone a token of its own, as pairing would — a
+    /// record like a paired one. `invite`: the computer as the account lists it (its `code` unused).
+    public static func admit(_ invite: YoyoInvite, ticket: String, deviceId: String, deviceName: String) async throws -> YoyoMac {
+        try await enter(invite, credential: "Ticket \(ticket)", deviceId: deviceId, deviceName: deviceName)
+    }
+
+    private static func enter(_ invite: YoyoInvite, credential: String, deviceId: String, deviceName: String) async throws -> YoyoMac {
         var mac = YoyoMac(id: invite.id, name: invite.name, addresses: invite.addresses, fingerprint: invite.fingerprint,
                           token: "", link: invite.link)
         let connection: YoyoLinkConnection
         do {
             connection = try await YoyoLinkClient.shared.dial(invite.link, fingerprint: invite.fingerprint, hints: mac.linkHints,
-                                                              credential: "Pair \(invite.code)",
+                                                              credential: credential,
                                                               device: ScreenControlDevice(id: deviceId, name: deviceName),
                                                               timeout: .seconds(10))
         } catch YoyoLinkClient.Failure.unauthorized(let why) {

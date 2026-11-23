@@ -7,7 +7,8 @@
 | --- | --- | --- | --- |
 | iroh-relay | `relay1.yoyocontrol.com`（HTTPS 443、UDP 7842） | 手机 App、Mac、Linux 的 Link 端点 | Link 直连不上时转发 QUIC；打洞的信令；公网地址探测（`LINK.md`「端点、地址、路径」） |
 | coturn | `relay1.yoyocontrol.com:3478`（UDP / TCP），转发端口 UDP 49152–49407 | 浏览器的 WebRTC | STUN；直连不上时 TURN 转发（下面「TURN」） |
-| 信令服务 | `signal1.yoyocontrol.com`（HTTPS 443） | Mac / Linux 登记；浏览器、手机来问 | Mac 的房间：浏览器的 offer / answer、TURN 凭据、Link 绑定（下面「协议」）；账号服务（`ACCOUNT.md`） |
+| 信令服务 | `signal1.yoyocontrol.com`（HTTPS 443） | Mac / Linux 登记；浏览器、手机来问 | Mac 的房间：浏览器的 offer / answer、TURN 凭据、Link 绑定（下面「协议」）；之前的账号目录（`ACCOUNT.md`「之前的实现」） |
+| 账号服务器 | `account.yoyocontrol.com`（HTTPS 443） | App、账号里的电脑 | 账号库的 `account-server`（`relay/account`）：通过 Apple 登录、账号的电脑、入场券、撤销名单、Pro（`ACCOUNT.md`） |
 
 代码：`relay/iroh/`（部署、配置）、`relay/signal/`（信令服务，Node），Mac 端 `mac/Sources/YoyoServer/RemoteSignal.swift`，Linux 端
 `@yoyocontrol/remote` 的 `SignalClient`，浏览器 `@yoyocontrol/direct-web`，手机 `ios/YoyoKit/Sources/YoyoDirect/SignalLookup.swift`。
@@ -33,7 +34,7 @@ Mac 的控制连接是 `wss://signal1.yoyocontrol.com/v1/mac/<fp>` 上的 WebSoc
 4. 之后 Mac 每 30 s 发文本 `ping`，服务回 `pong`；45 s 没收到 `pong` 就算断了，重连（1 s 起翻倍，最多 60 s）。
    服务 100 s 没收到 Mac 任何消息就断开；重启时用 1012 关掉所有 Mac，它们 1 s 后重新登记。
 5. Mac 在 `ready` 之后和变化时发 `{"type":"link","id","key","sig","relays","direct"}`（`LINK.md`「身份与信任」），服务记在这条连接上；
-   还发 `{"type":"account","id":<账号 id | null>}`，服务对照账号目录回 `{"type":"account","state":"linked"|"unlinked"}`，目录里删了这台时也主动发
+   旧版本（`ACCOUNT.md`「之前的实现」）还发 `{"type":"account","id":<账号 id | null>}`，服务对照账号目录回 `{"type":"account","state":"linked"|"unlinked"}`，目录里删了这台时也主动发
    `unlinked`（`ACCOUNT.md`）。旧版本不发，服务也不管。
    （旧版本还发 `{"type":"candidates",…}`：TLS 监听的公网候选，服务照收，没人再用。）
 6. 浏览器的 offer 来时，服务发 `{"type":"rtc",…}`（下面「WebRTC」）。

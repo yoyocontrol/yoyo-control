@@ -73,6 +73,19 @@ public struct YoyoInvite: Sendable, Equatable {
         self.link = link
     }
 
+    /// A computer of the phone's account as the account server lists it (docs/ACCOUNT.md): its Link id, name, relays
+    /// and addresses, and what it said of itself (`info`: `{ id, platform, fp, link: { id, key, sig, port } }`, the
+    /// Mac's and the Linux server's). nil when `info` doesn't say how to reach it (an older computer). No code: a
+    /// ticket goes in instead (`YoyoClient.admit`).
+    public init?(accountComputer linkId: String, name: String, relays: [String], direct: [String], info: [String: Any]) {
+        guard let serverId = info["id"] as? String, !serverId.isEmpty, let fp = info["fp"] as? String, fp.hasPrefix("sha256:"),
+              let l = info["link"] as? [String: Any], let id = l["id"] as? String, id == linkId,
+              let key = l["key"] as? String, let sig = l["sig"] as? String else { return nil }
+        let port = (l["port"] as? Int).flatMap { UInt16(exactly: $0) }.flatMap { $0 > 0 ? $0 : nil }
+        self.init(id: serverId, name: name, fingerprint: fp, code: "",
+                  link: ConnectLinkBinding(id: id, key: key, sig: sig, port: port, relays: relays, direct: direct))
+    }
+
     public init?(url: URL) {
         guard url.scheme == "yoyocontrol", url.host == "pair",
               let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }

@@ -8,9 +8,11 @@ import Foundation
 /// service (`yoyo-control --socket … --remote`), never by a service another program spawns.
 ///
 /// - State in the Yoyo Control home (0700), this process the only writer: `remote.json` (server id, on/off, direct),
-///   `devices.json` (RemoteDevices), `tls-key.der` (RemoteIdentity), `link-key` (LinkServer).
-/// - The link listener runs while remote access is on and a phone is paired or a pairing code is shown (and for a while
-///   after the last device went: `lingerAfterLastDevice`). Phones pair over it too (`hello.credential = "Pair <code>"`).
+///   `devices.json` (RemoteDevices), `account.json` (AccountMembership), `tls-key.der` (RemoteIdentity), `link-key`
+///   (LinkServer).
+/// - The link listener runs while remote access is on and a phone is paired, a pairing code is shown or the Mac is in an
+///   account (and for a while after the last device went: `lingerAfterLastDevice`). Phones pair over it too
+///   (`hello.credential = "Pair <code>"`), and the account's devices come in by ticket (`Ticket <ticket>`).
 /// - While it runs, the Mac is registered at the signaling server (RemoteSignal): browsers' offers come through it, and
 ///   phones and browsers ask it for the link binding.
 /// - While it runs and direct access from the internet is on (`remote.json` `direct`, on by default), the home router
@@ -27,7 +29,7 @@ public final class RemoteAccess: @unchecked Sendable {
     static let allowed: Set<String> = [
         "GET /status", "GET /frame", "GET /stream", "POST /stream/ack", "GET /events", "GET /focus", "GET /audio",
         "POST /input", "POST /control", "GET /clipboard", "POST /clipboard", "GET /clipboard/image", "GET /clipboard/file",
-        "GET /account", "POST /account/join", "POST /account/invite",
+        "GET /account", "POST /account/join", "POST /account/leave",
     ]
 
     /// The one running in this process (the Router's `/remote*` routes and `/control`).
@@ -56,6 +58,10 @@ public final class RemoteAccess: @unchecked Sendable {
     /// The link listener's options (set before `start`); nil: no remote access. Authority mode runs outside remote
     /// access (ScreenService).
     public var linkOptions: LinkOptions?
+    /// The account this Mac is in (docs/ACCOUNT.md), made at `start`.
+    public private(set) var membership: AccountMembership?
+    /// The account server's wire namespace (the product's; the library's default "yoyo").
+    public var accountNamespace = "yoyo"
     #if canImport(YoyoLink)
     private var link: LinkServer?
     #endif
@@ -84,8 +90,58 @@ public final class RemoteAccess: @unchecked Sendable {
         }
         lock.unlock()
         settings.save(home + "/remote.json")
+        startMembership()
         Self.current = self
         update()
+    }
+
+    /// The account membership (once), its list followed: what no longer counts is forgotten, the listener follows.
+    private func startMembership() {
+        guard membership == nil else { return }
+        let m = AccountMembership(path: home + "/account.json", linkKeyPath: (linkOptions?.keyDirectory ?? home) + "/link-key",
+                                  namespace: accountNamespace) { [weak self] in self?.accountSelf() }
+        m.onChange = { [weak self] in self?.accountChanged() }
+        membership = m
+        m.start()
+        // (a sign-in that ran out is no revocation: its tokens go on the hour)
+        queue.asyncAfter(deadline: .now() + 3600) { [weak self] in self?.sweepAccountDevices() }
+    }
+
+    private func sweepAccountDevices() {
+        accountChanged()
+        queue.asyncAfter(deadline: .now() + 3600) { [weak self] in self?.sweepAccountDevices() }
+    }
+
+    private func accountChanged() {
+        guard let m = membership else { return }
+        let gone = devices.prune { m.ticketValid($0) }
+        if gone > 0 { log("remote: \(gone) device(s) of the account no longer let in") }
+        update()
+        onChange?()
+    }
+
+    /// What this Mac tells its account server about itself: its link, and for the app (`info`) its server id, platform,
+    /// identity fingerprint and link binding (what a phone that never paired here needs to dial it).
+    private func accountSelf() -> AccountMembership.SelfInfo? {
+        guard let (_, linkId) = membership?.linkKey() else { return nil }
+        lock.lock()
+        #if canImport(YoyoLink)
+        let l = link?.statusJSON
+        #else
+        let l: [String: Any]? = nil
+        #endif
+        let fp = identity?.fingerprint
+        let serverId = settings.serverId
+        lock.unlock()
+        var info: [String: Any] = ["id": serverId, "platform": "mac"]
+        if let fp { info["fp"] = fp }
+        if let l, let id = l["id"] as? String, let key = l["key"] as? String, let sig = l["sig"] as? String {
+            var b: [String: Any] = ["id": id, "key": key, "sig": sig]
+            if let port = l["port"] as? Int { b["port"] = port }
+            info["link"] = b
+        }
+        return .init(linkId: linkId, name: Self.macName, relays: l?["relays"] as? [String] ?? linkOptions?.relays.map { $0.components(separatedBy: "?")[0] } ?? [],
+                     direct: (l?["direct"] as? [Any] ?? []).compactMap { $0 as? String }, info: info)
     }
 
     public func stop() {
@@ -115,10 +171,9 @@ public final class RemoteAccess: @unchecked Sendable {
                                identity: .init(serverId: settings.serverId, name: Self.macName, key: id.signingKey),
                                keyDirectory: options.keyDirectory ?? home, control: control)
             l.onChange = { [weak self] in self?.linkChanged() }
+            l.membership = membership
             let s = signalURL.map { RemoteSignal(key: id.signingKey, base: $0) }
             s?.onChange = { [weak self] in self?.onChange?() }
-            s?.account = settings.account
-            s?.onUnlinked = { [weak self] in self?.unlinked() }
             link = l
             signal = s
             fresh = (l, s)
@@ -164,7 +219,7 @@ public final class RemoteAccess: @unchecked Sendable {
     }
 
     private func needsListenerLocked() -> Bool {
-        !devices.isEmpty || devices.pairingCode != nil || Date() < lingerUntil
+        !devices.isEmpty || devices.pairingCode != nil || membership?.joined == true || Date() < lingerUntil
     }
 
     private func devicesChanged() {
@@ -229,7 +284,7 @@ public final class RemoteAccess: @unchecked Sendable {
             "signal": ["connected": signalUp],
             "direct": direct,
             "link": linkJSON,
-            "account": s.account.map { ["id": $0, "since": (s.accountSince ?? Date()).timeIntervalSince1970 * 1000] as [String: Any] } ?? NSNull(),
+            "account": membership?.json ?? ["account": NSNull()],
         ]
         if let fp { j["fingerprint"] = fp }
         if let error { j["error"] = error }
@@ -375,74 +430,20 @@ public final class RemoteAccess: @unchecked Sendable {
 
     // MARK: The account (docs/ACCOUNT.md)
 
-    /// An account id as the account service makes them (32 lowercase hex digits), else nil.
-    static func validAccount(_ id: String) -> String? {
-        id.utf8.count == 32 && id.utf8.allSatisfy { ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x61 && $0 <= 0x66) } ? id : nil
-    }
-
-    /// The statement a paired phone hands the account service to put this Mac in `account`'s directory: `{ account,
-    /// fp, key, sig, serverId, name, platform }`, `sig` by the identity key over "yoyocontrol-account-v1:" + account +
-    /// ":" + fp (hex). This Mac is in that account from now on (one at a time).
-    func join(account: String) throws -> [String: Any] {
-        guard let account = Self.validAccount(account) else { throw HTTPError(400, "account must be 32 lowercase hex digits") }
-        lock.lock()
-        guard let id = identity else {
-            lock.unlock()
-            throw HTTPError(503, "no identity: \(identityError ?? "?")")
-        }
-        let hex = String(id.fingerprint.dropFirst("sha256:".count))
-        let signature: Data
+    /// `POST /account/join { server, key }` (a phone paired here, signed in): this Mac joins that account by itself.
+    func joinAccount(server: String, key: String) async throws {
+        guard let m = membership else { throw HTTPError(503, "remote access is not running") }
         do {
-            signature = try id.signingKey.signature(for: Data("yoyocontrol-account-v1:\(account):\(hex)".utf8)).rawRepresentation
-        } catch {
-            lock.unlock()
-            throw HTTPError(500, "signing failed: \(error)")
+            try await m.joinWithKey(server: server, key: key)
+        } catch AccountMembership.Failure.join(let status, let why) {
+            throw HTTPError(status, why)
         }
-        let changed = settings.account != account
-        if changed {
-            settings.account = account
-            settings.accountSince = Date()
-            settings.save(home + "/remote.json")
-        }
-        let s = signal
-        let serverId = settings.serverId
-        lock.unlock()
-        s?.account = account
-        if changed {
-            log("remote: joined account \(account.prefix(8))…")
-            onChange?()
-        }
-        return [
-            "account": account, "fp": hex, "key": id.signingKey.publicKey.x963Representation.base64EncodedString(),
-            "sig": signature.base64EncodedString(), "serverId": serverId, "name": Self.macName, "platform": "mac",
-        ]
     }
 
-    /// Leaves the account (the menu's): the room hears so, and the account's directory drops this Mac. Paired phones
+    /// Leaves the account (the menu's, or a phone paired here): the account's devices are let in no more. Paired phones
     /// stay paired.
-    func leaveAccount() {
-        lock.lock()
-        guard settings.account != nil else { lock.unlock(); return }
-        settings.account = nil
-        settings.accountSince = nil
-        settings.save(home + "/remote.json")
-        let s = signal
-        lock.unlock()
-        s?.account = nil
-        log("remote: left the account")
-        onChange?()
-    }
-
-    /// The room says this Mac isn't in its account any more (a phone took it out, the account was deleted).
-    private func unlinked() {
-        lock.lock()
-        guard settings.account != nil else { lock.unlock(); return }
-        settings.account = nil
-        settings.accountSince = nil
-        settings.save(home + "/remote.json")
-        lock.unlock()
-        log("remote: no longer in the account (removed from its directory)")
-        onChange?()
+    func leaveAccount() async {
+        _ = await membership?.leave()
     }
 
     // MARK: Helpers
@@ -474,27 +475,20 @@ public final class RemoteAccess: @unchecked Sendable {
 
 /// `remote.json`: who this server is (`serverId`, which the phone remembers), whether remote access is on (on by
 /// default: nothing listens before a phone is paired or a code is shown), whether the router is asked for a public
-/// port (`direct`, on by default), and the account this Mac joined (`account`, docs/ACCOUNT.md; absent: none).
+/// port (`direct`, on by default). (An `account` there is from before the account library: not read, not written again.)
 struct RemoteSettings: Equatable {
     var serverId: String
     var enabled: Bool
     var direct = true
-    var account: String? = nil
-    var accountSince: Date? = nil
 
     static func load(_ path: String) -> RemoteSettings {
         let json = FileManager.default.contents(atPath: path).flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } ?? [:]
         let id = (json["serverId"] as? String).flatMap { $0.count >= 16 ? $0 : nil } ?? RemoteDevices.random(16)
-        let account = (json["account"] as? [String: Any])
-        let accountId = (account?["id"] as? String).flatMap(RemoteAccess.validAccount)
-        return RemoteSettings(serverId: id, enabled: json["enabled"] as? Bool ?? true, direct: json["direct"] as? Bool ?? true,
-                              account: accountId,
-                              accountSince: accountId == nil ? nil : (account?["since"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) })
+        return RemoteSettings(serverId: id, enabled: json["enabled"] as? Bool ?? true, direct: json["direct"] as? Bool ?? true)
     }
 
     func save(_ path: String) {
-        var body: [String: Any] = ["version": 2, "serverId": serverId, "enabled": enabled, "direct": direct]
-        if let account { body["account"] = ["id": account, "since": (accountSince ?? Date()).timeIntervalSince1970 * 1000] }
+        let body: [String: Any] = ["version": 2, "serverId": serverId, "enabled": enabled, "direct": direct]
         guard let data = try? JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys]) else { return }
         try? RemoteIdentity.writePrivate(data, to: path)
     }

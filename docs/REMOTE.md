@@ -14,7 +14,7 @@ iroh 同时试各条路径、留最好的那条，网络变了自己换；浏览
 - 菜单栏 App 的服务（`yoyo-control --socket <home>/screen.sock --exit-on-stdin-eof --remote`）。别的程序自己拉起的服务（`LOCAL-API.md`「自己拉起服务」）
   不带 `--remote`，没有远程访问。
 - 状态都在 Yoyo Control 的 home（`~/Library/Application Support/YoyoControl`，0700），只有服务写：
-  - `remote.json`：`serverId`（随机，手机记住它来认 Mac）、`enabled`（默认开）、`direct`（外网直连，默认开）、`account: { id, since }`（加入的账号，`ACCOUNT.md`；没有就不写）
+  - `remote.json`：`serverId`（随机，手机记住它来认 Mac）、`enabled`（默认开）、`direct`（外网直连，默认开）；它加入的账号在 `account.json`（`ACCOUNT.md`，账号库的成员文件）
   - `devices.json`（0600）：配对的设备，令牌只存 SHA-256；`linkKey` 是它的令牌绑定的客户端 Link 钥匙
   - `tls-key.der`（0600）：身份钥匙（下面「身份」；名字是它还做 TLS 时起的）
   - `link-key`（0600）：Link 的 Ed25519 钥匙（`LINK.md`「服务端：Mac」）
@@ -47,8 +47,9 @@ iroh 同时试各条路径、留最好的那条，网络变了自己换；浏览
    - 拒绝：码不对 / 过期 / 没在显示、`device.id` 不对 → `denied unauthorized`；配对设备已满（32）→ `busy`。失败照样记进 Link 的守卫。
 4. 之后每次 `hello.credential = "Bearer <token>"`。令牌存进钥匙串。不认识的令牌、或者别的 Link 钥匙带来的 → `unauthorized`。
 
-账号里的另一台 iPhone 也能用同样的 `Pair <code>` 配对，码由一台已配对的 iPhone 替它向电脑要（定向码：只认那台 iPhone 的 id 和 Link 钥匙，
-`ACCOUNT.md`「批准」）。
+电脑在账号里时，账号的其他设备不配对也能进：`hello.credential = "Ticket <入场券>"`（账号服务器签给这台设备和这台电脑的，一次），
+`welcome.principal` 和配对一样给回 `token`、`server`；令牌绑定这把客户端钥匙，到那台设备的登录期限为止，账号的撤销名单说它被移除了就作废
+（`ACCOUNT.md`「设备进电脑」）。入场券不对 → `unauthorized`；电脑还没取到账号的名单 → `busy`。
 
 **浏览器配对**（uu 的网页 `https://yoyocontrol.com/app/`）：配对窗口另给一个网页链接（第二个二维码 + 拷贝）：
 
@@ -132,9 +133,10 @@ Mac 菜单里「已配对的设备」可以逐个移除：令牌立刻失效，*
 | `POST /remote/direct { enabled }` | 开 / 关外网直连（关掉即删映射），回答同 `GET /remote` |
 | `POST /remote/devices/remove { id }` | 移除设备（404：没这台） |
 | `POST /remote/disconnect` | 放开控制权（设备仍然配对） |
-| `POST /remote/account/leave` | 退出账号（`ACCOUNT.md`；配对不受影响），回答同 `GET /remote` |
+| `POST /remote/account/leave` | 退出账号（`ACCOUNT.md`；配对不受影响，凭账号进来的设备不再认），回答同 `GET /remote` |
 
-`GET /remote` 还有 `account: { id, since } | null`。已配对的手机经 Link 另有三个账号路由：`GET /account`、`POST /account/join`、
-`POST /account/invite`（`ACCOUNT.md`「电脑加入账号」「批准」）。
+`GET /remote` 还有 `account: { account: { id, name, server, joinedAt, disabled } | null, error? }`，`devices` 里凭账号进来的那些多一个
+`account: { acc, dev, tat, sx }`。手机经 Link 另有三个账号路由：`GET /account`（同上的 `account`），和只给**在这台电脑上配对过的**手机的
+`POST /account/join { server, key }`（凭账号服务器的一次性加入钥匙加入）、`POST /account/leave`（`ACCOUNT.md`「电脑加入账号」）。
 
 没带 `--remote` 的服务对这些都回 404。

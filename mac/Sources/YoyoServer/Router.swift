@@ -39,7 +39,7 @@ enum Router {
         case ("POST", "/remote/account/leave"): try remoteAccountLeave(req, conn)
         case ("GET", "/account"): try account(req, conn)
         case ("POST", "/account/join"): try accountJoin(req, conn)
-        case ("POST", "/account/invite"): try accountInvite(req, conn)
+        case ("POST", "/account/leave"): try accountLeave(req, conn)
         case ("GET", "/link/authority"): try linkAuthority(req, conn)
         case ("POST", "/link/authority/answer"): try linkAuthorityAnswer(req, conn)
         case ("POST", "/link/control"): try linkControl(req, conn)
@@ -55,7 +55,7 @@ enum Router {
             throw HTTPError(405, "method \(req.method) not allowed on \(req.path)")
         case (_, "/control"), (_, "/remote"), (_, "/remote/pairing"), (_, "/remote/pairing/stop"), (_, "/remote/enabled"),
              (_, "/remote/direct"), (_, "/remote/devices/remove"), (_, "/remote/disconnect"), (_, "/remote/account/leave"),
-             (_, "/account"), (_, "/account/join"), (_, "/account/invite"):
+             (_, "/account"), (_, "/account/join"), (_, "/account/leave"):
             throw HTTPError(405, "method \(req.method) not allowed on \(req.path)")
         case (_, "/status"), (_, "/frame"), (_, "/stream"), (_, "/input"), (_, "/permissions/request"),
              (_, "/stream/ack"), (_, "/events"), (_, "/focus"), (_, "/audio"), (_, "/audio/stats"), (_, "/clipboard"),

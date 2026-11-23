@@ -180,13 +180,17 @@ Link 会话的路径：对端地址是私有 / 链路本地 / ULA 算局域网�
 
 ## 账号
 
-`../docs/ACCOUNT.md`。App（`AccountStore.swift`、`AccountView.swift`）：工具栏左边的人像按钮 → 通过 Apple 登录（`com.apple.developer.applesignin`，
-`project.yml` 的 entitlements）→ signal1 的会话存钥匙串（`ca.sarria.yoyocontrol.account`，只在本机）。登录后 App 在前台时每 10 s：拉目录（电脑的
-声明逐条核签名才显示）、把本机配对过的电脑经 Link 加入账号（`YoyoClient.call(_:method:path:body:)`，`POST /account/join`）、看其他 iPhone 的请求
-（替本机配对过的电脑弹「允许“…”连接？」，允许就 `POST /account/invite` 要定向码交给服务）。列表多一节「你账号里的电脑」：本机还没配对的，点
-「申请连接」等另一台 iPhone 允许，拿到码后照常配对（`YoyoClient.invite(id:name:fingerprint:code:)`）。Pro 的最新交易（`ProStore.proTransactionJWS`）上报给账号。
-kit 为此加了（都是新增）：`YoyoClient.call`、`YoyoClient.invite`、`YoyoClient.linkId`（`YoyoLinkClient.linkId`）、`YoyoInvite(id:name:…:link:)`、
-`ProStore.proTransactionJWS`。
+`../docs/ACCOUNT.md`。kit 的 `YoyoAccount`（`AccountClient`，不依赖别的 kit）：一台设备对一个账号服务器（`@yoyocontrol/account-server`）要做的事——
+通过 Apple 登录（`signIn(apple:nonce:deviceName:)`，`appleNonce()` 给请求的 nonce）、`me()`（账号、`entitlements`）、`computers()`（`info` 原样）、
+`ticket(computer:)`、`joinKey()`、`devices()` / `removeDevice`、`removeComputer`、`reportAppStore(transaction:)`、`signOut()`、`deleteAccount(authorizationCode:)`；
+会话存钥匙串（服务名由 App 给，只在本机）。YoyoDirect 为它加了 `YoyoClient.admit(_:ticket:deviceId:deviceName:)`（`hello.credential = "Ticket …"`，
+回来的记录和配对的一样）和 `YoyoInvite(accountComputer:name:relays:direct:info:)`（Mac / Linux 发布的 `info` → 能拨号的邀请）。
+
+App（`AccountStore.swift`、`AccountView.swift`）：工具栏左边的人像按钮 → 通过 Apple 登录（`com.apple.developer.applesignin`，`project.yml` 的
+entitlements）→ `account.yoyocontrol.com` 的会话（钥匙串 `ca.sarria.yoyocontrol.account.v2`）。登录后 App 在前台时每 15 s：拉账号和它的电脑、
+把本机配对过而不在账号里的电脑经 Link 加进去（`joinKey()` → `POST /account/join`）。列表里多一节「你账号里的电脑」：本机还没有的，点一下就凭
+入场券进去（`YoyoClient.admit`），之后和配对的一样（`MacStore.cameByAccount` 记着它来自账号：退出登录时忘掉；令牌被拒时再拿一张入场券）。
+账号页：账号的设备（左滑移除）、电脑（左滑移出）、退出、删除。Pro 的最新交易（`ProStore.proTransactionJWS`）上报给账号。
 
 App 里屏幕页只经 `YoyoBackend` 跟 Mac 说话，用的是 `DirectBackend`：请求都是 Link 会话上的 RPC，画面、声音、指针、输入走会话自己的通道
 （`screenLink(for:)`），凭配对令牌认手机；剪贴板只收发文本（远程不收 Mac 上的路径）。路径在局域网时（`DirectBackend.onLan` → `route.isLocalNetwork`），

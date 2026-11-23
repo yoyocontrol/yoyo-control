@@ -39,6 +39,9 @@ let baseProducts: [Product] = [
         .library(name: "YoyoConnect", targets: ["YoyoConnect"]),
         /// Pairing with a Yoyo Control Mac and reaching it over uu Link: one `YoyoBackend`.
         .library(name: "YoyoDirect", targets: ["YoyoDirect"]),
+        /// A device's side of an account server (docs/ACCOUNT-LIB.md): sign in with Apple, the account's computers,
+        /// tickets into them, join keys, App Store purchases, the account's devices.
+        .library(name: "YoyoAccount", targets: ["YoyoAccount"]),
         /// macOS: the screen service (capture, input, sound, clipboard, the HTTP-over-unix-socket server) and
         /// `ServiceHost`, the process around it. With `YoyoLink` in the package, also the link listener
         /// (docs/LINK.md); no other dependencies (Sparkle is the menu bar app's, in mac/).
@@ -62,6 +65,7 @@ let baseTargets: [Target] = [
         .target(name: "YoyoScreen", dependencies: ["YoyoCore", "YoyoClipboard"], path: "ios/YoyoKit/Sources/YoyoScreen",
                 resources: [.process("Resources")]),
         .target(name: "YoyoConnect", dependencies: ["YoyoCore"], path: "ios/YoyoKit/Sources/YoyoConnect"),
+        .target(name: "YoyoAccount", path: "ios/YoyoKit/Sources/YoyoAccount"),
         .target(name: "YoyoDirect", dependencies: ["YoyoCore", "YoyoConnect", "YoyoScreen"] + linkClient,
                 path: "ios/YoyoKit/Sources/YoyoDirect", resources: [.process("Resources")]),
         // Swift 5 mode like mac/Package.swift (tools 5.10), where it is built and tested. Every file is inside

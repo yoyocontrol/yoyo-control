@@ -48,6 +48,17 @@ function local(method, path, body) {
 
 const phone = { id: "phone-0001", name: "Alex's iPhone" };
 
+/** The account server's test harness (@yoyocontrol/account-server/testing), built when it is not yet. */
+async function accountTesting() {
+  const dist = new URL("../../packages/account-server/dist/testing/index.js", import.meta.url);
+  const { existsSync } = await import("node:fs");
+  if (!existsSync(dist)) {
+    const { execFileSync } = await import("node:child_process");
+    execFileSync("npm", ["--prefix", new URL("../../packages/account-server", import.meta.url).pathname, "run", "build"], { stdio: "ignore" });
+  }
+  return import(dist.href);
+}
+
 test("no phone paired, no code: nothing listens; remote.json made (0600) with a server id", async () => {
   assert.equal(svc.remote.listening, false);
   assert.equal(statSync(join(home, "remote.json")).mode & 0o777, 0o600);
@@ -148,26 +159,68 @@ test("RemoteControl: idle release, the latest taker holds it, release of another
   assert.deepEqual(changes, ["remote", "remote", "none"]);
 });
 
-test("account: a paired phone puts the computer in its account with a signed statement; leave takes it out", async () => {
-  const { createPublicKey, createHash, verify } = await import("node:crypto");
+test("account: a phone paired here joins the computer with its join key; the account's other devices come in by ticket, go when removed, and with the computer's leaving", async () => {
+  const { randomBytes, generateKeyPairSync } = await import("node:crypto");
+  const { existsSync, writeFileSync } = await import("node:fs");
+  const t = await accountTesting();
   const r = svc.remote;
-  const device = { id: "phone-acct-1", name: "Phone" };
-  assert.deepEqual(r.accountRoute("GET /account", null, device).json, { account: null });
-  assert.equal(r.accountRoute("POST /account/join", { account: "nope" }, device).status, 400);
-  const account = "0a".repeat(16);
-  const st = r.accountRoute("POST /account/join", { account }, device).json;
-  assert.equal(st.account, account);
-  assert.equal(`sha256:${st.fp}`, r.identity.keyFingerprint);
-  assert.equal(createHash("sha256").update(Buffer.from(st.key, "base64")).digest("hex"), st.fp);
-  const pub = createPublicKey({ key: { kty: "EC", crv: "P-256", x: Buffer.from(st.key, "base64").subarray(1, 33).toString("base64url"), y: Buffer.from(st.key, "base64").subarray(33).toString("base64url") }, format: "jwk" });
-  assert.ok(verify("sha256", Buffer.from(`yoyocontrol-account-v1:${account}:${st.fp}`), { key: pub, dsaEncoding: "ieee-p1363" }, Buffer.from(st.sig, "base64")));
-  assert.equal(st.platform, "linux");
-  assert.equal(loadSettings(join(home, "remote.json")).account.id, account, "remembered");
-  assert.equal((await adminCall(home, "GET", "/remote")).json.account.id, account);
-  const inv = r.accountRoute("POST /account/invite", { id: "phone-acct-2", name: "New", linkKey: "ab".repeat(32) }, device);
-  assert.equal(inv.status, 200);
-  assert.equal(inv.json.code.length, 22);
-  assert.equal(r.accountRoute("POST /account/invite", { id: "phone-acct-2" }, device).status, 400);
-  assert.equal((await adminCall(home, "POST", "/remote/account/leave")).json.account, null);
-  assert.equal(loadSettings(join(home, "remote.json")).account, null);
+  // (no native addon here: the link key the link would make)
+  if (!existsSync(join(home, "link-key"))) writeFileSync(join(home, "link-key"), randomBytes(32), { mode: 0o600 });
+  const apple = new t.TestApple();
+  const h = await t.harness({ oidc: false, apple, env: { ACCOUNT_APPLE_AUDIENCES: "com.example.remote", ACCOUNT_OPEN: "1" } });
+  try {
+    const phone = await t.appleSignIn(h, apple);
+    const jk = await (await t.post(`${h.url}/v1/join-keys`, {}, t.bearer(phone.session))).json();
+    const paired = { id: "phone-acct-1", name: "Phone" };
+    assert.deepEqual((await r.accountRoute("GET /account", null, paired)).json, { account: null });
+    // only a phone paired here may put it in an account
+    assert.equal((await r.accountRoute("POST /account/join", { server: jk.server, key: jk.key }, paired)).status, 403);
+    r.devices.startPairing();
+    r.devices.pair(r.devices.pairingCode.code, paired.id, paired.name);
+    assert.equal((await r.accountRoute("POST /account/join", { account: "0a".repeat(16) }, paired)).status, 400, "an older app's join");
+    const joined = await r.accountRoute("POST /account/join", { server: jk.server, key: jk.key }, paired);
+    assert.equal(joined.status, 200, JSON.stringify(joined.json));
+    assert.equal(joined.json.account.id, phone.account.id);
+    assert.equal(statSync(join(home, "account.json")).mode & 0o777, 0o600);
+    assert.equal((await adminCall(home, "GET", "/remote")).json.account.account.id, phone.account.id);
+    const linkId = r.account.linkKey().id;
+    // what the app needs to dial it, in the account's list
+    const listed = (await (await t.get(`${h.url}/v1/computers`, t.bearer(phone.session))).json()).computers[0];
+    assert.equal(listed.linkId, linkId);
+    assert.equal(listed.info.id, r.settings.serverId);
+    assert.equal(listed.info.fp, r.identity.keyFingerprint);
+    assert.equal(listed.info.platform, "linux");
+
+    // another device of the account: a ticket → this computer's own token, bound to its link key
+    const ipad = await t.appleSignIn(h, apple, { device: { name: "iPad", platform: "ios" } });
+    const ticket = (await (await t.post(`${h.url}/v1/tickets`, { computer: linkId }, t.bearer(ipad.session))).json()).ticket;
+    const clientKey = Buffer.from(generateKeyPairSync("ed25519").publicKey.export({ format: "jwk" }).x, "base64url").toString("hex");
+    const hello = { hello: { device: { id: "ipad-device-01", name: "iPad" } }, clientKey };
+    const ok = await r.account.redeem(ticket, hello, "test");
+    assert.equal(ok.ok, true, JSON.stringify(ok));
+    assert.equal(ok.principal.server.id, r.settings.serverId);
+    assert.equal(r.devices.authenticateLink(ok.principal.token, clientKey).kind, "accepted");
+    assert.equal(r.devices.list.find((d) => d.id === "ipad-device-01").account.dev, ipad.device.id);
+    assert.equal((await r.account.redeem(ticket, hello, "test")).ok, false, "once");
+    // one let in by the account may not move the computer
+    assert.equal((await r.accountRoute("POST /account/leave", null, { id: "ipad-device-01", name: "iPad" })).status, 403);
+
+    // removed from the account: out within the list's wait
+    await fetch(`${h.url}/v1/devices/${ipad.device.id}`, { method: "DELETE", headers: t.bearer(phone.session) });
+    const end = Date.now() + 10_000;
+    while (r.devices.list.some((d) => d.id === "ipad-device-01") && Date.now() < end) await new Promise((res) => setTimeout(res, 50));
+    assert.equal(r.devices.list.some((d) => d.id === "ipad-device-01"), false);
+
+    // a second ticket device, then the computer leaves: it goes too; the paired phone stays
+    const ipad2 = await t.appleSignIn(h, apple, { device: { name: "iPad 2", platform: "ios" } });
+    const t2 = (await (await t.post(`${h.url}/v1/tickets`, { computer: linkId }, t.bearer(ipad2.session))).json()).ticket;
+    assert.equal((await r.account.redeem(t2, { hello: { device: { id: "ipad-device-02", name: "iPad 2" } }, clientKey }, "test")).ok, true);
+    const left = await adminCall(home, "POST", "/remote/account/leave");
+    assert.equal(left.json.account.account, null);
+    assert.deepEqual(r.devices.list.map((d) => d.id), [paired.id]);
+    assert.equal((await (await t.get(`${h.url}/v1/computers`, t.bearer(phone.session))).json()).computers.length, 0);
+    r.devices.remove(paired.id);
+  } finally {
+    await t.stopAll();
+  }
 });

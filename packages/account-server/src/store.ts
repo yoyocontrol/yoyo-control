@@ -11,7 +11,7 @@ import { dirname } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { DEFAULT_WIRE, type RevocationEntry, type RevocationState, type Wire } from "@yoyocontrol/account";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 /** How long a device's revocation stays on the list (seconds): past the longest a computer's token of it can live. */
 export const REVOCATION_KEEP_S = 200 * 86_400;
 export const sha256 = (s: string) => createHash("sha256").update(s, "utf8").digest("base64url");
@@ -67,7 +67,20 @@ export interface Computer {
   origins: string;
   /** The signaling service the computer waits for browsers' offers at (an origin), or null. */
   signal: string | null;
+  /** What the computer says of itself for its product's own clients (a JSON object, opaque here), or null. */
+  info: string | null;
   joined_at: number;
+  updated_at: number;
+}
+/** An account's entitlement from one purchase (`source` "appstore": a StoreKit original transaction). Times unix ms. */
+export interface Entitlement {
+  source: string;
+  original_id: string;
+  account_id: string;
+  product_id: string;
+  expires_at: number | null;
+  revoked_at: number | null;
+  environment: string;
   updated_at: number;
 }
 export interface Enrollment {
@@ -81,6 +94,7 @@ export interface Enrollment {
   direct: string;
   origins: string;
   signal: string | null;
+  info: string | null;
   expect: string | null;
   ip: string;
   created_at: number;
@@ -143,7 +157,7 @@ CREATE INDEX IF NOT EXISTS sessions_device ON sessions (device_id);
 CREATE TABLE IF NOT EXISTS computers (
   link_id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, name TEXT NOT NULL,
   fingerprint TEXT, relays TEXT NOT NULL DEFAULT '[]', direct TEXT NOT NULL DEFAULT '[]', origins TEXT NOT NULL DEFAULT '[]',
-  joined_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, signal TEXT);
+  joined_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, signal TEXT, info TEXT);
 CREATE INDEX IF NOT EXISTS computers_account ON computers (account_id);
 CREATE TABLE IF NOT EXISTS signins (
   state TEXT PRIMARY KEY, kind TEXT NOT NULL, bind TEXT NOT NULL DEFAULT '', verifier TEXT NOT NULL, nonce TEXT NOT NULL, redirect_uri TEXT NOT NULL,
@@ -153,7 +167,7 @@ CREATE TABLE IF NOT EXISTS app_codes (
   redirect_uri TEXT NOT NULL, idp_refresh TEXT, computer TEXT, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS enrollments (
   id TEXT PRIMARY KEY, device_code_hash TEXT NOT NULL UNIQUE, user_code TEXT NOT NULL UNIQUE, link_id TEXT NOT NULL,
-  name TEXT NOT NULL, fingerprint TEXT, relays TEXT NOT NULL, direct TEXT NOT NULL DEFAULT '[]', origins TEXT NOT NULL, signal TEXT, expect TEXT, ip TEXT NOT NULL,
+  name TEXT NOT NULL, fingerprint TEXT, relays TEXT NOT NULL, direct TEXT NOT NULL DEFAULT '[]', origins TEXT NOT NULL, signal TEXT, info TEXT, expect TEXT, ip TEXT NOT NULL,
   created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, last_poll_at INTEGER, status TEXT NOT NULL,
   approved_account TEXT, approved_device_name TEXT, approved_at INTEGER);
 CREATE TABLE IF NOT EXISTS join_keys (
@@ -163,6 +177,11 @@ CREATE TABLE IF NOT EXISTS revocations (
   account_id TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (account_id, kind, id));
 CREATE TABLE IF NOT EXISTS revocation_versions (
   account_id TEXT PRIMARY KEY, version INTEGER NOT NULL, disabled INTEGER);
+CREATE TABLE IF NOT EXISTS entitlements (
+  source TEXT NOT NULL, original_id TEXT NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  product_id TEXT NOT NULL, expires_at INTEGER, revoked_at INTEGER, environment TEXT NOT NULL, updated_at INTEGER NOT NULL,
+  PRIMARY KEY (source, original_id));
+CREATE INDEX IF NOT EXISTS entitlements_account ON entitlements (account_id);
 CREATE TABLE IF NOT EXISTS outbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, seq INTEGER NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL);
 `;
@@ -193,6 +212,8 @@ export class Store {
       // 2 → 3 (the hosted web client): a computer says which signaling service it waits for browsers at (a table not
       // there yet is made whole below)
       2: () => ["computers", "enrollments"].filter(hasTable).map((t) => `ALTER TABLE ${t} ADD COLUMN signal TEXT;`).join(" "),
+      // 3 → 4: what a computer says of itself for its product's clients (`info`); entitlements are a new table
+      3: () => ["computers", "enrollments"].filter(hasTable).map((t) => `ALTER TABLE ${t} ADD COLUMN info TEXT;`).join(" "),
     };
     for (let from = v; from > 0 && from < SCHEMA_VERSION; from++) {
       this.db.exec("BEGIN IMMEDIATE");
@@ -421,6 +442,25 @@ export class Store {
       this.run("UPDATE join_keys SET uses_left = uses_left - 1 WHERE key_hash = ?", sha256(key));
       return k.account_id;
     });
+  }
+
+  /** How many join keys of `account` are still good (the app's own: a few at a time). */
+  countJoinKeys(account: string, now: number) {
+    return this.get<{ n: number }>("SELECT count(*) AS n FROM join_keys WHERE account_id = ? AND expires_at > ? AND uses_left > 0", account, now)!.n;
+  }
+
+  // --------------------------------------------------------------------------- entitlements
+
+  /** One purchase is one account's: the last one to report it (a family member's phone signed into another account
+   *  takes it over). */
+  putEntitlement(e: Entitlement) {
+    this.run(
+      "INSERT INTO entitlements (source, original_id, account_id, product_id, expires_at, revoked_at, environment, updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT (source, original_id) DO UPDATE SET account_id = excluded.account_id, product_id = excluded.product_id, expires_at = excluded.expires_at, revoked_at = excluded.revoked_at, environment = excluded.environment, updated_at = excluded.updated_at",
+      e.source, e.original_id, e.account_id, e.product_id, e.expires_at, e.revoked_at, e.environment, e.updated_at,
+    );
+  }
+  entitlementsOf(account: string) {
+    return this.all<Entitlement>("SELECT * FROM entitlements WHERE account_id = ? ORDER BY updated_at", account);
   }
 
   // --------------------------------------------------------------------------- revocations

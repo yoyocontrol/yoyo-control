@@ -2,8 +2,33 @@
 import CryptoKit
 import Foundation
 
+/// What a token given for an account's ticket was given for (docs/ACCOUNT.md, `AccountMembership.ticketValid` takes it):
+/// the account `acc`, its device `dev`, the ticket's time `tat` and the end of the device's sign-in `sx` (unix s).
+public struct AccountGrant: Equatable, Sendable {
+    public let acc: String
+    public let dev: String
+    public let tat: Int
+    public let sx: Int
+
+    public init(acc: String, dev: String, tat: Int, sx: Int) {
+        self.acc = acc
+        self.dev = dev
+        self.tat = tat
+        self.sx = sx
+    }
+
+    var json: [String: Any] { ["acc": acc, "dev": dev, "tat": tat, "sx": sx] }
+
+    init?(json: Any?) {
+        guard let j = json as? [String: Any], let acc = j["acc"] as? String, let dev = j["dev"] as? String,
+              let tat = j["tat"] as? Int, let sx = j["sx"] as? Int else { return nil }
+        self.init(acc: acc, dev: dev, tat: tat, sx: sx)
+    }
+}
+
 /// A phone paired with this Mac (docs/REMOTE.md「配对」): it names itself (`id`, `name`) when it pairs and gets a
-/// token; only the token's SHA-256 is kept.
+/// token; only the token's SHA-256 is kept. One of the Mac's account's devices gets one the same way for its ticket
+/// (`account`: what for; its token ends with the device's sign-in).
 public struct RemoteDevice: Equatable, Sendable {
     public let id: String
     public var name: String
@@ -13,10 +38,13 @@ public struct RemoteDevice: Equatable, Sendable {
     /// The link key (hex of its Ed25519 public key, docs/LINK.md「身份与信任」) the token was first used with over the
     /// link: only that key may use it there, until the device pairs again (a new token, no key yet).
     public internal(set) var linkKey: String? = nil
+    /// Came in with an account's ticket (not paired here): what for.
+    public internal(set) var account: AccountGrant? = nil
 
     var json: [String: Any] {
         var j: [String: Any] = ["id": id, "name": name, "pairedAt": pairedAt.timeIntervalSince1970 * 1000]
         if let lastSeenAt { j["lastSeenAt"] = lastSeenAt.timeIntervalSince1970 * 1000 }
+        if let account { j["account"] = account.json }
         return j
     }
 
@@ -74,6 +102,11 @@ public final class RemoteDevices: @unchecked Sendable {
 
     public var isEmpty: Bool { list.isEmpty }
 
+    /// Whether `id` was paired here (with a code), not let in by the account's ticket.
+    public func isPaired(_ id: String) -> Bool {
+        list.contains { $0.id == id && $0.account == nil }
+    }
+
     /// The live pairing code, if any.
     public var pairingCode: PairingCode? {
         lock.lock(); defer { lock.unlock() }
@@ -109,11 +142,13 @@ public final class RemoteDevices: @unchecked Sendable {
     public func authenticate(token: String) -> RemoteDevice? {
         let hash = Self.hash(token)
         lock.lock()
-        guard let i = devices.firstIndex(where: { $0.tokenHash == hash }) else {
+        let t = now()
+        // (a ticket's token ends with the device's sign-in at the account server)
+        guard let i = devices.firstIndex(where: { $0.tokenHash == hash }),
+              devices[i].account.map({ Double($0.sx) > t.timeIntervalSince1970 }) ?? true else {
             lock.unlock()
             return nil
         }
-        let t = now()
         let write = devices[i].lastSeenAt.map { t.timeIntervalSince($0) >= Self.seenWriteEvery } ?? true
         devices[i].lastSeenAt = t
         let device = devices[i]
@@ -215,6 +250,42 @@ public final class RemoteDevices: @unchecked Sendable {
         return token
     }
 
+    /// A device of this Mac's account, its ticket taken (`grant`: what for): its token (shown once), bound to the link
+    /// key it came with. Replaces whatever `id` had here.
+    public func admit(id: String, name: String, linkKey: String, grant: AccountGrant) throws -> String {
+        guard Self.validId(id) else { throw PairError.badDevice("device.id must be 8–64 of A–Z a–z 0–9 _ -") }
+        let key = linkKey.lowercased()
+        guard key.utf8.count == 64, key.allSatisfy(\.isHexDigit) else { throw PairError.badDevice("the link key must be 64 hex digits") }
+        lock.lock()
+        devices.removeAll { $0.id == id }
+        guard devices.count < Self.maxDevices else {
+            lock.unlock()
+            throw PairError.full
+        }
+        let token = Self.random(32)
+        devices.append(RemoteDevice(id: id, name: Self.cleanName(name), pairedAt: now(), lastSeenAt: now(), tokenHash: Self.hash(token),
+                                    linkKey: key, account: grant))
+        saveLocked()
+        lock.unlock()
+        onChange?()
+        return token
+    }
+
+    /// The devices let in by the account whose grant no longer counts (`counts` says; one whose sign-in ended always
+    /// goes): forgotten. How many went.
+    @discardableResult
+    public func prune(_ counts: (AccountGrant) -> Bool) -> Int {
+        lock.lock()
+        let t = now().timeIntervalSince1970
+        let before = devices.count
+        devices.removeAll { d in d.account.map { !(Double($0.sx) > t && counts($0)) } ?? false }
+        let gone = before - devices.count
+        if gone > 0 { saveLocked() }
+        lock.unlock()
+        if gone > 0 { onChange?() }
+        return gone
+    }
+
     /// Forgets the device: its token stops working at once. false when it wasn't paired.
     @discardableResult
     public func remove(id: String) -> Bool {
@@ -265,8 +336,11 @@ public final class RemoteDevices: @unchecked Sendable {
             guard let id = d["id"] as? String, let hash = d["tokenHash"] as? String, hash.count == 64,
                   let paired = d["pairedAt"] as? Double else { return nil }
             let seen = (d["lastSeenAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
+            let grant = AccountGrant(json: d["account"])
+            // (one that says it came by the account but cannot say how: not taken)
+            if d["account"] != nil, grant == nil { return nil }
             return RemoteDevice(id: id, name: d["name"] as? String ?? id, pairedAt: Date(timeIntervalSince1970: paired / 1000),
-                                lastSeenAt: seen, tokenHash: hash, linkKey: d["linkKey"] as? String)
+                                lastSeenAt: seen, tokenHash: hash, linkKey: d["linkKey"] as? String, account: grant)
         }
     }
 

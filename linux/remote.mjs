@@ -4,10 +4,12 @@
 // signaling server — built on @yoyocontrol/remote (its built JS is vendored in vendor/remote: nothing to install).
 //
 // - State in `<home>` (0700), this process the only writer: `remote.json` (`serverId`, `direct`, `linkPublicPort`,
-//   `rtcPublicPort`), `devices.json`, `tls-key.der` (the identity key), `link-key`, and `admin.sock` (0600: the `pair` /
-//   `devices` / `remove` / `disconnect` commands talk to the running server over it).
-// - The link listener runs while a phone is paired or a pairing code is live (and 2 min after the last phone was
-//   removed, so it hears `unauthorized` and forgets this server); with it the signaling registration and the mappings.
+//   `rtcPublicPort`), `devices.json`, `account.json` (the account it is in, account.mjs), `tls-key.der` (the identity
+//   key), `link-key`, and `admin.sock` (0600: the `pair` / `devices` / `remove` / `disconnect` / `account` commands talk
+//   to the running server over it).
+// - The link listener runs while a phone is paired, a pairing code is live or this computer is in an account (and 2
+//   min after the last phone was removed, so it hears `unauthorized` and forgets this server); with it the signaling
+//   registration and the mappings.
 // - Remote clients get the Mac's remote routes (REMOTE_ROUTES) — what this server lacks answers 404 as on the token
 //   listener — with control: `POST /control`, and `/input` only while holding it.
 // - The link: UDP `linkPort` (default 47820); its WebRTC socket on `rtcPort` (default the link port + 1, `null` = none).
@@ -21,7 +23,8 @@ import { runInNewContext } from "node:vm";
 import { join, resolve } from "node:path";
 import { RemoteControl } from "./control.mjs";
 import { DEFAULT_LINK_PORT, LinkServer, defaultRtcPort, loadLink } from "./link.mjs";
-import { accountStatement, interfaceAddresses, loadOrCreateIdentity, overrideNetwork, validAccount, writePrivate } from "./vendor/remote/index.js";
+import { RemoteAccount } from "./account.mjs";
+import { interfaceAddresses, loadOrCreateIdentity, overrideNetwork, writePrivate } from "./vendor/remote/index.js";
 import { PortMapping, nodeNetwork } from "./vendor/remote/portmap/index.js";
 import { DeviceStore, pairingLink, randomToken } from "./vendor/remote/devices.js";
 import { SignalClient } from "./vendor/remote/signal.js";
@@ -54,10 +57,12 @@ export const REMOTE_ROUTES = new Set([
   "POST /input", "POST /control", "GET /clipboard", "POST /clipboard", "GET /clipboard/image", "GET /clipboard/file",
 ]);
 
-/** The account routes a paired phone uses over its link (docs/ACCOUNT.md; `accountRoute`). */
-export const ACCOUNT_ROUTES = new Set(["GET /account", "POST /account/join", "POST /account/invite"]);
+/** The account routes a phone uses over its link (docs/ACCOUNT.md; `accountRoute`): joining and leaving only for one
+ *  paired here (not one the account let in). */
+export const ACCOUNT_ROUTES = new Set(["GET /account", "POST /account/join", "POST /account/leave"]);
 
-/** `remote.json`: who this server is, the direct switch, the public ports the router gave last, the account it joined. */
+/** `remote.json`: who this server is, the direct switch, the public ports the router gave last. (An `account` there is
+ *  from before the account library: not read, not written again.) */
 export function loadSettings(path) {
   let j = {};
   try {
@@ -69,12 +74,11 @@ export function loadSettings(path) {
     direct: typeof j.direct === "boolean" ? j.direct : true,
     linkPublicPort: port(j.linkPublicPort),
     rtcPublicPort: port(j.rtcPublicPort),
-    account: validAccount(j.account?.id) ? { id: j.account.id, since: typeof j.account.since === "number" ? j.account.since : Date.now() } : null,
   };
 }
 
 export function saveSettings(path, s) {
-  writePrivate(path, `${JSON.stringify({ version: 2, serverId: s.serverId, direct: s.direct, ...(s.linkPublicPort ? { linkPublicPort: s.linkPublicPort } : {}), ...(s.rtcPublicPort ? { rtcPublicPort: s.rtcPublicPort } : {}), ...(s.account ? { account: s.account } : {}) }, null, 2)}\n`);
+  writePrivate(path, `${JSON.stringify({ version: 2, serverId: s.serverId, direct: s.direct, ...(s.linkPublicPort ? { linkPublicPort: s.linkPublicPort } : {}), ...(s.rtcPublicPort ? { rtcPublicPort: s.rtcPublicPort } : {}) }, null, 2)}\n`);
 }
 
 export class RemoteAccess {
@@ -84,9 +88,9 @@ export class RemoteAccess {
    * interfaces': the pairing link's addresses and the link's external addresses), `portMap` (the mappings' overrides:
    * `internalClient`, `internalPort`, `externalPort`, `gateway`, `upnpLocation`), `exempt` (addresses never cooled
    * down), `signalUrl`, `WebSocket` (tests; `signalUrl: null`: no signaling server), the link's `linkPort`,
-   * `linkRelays`, `rtcPort`, `stun`.
+   * `linkRelays`, `rtcPort`, `stun`; `account`: the account's options (tests: `fetch`, `timing`).
    */
-  constructor({ svc, home, direct, name, advertise, portMap, exempt, signalUrl, WebSocket, linkPort = DEFAULT_LINK_PORT, linkRelays = [], rtcPort = defaultRtcPort(linkPort), stun = [], log = () => {}, lingerMs = LINGER_MS }) {
+  constructor({ svc, home, direct, name, advertise, portMap, exempt, signalUrl, WebSocket, linkPort = DEFAULT_LINK_PORT, linkRelays = [], rtcPort = defaultRtcPort(linkPort), stun = [], log = () => {}, lingerMs = LINGER_MS, account = {} }) {
     this.svc = svc;
     this.home = home;
     this.log = log;
@@ -133,12 +137,14 @@ export class RemoteAccess {
     this.timers = new Set();
     this.updating = Promise.resolve();
     this.running = false;
+    this.account = new RemoteAccount({ remote: this, log, ...account });
   }
 
   /** The identity, the admin socket, and the listener if a phone is paired. */
   async start() {
     this.running = true;
     this.identity = loadOrCreateIdentity(this.home);
+    this.account.start();
     await this.startAdmin();
     await this.update();
   }
@@ -148,6 +154,7 @@ export class RemoteAccess {
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
     this.control.stop();
+    this.account.stop();
     this.admin?.close();
     this.admin = null;
     if (process.platform !== "win32") rmSync(adminPath(this.home), { force: true });
@@ -159,7 +166,7 @@ export class RemoteAccess {
   }
 
   needsListener() {
-    return !this.devices.isEmpty || this.devices.pairingCode !== null || Date.now() < this.lingerUntil;
+    return !this.devices.isEmpty || this.devices.pairingCode !== null || this.account.joined || Date.now() < this.lingerUntil;
   }
 
   /** Starts or stops the link (and with it the signaling registration and the mappings) to match. One at a time. */
@@ -207,8 +214,6 @@ export class RemoteAccess {
     if (this.signalUrl !== null) {
       this.signal = new SignalClient({ identity: this.identity, url: this.signalUrl, log: this.log, WebSocket: this.WebSocket });
       this.signal.setLink(link.json());
-      this.signal.setAccount(this.settings.account?.id ?? null);
-      this.signal.on("unlinked", () => this.setAccount(null, "no longer in the account (removed from its directory)"));
       this.signal.start();
     }
     link.onChange = () => this.signal?.setLink(link.json());
@@ -331,41 +336,28 @@ export class RemoteAccess {
       signal: { connected: this.signal?.registered ?? false },
       direct: this.directJson(),
       link: this.linkJson(),
-      account: this.settings.account,
+      account: this.account.json(),
     };
   }
 
   // ---- the account (docs/ACCOUNT.md) ----
 
-  setAccount(account, why) {
-    const id = account?.id ?? null;
-    if ((this.settings.account?.id ?? null) === id) return;
-    this.settings.account = account;
-    saveSettings(this.settingsPath, this.settings);
-    this.signal?.setAccount(id);
-    this.log(`remote: ${why}`);
-  }
-
-  /** A paired phone's account route over its link: `{ status, json }`. */
-  accountRoute(route, body, device) {
+  /** A phone's account route over its link: `{ status, json }`. Joining and leaving: a phone paired here only (one
+   *  the account let in cannot move this computer into another account). */
+  async accountRoute(route, body, device) {
+    if (route === "GET /account") return { status: 200, json: this.account.json() };
+    if (!this.devices.isPaired(device.id)) return { status: 403, json: { error: "only a phone paired with this computer may do this" } };
     switch (route) {
-      case "GET /account":
-        return { status: 200, json: { account: this.settings.account } };
       case "POST /account/join": {
-        if (!validAccount(body?.account)) return { status: 400, json: { error: "account must be 32 lowercase hex digits" } };
-        if (!this.identity) return { status: 503, json: { error: "no identity" } };
-        if (this.settings.account?.id !== body.account) this.setAccount({ id: body.account, since: Date.now() }, `${device.name} put this computer in its account`);
-        return { status: 200, json: accountStatement(this.identity, body.account, { serverId: this.settings.serverId, name: this.name, platform: this.svc.platform?.id ?? "linux" }) };
+        if (typeof body?.server !== "string" || typeof body?.key !== "string") return { status: 400, json: { error: "body must be { server, key } (an older app sent { account }: update it)" } };
+        const r = await this.account.join(body);
+        if (r.status === 200) this.log(`remote: ${device.name} put this computer in its account`);
+        return r;
       }
-      case "POST /account/invite": {
-        if (typeof body?.id !== "string" || typeof body?.linkKey !== "string") return { status: 400, json: { error: "id and linkKey are required" } };
-        try {
-          const c = this.devices.invite(body.id, body.linkKey);
-          this.log(`remote: ${device.name} let ${typeof body.name === "string" ? body.name.slice(0, 64) : body.id} in (a code for it alone)`);
-          return { status: 200, json: { code: c.code, expiresAt: c.expiresAt } };
-        } catch (err) {
-          return { status: err?.kind === "full" ? 429 : 400, json: { error: err.message } };
-        }
+      case "POST /account/leave": {
+        const r = await this.account.leave();
+        this.log(`remote: ${device.name} took this computer out of its account`);
+        return r;
       }
       default:
         return { status: 404, json: { error: "not found" } };
@@ -456,9 +448,12 @@ export class RemoteAccess {
         if (!this.devices.remove(body.id)) return sendJson(res, 404, { error: "no such device" });
         this.log(`remote: removed device ${body.id}`);
         return sendJson(res, 200, this.json());
-      case "POST /remote/account/leave":
-        this.setAccount(null, "left the account");
-        return sendJson(res, 200, this.json());
+      case "POST /remote/account/join":
+      case "POST /remote/account/confirm":
+      case "POST /remote/account/leave": {
+        const r = route.endsWith("join") ? await this.account.join(body) : route.endsWith("confirm") ? await this.account.confirm() : await this.account.leave();
+        return sendJson(res, r.status, r.status === 200 ? this.json() : r.json);
+      }
       case "POST /remote/disconnect":
         this.control.releaseAny("control taken back on this computer");
         return sendJson(res, 200, this.json());

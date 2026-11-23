@@ -74,6 +74,8 @@ final class LinkServer: @unchecked Sendable {
     /// Called (any thread) when what `/status` `link` says changed (listening, addresses), and when a session opens or
     /// ends.
     var onChange: (() -> Void)?
+    /// The account this Mac is in (devices mode): who `Ticket <ticket>` is checked by.
+    var membership: AccountMembership?
 
     init(options: LinkOptions, mode: Mode, identity: Identity, keyDirectory: String, control: RemoteControl = .shared) {
         self.options = options
@@ -409,6 +411,9 @@ final class LinkServer: @unchecked Sendable {
             if parts.count == 2, parts[0].lowercased() == "pair" {
                 return pair(devices, code: parts[1].trimmingCharacters(in: .whitespaces), request: request, source: source)
             }
+            if parts.count == 2, parts[0].lowercased() == "ticket" {
+                return await ticket(devices, jwt: parts[1].trimmingCharacters(in: .whitespaces), request: request, source: source)
+            }
             guard parts.count == 2, parts[0].lowercased() == "bearer" else {
                 log("link: unauthorized hello from \(source): no token")
                 return .deny(.unauthorized, message: "unauthorized")
@@ -458,6 +463,33 @@ final class LinkServer: @unchecked Sendable {
         } catch {
             log("link: a wrong or expired pairing code from \(source)")
             return .deny(.unauthorized, message: "the pairing code is wrong or has expired; show a new one on the Mac")
+        }
+    }
+
+    /// `hello.credential = "Ticket <ticket>"` (docs/ACCOUNT.md): a device of this Mac's account, with the ticket its
+    /// account server signed for it (`AccountMembership.redeem`, once); let in like a pairing (`RemoteDevices.admit`):
+    /// its token in `welcome.principal.token`, ending with its sign-in and gone when the account's list says so.
+    private func ticket(_ devices: RemoteDevices, jwt: String, request: AuthRequest, source: String) async -> LinkAuthDecision {
+        guard let m = membership else { return .deny(.unauthorized, message: "this Mac is in no account") }
+        let hello = request.hello
+        let claims: AccountMembership.TicketClaims
+        do {
+            claims = try await m.redeem(jwt)
+        } catch {
+            let code = (error as? AccountMembership.Failure).map { f -> String in if case .ticket(let c) = f { return c }; return "error" } ?? "error"
+            log("link: a ticket refused from \(source) (\(code))")
+            return .deny(code == "busy" ? .busy : .unauthorized, message: "the ticket was refused (\(code))")
+        }
+        let name = hello.device.name.isEmpty ? claims.deviceName : hello.device.name
+        do {
+            let token = try devices.admit(id: hello.device.id, name: name, linkKey: request.clientKey,
+                                          grant: AccountGrant(acc: claims.account, dev: claims.deviceId, tat: claims.iat, sx: claims.sx))
+            log("link: \(name) came in by its account (from \(source))")
+            return .accept(principalJSON: Self.principal(id: hello.device.id, name: name, pairing: (token, identity.serverId, identity.name)))
+        } catch RemoteDevices.PairError.full {
+            return .deny(.busy, message: "too many devices; remove one on the Mac first")
+        } catch {
+            return .deny(.unauthorized, message: "\(error)")
         }
     }
 

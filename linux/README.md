@@ -99,7 +99,8 @@ DISPLAY=:0 node server.mjs --remote ~/.yoyo-remote --name "My desktop"          
 DISPLAY=:0 node server.mjs --remote ~/.yoyo-remote --port 7380 --token-file ~/.yoyo-token   # 两个都要
 node server.mjs pair --remote ~/.yoyo-remote          # 配对链接 + 终端二维码（qrencode 的，没有就自带的；--page 另开一页）：iPhone 扫码，5 分钟、一次
 node server.mjs devices --remote ~/.yoyo-remote       # 配对的设备（--json：同 GET /remote）；remove <id>、disconnect（收回控制权）、status
-node server.mjs account --remote ~/.yoyo-remote       # 在不在 Yoyo Control 账号里（docs/ACCOUNT.md）；account leave 退出
+node server.mjs account --remote ~/.yoyo-remote       # 在不在账号里（docs/ACCOUNT.md）；account leave 退出
+node server.mjs account join --remote ~/.yoyo-remote --key <加入钥匙> https://account.yoyocontrol.com   # 凭管理员的钥匙加入（不带 --key：加入码，再 account confirm）
 ```
 
 - 参数：`--remote <home>`（状态目录，0700）、`--name`（`/status` 的显示器名，也是手机上这台电脑的名字；`--computer-name` 单独给后者）、
@@ -108,18 +109,19 @@ node server.mjs account --remote ~/.yoyo-remote       # 在不在 Yoyo Control �
   端口在宿主上，就是宿主的局域网地址和端口）、`--direct-gateway <ip>`、`--direct-upnp <URL>`（路由器的 UPnP 描述地址：容器里收不到路由器的
   SSDP 回答——它从别的端口回，过不了 NAT）、`--direct-port <n>`（想要的外网端口）、`--exempt <ip,…>`（Link 的守卫不按来源冷却的地址：容器发布的
   端口上所有客户端都从网桥的地址来）。`YOYO_SIGNAL_URL` 换信令服务。
-- `<home>` 里：`remote.json`（`serverId`、`direct`、`linkPublicPort`、`rtcPublicPort`、`account`）、`tls-key.der`（0600，身份钥匙，格式和 Mac 的一样）、
+- `<home>` 里：`remote.json`（`serverId`、`direct`、`linkPublicPort`、`rtcPublicPort`）、`account.json`（0600，加入的账号：账号库的成员文件）、`tls-key.der`（0600，身份钥匙，格式和 Mac 的一样）、
   `link-key`（0600，Link 的钥匙）、`devices.json`（0600，令牌只存 SHA-256）、`admin.sock`（0600：上面那些命令经它和跑着的服务说话，接口同 Mac 的
-  `GET /remote`、`POST /remote/pairing`、`/remote/pairing/stop`、`/remote/direct`、`/remote/devices/remove`、`/remote/disconnect`、`/remote/account/leave`，没有
+  `GET /remote`、`POST /remote/pairing`、`/remote/pairing/stop`、`/remote/direct`、`/remote/devices/remove`、`/remote/disconnect`、`/remote/account/leave`，另有 `/remote/account/join { server, key? }`、`/remote/account/confirm`；没有
   `/remote/enabled`：开关就是 `--remote`）。
-- Link（连同信令服务的登记和端口映射）只在有配对的设备、或配对码还有效时运行；最后一台设备被移除后再留 2 分钟（它重连时听到 `unauthorized`、
+- Link（连同信令服务的登记和端口映射）只在有配对的设备、配对码还有效、或在账号里时运行；最后一台设备被移除后再留 2 分钟（它重连时听到 `unauthorized`、
   忘掉这台）。`pair` 等路由器回答（至多 6 s）再给链接，这样绑定里有公网地址。
 - 配对链接同 Mac 的二维码：`yoyocontrol://pair?v=2&id=&n=&fp=<身份钥匙指纹>&l=&lk=&ls=&lp=[&a=<局域网 IPv4>]&c=<码>`。手机在 Link 上配对：
   `hello.credential = "Pair <码>"`，`welcome.principal` 给回 `token` 和 `server: { id, name, platform: "linux" }`，令牌随即绑定这把客户端钥匙。
 - 手机能用的路由：Mac 的那一套（`docs/REMOTE.md`「远程能用的接口」），经 Link 的 RPC；这里没有的（`/focus`）照旧 404，其余（`/windows`、`/hit`、
   `/automation`、`/audio/stats`…）对手机 404。`POST /clipboard` 只收 `text`。
-- 账号（`docs/ACCOUNT.md`）：和 Mac 一样，已配对的手机经 Link 用 `GET /account`、`POST /account/join`（签名声明，`platform: "linux"`）、
-  `POST /account/invite`（定向码）；信令连接上发 `{"type":"account","id"}`。
+- 账号（`docs/ACCOUNT.md`，`account.mjs`：vendored 的 `@yoyocontrol/account`，用 `link-key` 签名）：和 Mac 一样，账号的设备凭
+  `hello.credential = "Ticket <入场券>"` 进来；在这里配对过的手机经 Link 用 `POST /account/join { server, key }` 让它加入、`POST /account/leave` 退出，
+  `GET /account` 看在哪个账号里。
 - 控制权（`control.mjs`，语义同 `docs/REMOTE.md`「控制权」）：手机 `control.take`（= `POST /control { controller: "user" }`）拿到（最后拿的那台
   持有，换手时按着的左键抬起）才能输入（没拿：`input.rejected`）；令牌监听的 `/input` 在有手机拿着时 409 `controlled-elsewhere`；10 分钟没有
   输入、设备被移除、`disconnect` 都放开；每次变化 `/events` 一行 `{"type":"control","control":{…}}`（两种客户端都收到），`/status.control`

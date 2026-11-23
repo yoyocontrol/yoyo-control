@@ -87,7 +87,7 @@ cp $B/node/node.exe $OUT/node.exe
 # ---- the server (the same .mjs as Linux), its vendored packages, the scripts
 (cd $ROOT/linux && ./vendor.sh --check)
 cp $ROOT/linux/*.mjs $OUT/
-cp -R $ROOT/linux/vendor/remote $ROOT/linux/vendor/link $OUT/vendor/
+cp -R $ROOT/linux/vendor/remote $ROOT/linux/vendor/link $ROOT/linux/vendor/account $ROOT/linux/vendor/jose $OUT/vendor/
 rm -f $OUT/vendor/link/*.node(N)
 cp $ROOT/link/target/x86_64-pc-windows-gnu/release/uu_link_node.dll $OUT/vendor/link/uu-link.win32-x64.node
 cp install.ps1 uninstall.ps1 yoyo.cmd $OUT/

@@ -59,7 +59,7 @@ test("a schema 2 database gets the computers' signaling column; what they had st
     made.close();
     // as schema 2 had it: no signal column
     const old = new DatabaseSync(file);
-    old.exec("ALTER TABLE computers DROP COLUMN signal; ALTER TABLE enrollments DROP COLUMN signal; PRAGMA user_version = 2;");
+    old.exec("ALTER TABLE computers DROP COLUMN signal; ALTER TABLE enrollments DROP COLUMN signal; ALTER TABLE computers DROP COLUMN info; ALTER TABLE enrollments DROP COLUMN info; DROP TABLE entitlements; PRAGMA user_version = 2;");
     old.close();
     const store = new Store(file);
     assert.equal(store.get<{ user_version: number }>("PRAGMA user_version")!.user_version, SCHEMA_VERSION);

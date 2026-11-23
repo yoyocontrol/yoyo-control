@@ -1,0 +1,41 @@
+{
+  "name": "@yoyocontrol/account-server",
+  "version": "0.1.0",
+  "description": "An account server: OpenID Connect sign-in, an account's computers and devices, tickets into each computer, a signed revocation list",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
+    }
+  },
+  "bin": {
+    "yoyo-account-server": "./dist/main.js",
+    "yoyo-account-admin": "./dist/admin-cli.js",
+    "yoyo-account-dev": "./dist/dev.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "dependencies": {
+    "@yoyocontrol/account": "0.1.0",
+    "jose": "^6.0.0"
+  },
+  "scripts": {
+    "build": "npm --prefix ../account run build && rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "npm --prefix ../account run build && tsc --noEmit -p tsconfig.json",
+    "test": "npm --prefix ../account run build && node --test --import tsx \"test/*.test.ts\""
+  }
+}

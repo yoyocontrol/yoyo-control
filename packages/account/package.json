@@ -1,0 +1,23 @@
+{
+  "name": "@yoyocontrol/account",
+  "version": "0.1.0",
+  "description": "A computer's half of an account: join an account server, pin its owner, take its tickets, follow its signed revocation list",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+  },
+  "files": ["dist", "README.md"],
+  "sideEffects": false,
+  "dependencies": {
+    "jose": "^6.0.0"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --import tsx \"test/*.test.ts\""
+  }
+}

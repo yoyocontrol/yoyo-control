@@ -9,7 +9,7 @@ import { AccountMember } from "@yoyocontrol/account";
 
 const member = new AccountMember({
   file: "/path/to/account.json",                     // 0600: the membership (server, keys, owner, revocations)
-  self: () => ({ linkId, name: "Study PC", relays, direct, origins: [] }),
+  self: () => ({ linkId, name: "Study PC", relays, direct, origins: [], info: { platform: "linux" } }),   // info: for your clients
   sign: (id, text) => (id === linkId ? signWithLinkKey(text) : null),   // base64url Ed25519
   namespace: "yoyo",                                  // the account server's (ACCOUNT_NAMESPACE)
   onChange: () => dropTokensThatNoLongerCount(),      // a new revocation list, or out of the account

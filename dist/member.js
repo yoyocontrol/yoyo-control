@@ -733,8 +733,8 @@ export class AccountMember {
     }
 }
 function selfBody(s) {
-    // (`signal`: an account server from before the hosted web client ignores it)
-    return { name: s.name, fingerprint: s.fingerprint ?? null, relays: s.relays.slice(0, 4), direct: s.direct.filter((d) => d.length <= 64).slice(0, 16), origins: s.origins.slice(0, 16), signal: s.signal ?? null };
+    // (`signal`: an account server from before the hosted web client ignores it; `info`, one before 0.2.0)
+    return { name: s.name, fingerprint: s.fingerprint ?? null, relays: s.relays.slice(0, 4), direct: s.direct.filter((d) => d.length <= 64).slice(0, 16), origins: s.origins.slice(0, 16), signal: s.signal ?? null, ...(s.info !== undefined ? { info: s.info } : {}) };
 }
 export { TicketError };
 export { sha256 as accountSha256 };

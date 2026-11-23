@@ -65,6 +65,9 @@ export interface ComputerSelf {
     origins: string[];
     /** The signaling service it waits for browsers' offers at (an origin): where a hosted web client sends its offer. */
     signal?: string | null;
+    /** What the product's own clients need to know of it (a JSON object of 2 KiB at most, opaque to the account server:
+     *  its own ids, its platform, how it proves who it is…), listed with it. */
+    info?: Record<string, unknown> | null;
 }
 export interface PendingJoin {
     server: string;

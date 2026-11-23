@@ -1,6 +1,6 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { type RevocationState, type Wire } from "@yoyocontrol/account";
-export declare const SCHEMA_VERSION = 3;
+export declare const SCHEMA_VERSION = 4;
 /** How long a device's revocation stays on the list (seconds): past the longest a computer's token of it can live. */
 export declare const REVOCATION_KEEP_S: number;
 export declare const sha256: (s: string) => string;
@@ -55,7 +55,20 @@ export interface Computer {
     origins: string;
     /** The signaling service the computer waits for browsers' offers at (an origin), or null. */
     signal: string | null;
+    /** What the computer says of itself for its product's own clients (a JSON object, opaque here), or null. */
+    info: string | null;
     joined_at: number;
+    updated_at: number;
+}
+/** An account's entitlement from one purchase (`source` "appstore": a StoreKit original transaction). Times unix ms. */
+export interface Entitlement {
+    source: string;
+    original_id: string;
+    account_id: string;
+    product_id: string;
+    expires_at: number | null;
+    revoked_at: number | null;
+    environment: string;
     updated_at: number;
 }
 export interface Enrollment {
@@ -69,6 +82,7 @@ export interface Enrollment {
     direct: string;
     origins: string;
     signal: string | null;
+    info: string | null;
     expect: string | null;
     ip: string;
     created_at: number;
@@ -187,6 +201,12 @@ export declare class Store {
     createJoinKey(account: string, uses: number, expiresAt: number, now: number): string;
     /** One use of a join key taken: its account's id, or null (unknown, expired, used up). */
     useJoinKey(key: string, now: number): string | null;
+    /** How many join keys of `account` are still good (the app's own: a few at a time). */
+    countJoinKeys(account: string, now: number): number;
+    /** One purchase is one account's: the last one to report it (a family member's phone signed into another account
+     *  takes it over). */
+    putEntitlement(e: Entitlement): void;
+    entitlementsOf(account: string): Entitlement[];
     revocationState(account: string): RevocationState;
     /**
      * Revocations of one account, in one step: entries added (an entry's `at` only moves later), the disabled mark set

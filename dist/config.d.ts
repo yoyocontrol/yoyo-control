@@ -1,4 +1,5 @@
 import { Wire } from "@yoyocontrol/account";
+import { type AppleClient } from "./apple.js";
 /**
  * One thing this server lends the computers of its accounts (GET /v1/computer/services), under `name` there. `fixed`:
  * the same fields for every computer (`value()` now: an origin `url` and short strings — a relay's token, a key; null
@@ -33,8 +34,24 @@ export interface Allow {
     /** `@example.com` entries, lower case without the `@`: Google's `hd`, else a verified email's domain. */
     domains: string[];
 }
+/** An app's native Sign in with Apple (POST /v1/auth/apple): its identity token goes straight to this server. */
+export interface AppleSignIn {
+    /** The apps' bundle ids (the token's `aud` is one of them). */
+    audiences: string[];
+    /** The Sign in with Apple key: with it, an account deleted from the app has its Apple grant revoked (Apple's rule);
+     *  without it nothing is revoked. Its `clientId` is the first audience. */
+    client: AppleClient | null;
+}
+/** App Store subscriptions (POST /v1/entitlements/appstore): an app's StoreKit 2 transactions of these products. */
+export interface AppStoreEntitlements {
+    bundleId: string;
+    products: string[];
+}
 export interface AccountConfig {
+    /** The OpenID Connect provider's issuer; without one (an app's native Sign in with Apple alone), Apple's. */
     issuer: string;
+    /** Whether an OpenID Connect provider is set up (GET /v1/signin; false: only the native sign-ins). */
+    oidc: boolean;
     clientId: string;
     clientSecret: string;
     /** The account server's public origin, https://account.example.com (no path). */
@@ -68,6 +85,10 @@ export interface AccountConfig {
      *  `speech` (ACCOUNT_SPEECH_URL), `signal` (ACCOUNT_SIGNAL_URL + ACCOUNT_SIGNAL_KEY or _FILE: with the relay only,
      *  never its token) and `web` (the first of ACCOUNT_WEB_REDIRECTS' origin). */
     services: ServiceSpec[];
+    /** ACCOUNT_APPLE_AUDIENCES (+ ACCOUNT_APPLE_TEAM_ID, ACCOUNT_APPLE_KEY_ID, ACCOUNT_APPLE_KEY or _FILE): null = off. */
+    apple: AppleSignIn | null;
+    /** ACCOUNT_APPSTORE_BUNDLE_ID + ACCOUNT_APPSTORE_PRODUCTS: null = off. */
+    appstore: AppStoreEntitlements | null;
 }
 export declare class ConfigError extends Error {
 }
@@ -83,7 +104,10 @@ export declare function allowed(allow: Allow | null, issuer: string, claims: {
     hd?: unknown;
 }): boolean;
 /** Why this configuration must not start (an open IdP nobody narrowed), or null. */
-export declare function opennessProblem(cfg: Pick<AccountConfig, "issuer" | "allow" | "open">): string | null;
+export declare function opennessProblem(cfg: Pick<AccountConfig, "issuer" | "allow" | "open"> & {
+    apple?: AppleSignIn | null;
+}): string | null;
 /** `relayTokenFile` / `signalKeyFile`: read ACCOUNT_RELAY_TOKEN_FILE / ACCOUNT_SIGNAL_KEY_FILE as they are now (main.ts:
  *  again when the file changed). */
-export declare function configFromEnv(env: Record<string, string | undefined>, secretFromFile?: string, relayTokenFile?: () => string | null, signalKeyFile?: () => string | null): AccountConfig;
+/** `appleKeyFromFile`: ACCOUNT_APPLE_KEY_FILE's content (main.ts reads it). */
+export declare function configFromEnv(env: Record<string, string | undefined>, secretFromFile?: string, relayTokenFile?: () => string | null, signalKeyFile?: () => string | null, appleKeyFromFile?: string): AccountConfig;

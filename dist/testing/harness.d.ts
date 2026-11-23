@@ -14,6 +14,7 @@ export declare const PUSH_SERVICE: string;
 export declare const SPEECH_SERVICE: string;
 import { Store } from "../store.js";
 import { TestIdp } from "./idp.js";
+import type { TestApple } from "./apple.js";
 export interface LinkKey {
     id: string;
     key: KeyObject;
@@ -36,11 +37,16 @@ export interface Harness {
     };
     stop(): Promise<void>;
 }
+/** `apple`: a stand-in for Apple (identity tokens, StoreKit) — give ACCOUNT_APPLE_AUDIENCES in `env` too;
+ *  `appleFetch`: Apple's token endpoints, for revoking. `oidc: false`: no IdP (Apple only). */
 export declare function harness(o?: {
     env?: Record<string, string>;
     limits?: Partial<Limits>;
     dbFile?: string;
     idp?: (idp: TestIdp) => void;
+    apple?: TestApple;
+    appleFetch?: typeof fetch;
+    oidc?: boolean;
 }): Promise<Harness>;
 export declare function stopAll(): Promise<void>;
 export declare const b64url: (b: Buffer) => string;
@@ -79,6 +85,23 @@ export declare function appSignIn(h: Harness, o?: {
     expiresAt: number;
 }>;
 /** A computer starts a join. */
+/** An app's native Sign in with Apple through the stand-in (`h` made with `apple`): its device session. */
+export declare function appleSignIn(h: Harness, apple: TestApple, o?: {
+    sub?: string;
+    name?: string;
+    email?: string;
+    device?: Record<string, unknown>;
+    aud?: string;
+}): Promise<{
+    session: string;
+    account: {
+        id: string;
+        name: string | null;
+    };
+    device: {
+        id: string;
+    };
+}>;
 export declare function enroll(h: Harness, k: LinkKey, extra?: Record<string, unknown>): Promise<{
     status: number;
     body: {

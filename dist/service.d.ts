@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AccountConfig } from "./config.js";
 import type { KeyRing } from "./keys.js";
 import { type Idp } from "./oidc.js";
+import { type AppleKeys, type StoreTransaction } from "./apple.js";
 import { type Account, type Session, type Store } from "./store.js";
 export declare const SESSION_MAX_AGE_MS: number;
 /** The hosted web client's device session (a page whose token a script could read: shorter than an app's). */
@@ -17,6 +18,10 @@ export declare const HOSTED_PROOF_MAX_AGE_S = 120;
 export declare const SIGNIN_TTL_MS: number;
 export declare const APP_CODE_TTL_MS = 60000;
 export declare const JOIN_TTL_MS: number;
+/** A join key an app made for a computer it is paired with: one use, this long. */
+export declare const APP_JOIN_KEY_TTL_MS: number;
+/** What a computer says of itself for its product's clients (`info`, a JSON object): this many bytes at most. */
+export declare const INFO_MAX = 2048;
 /** After an approval the computer has this long to confirm it on its own screen. */
 export declare const JOIN_CONFIRM_MS: number;
 export declare const POLL_INTERVAL_S = 2;
@@ -52,6 +57,8 @@ export declare const LIMITS: {
     /** Sign-ins on their way through the IdP, in all. */
     signinsOpenMax: number;
     computersPerAccount: number;
+    /** Join keys an app may have made for its account and not yet used. */
+    appJoinKeysOpen: number;
     /** Devices signed in at once (a device that is signed out does not count). */
     devicesPerAccount: number;
     /** A request's body must have arrived within this. */
@@ -74,8 +81,15 @@ export interface NoticeOut {
 export interface ServiceDeps {
     cfg: AccountConfig;
     store: Store;
-    idp: Idp;
+    /** The OpenID Connect provider (null: none set up — only the native sign-ins). */
+    idp: Idp | null;
     ring: KeyRing;
+    /** Apple's keys by kid (tests: their own; default: fetched from Apple, cached). */
+    appleKeys?: AppleKeys;
+    /** Apple's token endpoints, to revoke a grant (tests: their own). */
+    appleFetch?: typeof fetch;
+    /** A StoreKit transaction's check (tests: their own; default: verifyStoreKit, the chain to Apple's root). */
+    storeKit?: (jws: string, now: number) => StoreTransaction | null;
     limits?: Partial<Limits>;
     now?: () => number;
     log?: (line: string) => void;
@@ -106,6 +120,7 @@ export declare class AccountService {
     private readonly codeFailAddress;
     private readonly codeFailAccount;
     private readonly webOrigins;
+    private readonly appleKeys;
     private refused;
     private refusedLogged;
     private delivering;
@@ -141,6 +156,8 @@ export declare class AccountService {
         signin: {
             appReturn: string;
             redirects: string[];
+            oidc: boolean;
+            apple: boolean;
         };
         ticketTtl: number;
         sessionMaxAgeDays: number;
@@ -149,6 +166,16 @@ export declare class AccountService {
     private signin;
     private callback;
     private token;
+    /** A new session for the device a sign-in named (`device`: `{ name, platform, key }`, each optional): the account's
+     *  device with that key, else a new one. What /v1/token and /v1/auth/apple answer. */
+    private deviceSession;
+    /**
+     * POST /v1/auth/apple `{ identityToken, nonce, name?, device }`: an app's native Sign in with Apple. The token is
+     * checked here (Apple's key, one of the apps' bundle ids, not expired, SHA-256 of `nonce`); the account is Apple's
+     * `iss` + `sub` — the same one a web sign-in through Apple as an OpenID provider would be. `name`: what the app got
+     * from Apple at the first sign-in (Apple says it only then), the shown name; else the email, if any.
+     */
+    private appleSignIn;
     /** The device session of a request's bearer token (an app's), or 401 / 429. */
     private bearer;
     /** A hosted web client's request: signed, just now, with the key its session was made for. */
@@ -156,6 +183,24 @@ export declare class AccountService {
     /** The session of `token` if it is one of `kinds`, current, and passes `check` (before it counts as used). */
     private sessionAuth;
     private me;
+    /** What the account has bought, by source: `appstore` → `{ active, productId, expiresAt, sandbox }` from its newest
+     *  purchase that is not revoked (absent: none ever reported). */
+    private entitlements;
+    /** POST /v1/entitlements/appstore `{ jws }`: a StoreKit 2 transaction of one of the operator's products, for its
+     *  bundle id, signed by Apple — the account's now (a purchase is the last reporting account's). */
+    private appStoreEntitlement;
+    /** POST /v1/join-keys: a one-use join key for the account, short-lived — what a signed-in app hands a computer it is
+     *  paired with (over their own connection) so the computer joins the account by itself. Only an app's session (a
+     *  web page's could be any script's). */
+    private appJoinKey;
+    /**
+     * DELETE /v1/me `{ authorizationCode? }`: the account deleted by its own person (from the app: Apple's rule for apps
+     * with accounts). Everything of it goes — its computers leave it (the signed list says so), its devices are signed
+     * out —, but no tombstone stays: signing in again makes a new account. With a fresh Sign in with Apple
+     * authorization code and the operator's key, the Apple grant is revoked too (Apple unreachable, or the code not of
+     * this account: deleted all the same, `revoked: false`).
+     */
+    private deleteAccount;
     /** The device's session ended, and the device on the revocation list (its computers stop taking what it holds). */
     endDeviceSession(a: Authed, reason: string): Promise<void>;
     /** A session the IdP re-check ended (recheck.ts): its device on the revocation list, the notice pushed. */

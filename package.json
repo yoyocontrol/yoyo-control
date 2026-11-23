@@ -1,6 +1,6 @@
 {
   "name": "@yoyocontrol/account-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "An account server: OpenID Connect sign-in, an account's computers and devices, tickets into each computer, a signed revocation list",
   "type": "module",
   "license": "Apache-2.0",
@@ -30,8 +30,8 @@
   ],
   "sideEffects": false,
   "dependencies": {
-    "@yoyocontrol/account": "git+https://github.com/yoyocontrol/yoyo-control.git#account-v0.1.0",
+    "@yoyocontrol/account": "git+https://github.com/yoyocontrol/yoyo-control.git#account-v0.2.0",
     "jose": "^6.0.0"
   },
-  "gitHead": "d1eaa8e00897121a22fcaff207cb3bd70a955c2b"
+  "gitHead": "876cc742d89ce760600dd9d702f4b38a078dc8de"
 }

@@ -1,8 +1,10 @@
 // The account server's settings (docs/ACCOUNT-LIB.md), from the environment. Three of them say which IdP:
-// ACCOUNT_OIDC_ISSUER, ACCOUNT_OIDC_CLIENT_ID, ACCOUNT_OIDC_CLIENT_SECRET (or _FILE). Everything else has a default
+// ACCOUNT_OIDC_ISSUER, ACCOUNT_OIDC_CLIENT_ID, ACCOUNT_OIDC_CLIENT_SECRET (or _FILE); an app's native Sign in with Apple
+// (ACCOUNT_APPLE_AUDIENCES) is another way in, beside it or instead of it. Everything else has a default
 // except the server's own public origin. Pure: main.ts reads the environment and the secret file and hands them here.
 // A program that embeds the server builds an AccountConfig itself instead (its `services` are any it lends).
 import { Wire } from "@yoyocontrol/account";
+import { APPLE_ISSUER } from "./apple.js";
 export const GOOGLE_ISSUER = "https://accounts.google.com";
 /** The two ways Google writes `iss` in an id_token (its OpenID docs: both occur). */
 export const GOOGLE_ISSUERS = [GOOGLE_ISSUER, "accounts.google.com"];
@@ -84,9 +86,10 @@ export function allowed(allow, issuer, claims) {
 export function opennessProblem(cfg) {
     if (cfg.allow || cfg.open)
         return null;
-    if (!OPEN_ISSUERS.some((re) => re.test(normalizeIssuer(cfg.issuer))))
+    const issuer = cfg.apple ? APPLE_ISSUER : cfg.issuer;
+    if (!OPEN_ISSUERS.some((re) => re.test(normalizeIssuer(cfg.issuer)) || re.test(issuer)))
         return null;
-    return `${cfg.issuer} lets anyone sign in: set ACCOUNT_ALLOW (subs, or @domain) or, if anyone with an account there may have one here, ACCOUNT_OPEN=1`;
+    return `${cfg.apple ? "Sign in with Apple" : cfg.issuer} lets anyone sign in: set ACCOUNT_ALLOW (subs, or @domain) or, if anyone with an account there may have one here, ACCOUNT_OPEN=1`;
 }
 /** An https origin and nothing after it (http for a loopback host: tests). */
 function originOf(name, v) {
@@ -95,23 +98,52 @@ function originOf(name, v) {
         throw new ConfigError(`${name} is an origin: https://host[:port], nothing after it`);
     return u;
 }
+const BUNDLE_RE = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
+/** The native Sign in with Apple settings: the audiences, and (all three, or none) the key to revoke grants with. */
+function appleFromEnv(env, list, keyFromFile) {
+    const audiences = list("ACCOUNT_APPLE_AUDIENCES");
+    const teamId = env.ACCOUNT_APPLE_TEAM_ID?.trim() ?? "";
+    const keyId = env.ACCOUNT_APPLE_KEY_ID?.trim() ?? "";
+    let key = env.ACCOUNT_APPLE_KEY?.trim() || keyFromFile?.trim() || "";
+    if (!audiences.length) {
+        if (teamId || keyId || key)
+            throw new ConfigError("ACCOUNT_APPLE_TEAM_ID / _KEY_ID / _KEY without ACCOUNT_APPLE_AUDIENCES");
+        return null;
+    }
+    for (const a of audiences)
+        if (!BUNDLE_RE.test(a))
+            throw new ConfigError(`ACCOUNT_APPLE_AUDIENCES: ${a} is not a bundle id`);
+    if (!teamId && !keyId && !key)
+        return { audiences, client: null };
+    if (!/^[A-Z0-9]{10}$/.test(teamId) || !/^[A-Z0-9]{10}$/.test(keyId) || !key)
+        throw new ConfigError("ACCOUNT_APPLE_TEAM_ID, ACCOUNT_APPLE_KEY_ID (10 of A-Z 0-9 each) and ACCOUNT_APPLE_KEY (or _FILE) go together");
+    // (the .p8 as it was downloaded, or that file's base64)
+    if (!key.includes("-----BEGIN"))
+        key = Buffer.from(key, "base64").toString("utf8");
+    if (!key.includes("-----BEGIN PRIVATE KEY-----"))
+        throw new ConfigError("ACCOUNT_APPLE_KEY is the .p8 (PEM, or its base64)");
+    return { audiences, client: { teamId, keyId, clientId: audiences[0], privateKey: key } };
+}
 const RELAY_TOKEN_RE = /^[A-Za-z0-9_-]{16,128}$/;
 /** `relayTokenFile` / `signalKeyFile`: read ACCOUNT_RELAY_TOKEN_FILE / ACCOUNT_SIGNAL_KEY_FILE as they are now (main.ts:
  *  again when the file changed). */
-export function configFromEnv(env, secretFromFile, relayTokenFile, signalKeyFile) {
+/** `appleKeyFromFile`: ACCOUNT_APPLE_KEY_FILE's content (main.ts reads it). */
+export function configFromEnv(env, secretFromFile, relayTokenFile, signalKeyFile, appleKeyFromFile) {
     const need = (k) => {
         const v = env[k]?.trim();
         if (!v)
             throw new ConfigError(`${k} is needed`);
         return v;
     };
-    const issuer = normalizeIssuer(httpsUrl("ACCOUNT_OIDC_ISSUER", need("ACCOUNT_OIDC_ISSUER"), { path: true }));
-    const clientId = need("ACCOUNT_OIDC_CLIENT_ID");
-    const clientSecret = (env.ACCOUNT_OIDC_CLIENT_SECRET?.trim() || secretFromFile?.trim()) ?? "";
-    if (!clientSecret)
+    const list = (k) => (env[k] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    const apple = appleFromEnv(env, list, appleKeyFromFile);
+    const oidc = !!env.ACCOUNT_OIDC_ISSUER?.trim() || !apple;
+    const issuer = oidc ? normalizeIssuer(httpsUrl("ACCOUNT_OIDC_ISSUER", need("ACCOUNT_OIDC_ISSUER"), { path: true })) : APPLE_ISSUER;
+    const clientId = oidc ? need("ACCOUNT_OIDC_CLIENT_ID") : "";
+    const clientSecret = oidc ? ((env.ACCOUNT_OIDC_CLIENT_SECRET?.trim() || secretFromFile?.trim()) ?? "") : "";
+    if (oidc && !clientSecret)
         throw new ConfigError("ACCOUNT_OIDC_CLIENT_SECRET (or ACCOUNT_OIDC_CLIENT_SECRET_FILE) is needed: the account server is a confidential client");
     const publicUrl = httpsUrl("ACCOUNT_PUBLIC_URL", need("ACCOUNT_PUBLIC_URL"));
-    const list = (k) => (env[k] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     const appRedirects = list("ACCOUNT_APP_REDIRECTS");
     for (const r of appRedirects) {
         let u;
@@ -205,8 +237,15 @@ export function configFromEnv(env, secretFromFile, relayTokenFile, signalKeyFile
         const url = new URL(webRedirects[0]).origin;
         services.push({ name: "web", kind: "fixed", value: () => ({ url }) });
     }
+    const appstoreBundle = env.ACCOUNT_APPSTORE_BUNDLE_ID?.trim();
+    const appstoreProducts = list("ACCOUNT_APPSTORE_PRODUCTS");
+    if (!!appstoreBundle !== appstoreProducts.length > 0)
+        throw new ConfigError("ACCOUNT_APPSTORE_BUNDLE_ID and ACCOUNT_APPSTORE_PRODUCTS go together");
+    if (appstoreBundle && !BUNDLE_RE.test(appstoreBundle))
+        throw new ConfigError(`ACCOUNT_APPSTORE_BUNDLE_ID: ${appstoreBundle} is not a bundle id`);
     const cfg = {
         issuer,
+        oidc,
         clientId,
         clientSecret,
         publicUrl,
@@ -216,7 +255,7 @@ export function configFromEnv(env, secretFromFile, relayTokenFile, signalKeyFile
         appRedirects,
         webRedirects,
         appleAppIds,
-        idpName: env.ACCOUNT_IDP_NAME?.trim() || new URL(issuer).host,
+        idpName: env.ACCOUNT_IDP_NAME?.trim() || (oidc ? new URL(issuer).host : "Apple"),
         serverName: env.ACCOUNT_SERVER_NAME?.trim() || new URL(publicUrl).host,
         dataDir: env.ACCOUNT_DATA_DIR?.trim() || "/data",
         host: env.ACCOUNT_HOST?.trim() || "127.0.0.1",
@@ -224,6 +263,8 @@ export function configFromEnv(env, secretFromFile, relayTokenFile, signalKeyFile
         trustProxy: flag("ACCOUNT_TRUST_PROXY"),
         wire,
         services,
+        apple,
+        appstore: appstoreBundle ? { bundleId: appstoreBundle, products: appstoreProducts } : null,
     };
     const open = opennessProblem(cfg);
     if (open)

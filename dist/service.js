@@ -10,7 +10,11 @@
 //   GET  /v1/app-return        (the https callback iOS intercepts; a page saying "back to the app" otherwise)
 //   POST /v1/token             sign-in code + PKCE verifier + device → a device session (90 days; the hosted web
 //                                client's: 30, bound to its device key — each request it makes is signed, `<ns>-proof`)
-//   GET  /v1/me, POST /v1/signout
+//   POST /v1/auth/apple        an app's native Sign in with Apple: its identity token + the nonce → a device session
+//   GET  /v1/me, POST /v1/signout, DELETE /v1/me (the account itself, from the app; its Apple grant revoked)
+//   POST /v1/join-keys         a signed-in app's one-use join key for its own account (a computer it is paired with
+//                                joins with it: docs/ACCOUNT-LIB.md「经已配对的设备」)
+//   POST /v1/entitlements/appstore   a StoreKit 2 transaction of the account's (its subscription)
 //   GET  /v1/computers, PATCH|DELETE /v1/computers/<linkId>, POST /v1/tickets
 //   GET  /v1/devices, DELETE /v1/devices/<id>
 //   POST /v1/computers/enroll|poll|confirm|decline    (the computer; poll / confirm / decline by its device code)
@@ -29,6 +33,7 @@ import { addressKind, normalizeIp } from "./address.js";
 import { FailureLimiter, ipBucket, TokenBuckets } from "./rate-limit.js";
 import { allowed } from "./config.js";
 import { cleanText, IdpError } from "./oidc.js";
+import { APPLE_ISSUER, cachedAppleKeys, revokeAppleGrant, verifyIdentityToken, verifyStoreKit } from "./apple.js";
 import { randomId, sha256 } from "./store.js";
 import { signRevocationList, signServiceToken, signTicket, TICKET_TTL_S } from "./ticket.js";
 export const SESSION_MAX_AGE_MS = 90 * 86_400_000;
@@ -45,6 +50,10 @@ export const HOSTED_PROOF_MAX_AGE_S = 120;
 export const SIGNIN_TTL_MS = 10 * 60_000;
 export const APP_CODE_TTL_MS = 60_000;
 export const JOIN_TTL_MS = 10 * 60_000;
+/** A join key an app made for a computer it is paired with: one use, this long. */
+export const APP_JOIN_KEY_TTL_MS = 10 * 60_000;
+/** What a computer says of itself for its product's clients (`info`, a JSON object): this many bytes at most. */
+export const INFO_MAX = 2048;
 /** After an approval the computer has this long to confirm it on its own screen. */
 export const JOIN_CONFIRM_MS = 10 * 60_000;
 export const POLL_INTERVAL_S = 2;
@@ -80,6 +89,8 @@ export const LIMITS = {
     /** Sign-ins on their way through the IdP, in all. */
     signinsOpenMax: 5_000,
     computersPerAccount: 64,
+    /** Join keys an app may have made for its account and not yet used. */
+    appJoinKeysOpen: 16,
     /** Devices signed in at once (a device that is signed out does not count). */
     devicesPerAccount: 64,
     /** A request's body must have arrived within this. */
@@ -166,6 +177,7 @@ export class AccountService {
     codeFailAddress;
     codeFailAccount;
     webOrigins;
+    appleKeys;
     refused = new Map();
     refusedLogged = -Infinity;
     delivering = null;
@@ -197,6 +209,7 @@ export class AccountService {
         this.codeFailAddress = new FailureLimiter(this.l.codeFailuresPerAddress, 60_000);
         this.codeFailAccount = new FailureLimiter(this.l.codeFailuresPerAccountHour, 3_600_000);
         this.webOrigins = new Set(this.cfg.webRedirects.map((r) => new URL(r).origin));
+        this.appleKeys = deps.appleKeys ?? cachedAppleKeys(undefined, this.now);
     }
     // --------------------------------------------------------------------------- plumbing
     /** Where a request comes from: the socket, or behind the trusted TLS front on loopback its last X-Forwarded-For. */
@@ -369,10 +382,16 @@ export class AccountService {
             return send(200, { webcredentials: { apps: this.cfg.appleAppIds } }, { "cache-control": "public, max-age=3600" });
         }
         // sign-in
+        if ((path === "/v1/signin" || path === "/v1/callback") && !this.deps.idp) {
+            req.resume();
+            return this.page(res, 404, "No sign-in here", "<p>This account server signs in from its apps only.</p>");
+        }
         if (method === "GET" && path === "/v1/signin")
             return this.signin(url, res, ipKey);
         if (method === "GET" && path === "/v1/callback")
             return this.callback(url, res, ipKey);
+        if (method === "POST" && path === "/v1/auth/apple" && this.cfg.apple)
+            return send(200, await this.appleSignIn(req, ipKey));
         if (method === "GET" && path === "/v1/app-return")
             return this.page(res, 200, "Signed in", "<p>Go back to the app.</p>");
         if (method === "POST" && path === "/v1/token")
@@ -398,6 +417,14 @@ export class AccountService {
             const a = this.bearer(req, ipKey);
             if (method === "GET" && path === "/v1/me")
                 return send(200, this.me(a));
+            if (method === "DELETE" && path === "/v1/me")
+                return send(200, await this.deleteAccount(a, await this.readBody(req)));
+            if (method === "POST" && path === "/v1/join-keys") {
+                req.resume();
+                return send(200, this.appJoinKey(a));
+            }
+            if (method === "POST" && path === "/v1/entitlements/appstore" && this.cfg.appstore)
+                return send(200, this.appStoreEntitlement(a, await this.readBody(req)));
             if (method === "POST" && path === "/v1/signout") {
                 req.resume();
                 await this.endDeviceSession(a, "signed_out");
@@ -446,7 +473,7 @@ export class AccountService {
         return {
             server: { url: this.cfg.publicUrl, name: this.cfg.serverName },
             idp: { issuer: this.cfg.issuer, name: this.cfg.idpName },
-            signin: { appReturn: `${this.cfg.publicUrl}/v1/app-return`, redirects: this.cfg.appRedirects },
+            signin: { appReturn: `${this.cfg.publicUrl}/v1/app-return`, redirects: this.cfg.appRedirects, oidc: this.cfg.oidc, apple: !!this.cfg.apple },
             ticketTtl: TICKET_TTL_S,
             sessionMaxAgeDays: SESSION_MAX_AGE_MS / 86_400_000,
         };
@@ -521,14 +548,15 @@ export class AccountService {
             this.log(`[account] sign-in: the IdP said ${IDP_ERRORS.has(idpError) ? idpError : "an error"}`);
             return back({ error: IDP_ERRORS.has(idpError) ? idpError : "server_error" });
         }
-        if (!(await this.deps.idp.callbackIssOk(p.get("iss")))) {
+        const idp = this.deps.idp;
+        if (!(await idp.callbackIssOk(p.get("iss")))) {
             this.log("[account] sign-in: the callback's iss is not the IdP's (a mix-up?)");
             return back({ error: "server_error" });
         }
         let identity;
         let refresh;
         try {
-            ({ identity, refreshToken: refresh } = await this.deps.idp.exchange(p.get("code") ?? "", s.verifier, s.nonce));
+            ({ identity, refreshToken: refresh } = await idp.exchange(p.get("code") ?? "", s.verifier, s.nonce));
         }
         catch (e) {
             this.log(`[account] sign-in: ${e instanceof IdpError ? e.message : `failed (${e.name})`}`);
@@ -576,8 +604,13 @@ export class AccountService {
         if (!a || a.disabled_at !== null)
             throw new HttpError(400, "invalid_grant", "the account is disabled");
         // a code that went back to a hosted web client's address: that page's session, bound to its key
-        const hosted = this.cfg.webRedirects.includes(code.redirect_uri);
-        const d = (b.device && typeof b.device === "object" ? b.device : {});
+        return this.deviceSession(a, b.device, this.cfg.webRedirects.includes(code.redirect_uri), code.idp_refresh);
+    }
+    /** A new session for the device a sign-in named (`device`: `{ name, platform, key }`, each optional): the account's
+     *  device with that key, else a new one. What /v1/token and /v1/auth/apple answer. */
+    deviceSession(a, device, hosted, idpRefresh) {
+        const now = this.now();
+        const d = (device && typeof device === "object" ? device : {});
         const name = typeof d.name === "string" && cleanText(d.name, 64) ? cleanText(d.name, 64) : hosted ? "Browser" : "Device";
         const platform = hosted ? "web" : typeof d.platform === "string" && /^[a-z]{1,16}$/.test(d.platform) ? d.platform : null;
         let key = null;
@@ -594,7 +627,7 @@ export class AccountService {
             if (!known && this.store.countDevices(a.id, now) >= this.l.devicesPerAccount)
                 throw new HttpError(403, "too_many_devices", `an account has ${this.l.devicesPerAccount} devices at most: remove one`);
             const dev = this.store.deviceFor(a.id, { name, platform, key, keyDigest }, now);
-            const sess = this.store.createSession({ account: a.id, device: dev.id, kind: hosted ? "hosted" : "app", now, maxAgeMs: hosted ? HOSTED_SESSION_MAX_AGE_MS : SESSION_MAX_AGE_MS, idpRefresh: code.idp_refresh });
+            const sess = this.store.createSession({ account: a.id, device: dev.id, kind: hosted ? "hosted" : "app", now, maxAgeMs: hosted ? HOSTED_SESSION_MAX_AGE_MS : SESSION_MAX_AGE_MS, idpRefresh });
             return { dev, sess };
         });
         this.log(`[account] ${hosted ? "web client " : ""}session for ${short(a.id)} on device ${short(out.dev.id)} (${platform ?? "?"})`);
@@ -606,8 +639,41 @@ export class AccountService {
             expiresAt: out.sess.expiresAt,
             account: { id: a.id, name: a.name },
             device: { id: out.dev.id, name: out.dev.name },
-            idp: { issuer: this.cfg.issuer, name: this.cfg.idpName },
+            idp: { issuer: a.iss, name: a.iss === this.cfg.issuer ? this.cfg.idpName : a.iss === APPLE_ISSUER ? "Apple" : new URL(a.iss).host },
         };
+    }
+    /**
+     * POST /v1/auth/apple `{ identityToken, nonce, name?, device }`: an app's native Sign in with Apple. The token is
+     * checked here (Apple's key, one of the apps' bundle ids, not expired, SHA-256 of `nonce`); the account is Apple's
+     * `iss` + `sub` — the same one a web sign-in through Apple as an OpenID provider would be. `name`: what the app got
+     * from Apple at the first sign-in (Apple says it only then), the shown name; else the email, if any.
+     */
+    async appleSignIn(req, ipKey) {
+        const b = await this.readBody(req);
+        this.limited(this.exchanges, ipKey, "sign-ins");
+        const apple = this.cfg.apple;
+        const token = typeof b.identityToken === "string" && b.identityToken.length <= 8192 ? b.identityToken : "";
+        const nonce = typeof b.nonce === "string" && b.nonce.length <= 256 ? b.nonce : "";
+        if (!token || !nonce)
+            throw new HttpError(400, "invalid_request", "identityToken and nonce");
+        const who = await verifyIdentityToken(token, nonce, apple.audiences, this.appleKeys, this.now());
+        if (!who) {
+            this.badTokens.fail(ipKey);
+            this.refuse("Apple sign-ins with a token that does not check out");
+            throw new HttpError(401, "invalid_grant", "the identity token is not Apple's for this app, or it expired");
+        }
+        if (!allowed(this.cfg.allow, APPLE_ISSUER, { sub: who.sub, email: who.email, email_verified: who.email_verified })) {
+            this.log(`[account] Apple sign-in refused: not on the allow-list (sub #${subTag(APPLE_ISSUER, who.sub)})`);
+            throw new HttpError(403, "access_denied", "this Apple ID may not sign in here");
+        }
+        const given = typeof b.name === "string" ? cleanText(b.name, 64) : "";
+        const got = this.store.signInAccount(APPLE_ISSUER, who.sub, given || (this.store.accountOf(APPLE_ISSUER, who.sub) ? null : (who.email ?? null)), this.now());
+        if ("refused" in got) {
+            this.log(`[account] Apple sign-in refused: the account is ${got.refused} (sub #${subTag(APPLE_ISSUER, who.sub)})`);
+            throw new HttpError(403, got.refused === "removed" ? "account_removed" : "account_disabled", `the account is ${got.refused}`);
+        }
+        this.log(`[account] Apple sign-in ${short(got.account.id)}`);
+        return this.deviceSession(got.account, b.device, false, null);
     }
     /** The device session of a request's bearer token (an app's), or 401 / 429. */
     bearer(req, ipKey) {
@@ -669,11 +735,96 @@ export class AccountService {
     me(a) {
         const d = a.session.device_id ? this.store.device(a.session.device_id) : undefined;
         return {
+            entitlements: this.entitlements(a.account.id),
             account: { id: a.account.id, name: a.account.name, iss: a.account.iss, sub: a.account.sub },
             device: d ? { id: d.id, name: d.name } : null,
             session: { expiresAt: a.session.expires_at, idpCheckedAt: a.session.idp_checked_at, idpCheck: a.session.idp_refresh ? (a.session.idp_check_result ?? "pending") : "unchecked" },
             server: this.configBody().server,
         };
+    }
+    /** What the account has bought, by source: `appstore` → `{ active, productId, expiresAt, sandbox }` from its newest
+     *  purchase that is not revoked (absent: none ever reported). */
+    entitlements(account) {
+        const now = this.now();
+        const out = {};
+        const bySource = new Map();
+        for (const e of this.store.entitlementsOf(account))
+            bySource.set(e.source, [...(bySource.get(e.source) ?? []), e]);
+        for (const [source, list] of bySource) {
+            const live = list.filter((e) => e.revoked_at === null);
+            // (the one that lasts longest; one without an end — a lifetime purchase — beats them all)
+            const best = live.sort((x, y) => (x.expires_at ?? Infinity) - (y.expires_at ?? Infinity)).at(-1) ?? list.at(-1);
+            const active = best.revoked_at === null && (best.expires_at === null || best.expires_at > now);
+            out[source] = { active, productId: best.product_id, expiresAt: best.expires_at, sandbox: best.environment === "Sandbox" };
+        }
+        return out;
+    }
+    /** POST /v1/entitlements/appstore `{ jws }`: a StoreKit 2 transaction of one of the operator's products, for its
+     *  bundle id, signed by Apple — the account's now (a purchase is the last reporting account's). */
+    appStoreEntitlement(a, b) {
+        const st = this.cfg.appstore;
+        const jws = typeof b.jws === "string" && b.jws.length <= 12 * 1024 ? b.jws : "";
+        if (!jws)
+            throw new HttpError(400, "invalid_request", "jws is a StoreKit transaction");
+        const now = this.now();
+        const tx = (this.deps.storeKit ?? verifyStoreKit)(jws, now);
+        if (!tx)
+            throw new HttpError(400, "invalid_grant", "not a transaction signed by Apple");
+        if (tx.bundleId !== st.bundleId || !st.products.includes(tx.productId))
+            throw new HttpError(400, "invalid_grant", "not a transaction of this app's products");
+        this.store.putEntitlement({ source: "appstore", original_id: tx.originalTransactionId, account_id: a.account.id, product_id: tx.productId, expires_at: tx.expiresDate ?? null, revoked_at: tx.revocationDate ?? null, environment: tx.environment, updated_at: now });
+        this.log(`[account] App Store purchase reported for ${short(a.account.id)}${tx.environment === "Sandbox" ? " (sandbox)" : ""}`);
+        return { entitlements: this.entitlements(a.account.id) };
+    }
+    /** POST /v1/join-keys: a one-use join key for the account, short-lived — what a signed-in app hands a computer it is
+     *  paired with (over their own connection) so the computer joins the account by itself. Only an app's session (a
+     *  web page's could be any script's). */
+    appJoinKey(a) {
+        if (a.session.kind !== "app")
+            throw new HttpError(403, "invalid_token", "an app's session only");
+        const now = this.now();
+        if (this.store.countJoinKeys(a.account.id, now) >= this.l.appJoinKeysOpen)
+            throw new HttpError(429, "slow_down", "too many join keys not used yet: wait");
+        const key = this.store.createJoinKey(a.account.id, 1, now + APP_JOIN_KEY_TTL_MS, now);
+        this.log(`[account] join key for ${short(a.account.id)} made by device ${short(a.session.device_id ?? "")}`);
+        return { key, server: this.cfg.publicUrl, expiresAt: now + APP_JOIN_KEY_TTL_MS };
+    }
+    /**
+     * DELETE /v1/me `{ authorizationCode? }`: the account deleted by its own person (from the app: Apple's rule for apps
+     * with accounts). Everything of it goes — its computers leave it (the signed list says so), its devices are signed
+     * out —, but no tombstone stays: signing in again makes a new account. With a fresh Sign in with Apple
+     * authorization code and the operator's key, the Apple grant is revoked too (Apple unreachable, or the code not of
+     * this account: deleted all the same, `revoked: false`).
+     */
+    async deleteAccount(a, b) {
+        if (a.session.kind !== "app" && a.session.kind !== "hosted")
+            throw new HttpError(403, "invalid_token");
+        const now = this.now();
+        const sec = Math.floor(now / 1000);
+        const acc = a.account;
+        this.store.tx(() => {
+            const devices = this.store.devicesOf(acc.id).map((d) => d.id);
+            const computers = this.store.computersOf(acc.id).map((c) => c.link_id);
+            // (the revocations outlive the account, keyed by its id, never handed out again: its computers learn of it)
+            this.store.revoke(acc.id, { devices, computers, disabled: sec }, sec, now);
+            this.store.run("DELETE FROM app_codes WHERE account_id = ?", acc.id);
+            this.store.run("DELETE FROM enrollments WHERE approved_account = ?", acc.id);
+            this.store.run("DELETE FROM accounts WHERE id = ?", acc.id);
+        });
+        this.log(`[account] account ${short(acc.id)} deleted by its own device ${short(a.session.device_id ?? "")}`);
+        await this.deliverNotices();
+        let revoked = false;
+        const code = typeof b.authorizationCode === "string" && b.authorizationCode.length <= 512 ? b.authorizationCode : "";
+        const client = this.cfg.apple?.client;
+        if (client && code && acc.iss === APPLE_ISSUER) {
+            try {
+                revoked = await revokeAppleGrant(client, code, acc.sub, this.deps.appleFetch, now);
+            }
+            catch (e) {
+                this.log(`[account] Sign in with Apple: revoking failed (${e.message.slice(0, 80)})`);
+            }
+        }
+        return { ok: true, revoked };
     }
     // --------------------------------------------------------------------------- revocation
     /** The device's session ended, and the device on the revocation list (its computers stop taking what it holds). */
@@ -824,7 +975,7 @@ export class AccountService {
         }
         if (!code)
             throw new HttpError(503, "temporarily_unavailable");
-        this.store.run("INSERT INTO enrollments (id, device_code_hash, user_code, link_id, name, fingerprint, relays, direct, origins, signal, expect, ip, created_at, expires_at, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending')", randomId("e_", 12), sha256(deviceCode), code, linkId, name, f.fingerprint ?? null, JSON.stringify(f.relays ?? []), JSON.stringify(f.direct ?? []), JSON.stringify(f.origins ?? []), f.signal ?? null, expect ? JSON.stringify(expect) : null, ip, now, now + JOIN_TTL_MS);
+        this.store.run("INSERT INTO enrollments (id, device_code_hash, user_code, link_id, name, fingerprint, relays, direct, origins, signal, info, expect, ip, created_at, expires_at, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending')", randomId("e_", 12), sha256(deviceCode), code, linkId, name, f.fingerprint ?? null, JSON.stringify(f.relays ?? []), JSON.stringify(f.direct ?? []), JSON.stringify(f.origins ?? []), f.signal ?? null, f.info ?? null, expect ? JSON.stringify(expect) : null, ip, now, now + JOIN_TTL_MS);
         this.log(`[account] join code for ${linkId.slice(0, 8)}${expect ? " (expects an account)" : ""}`);
         const host = new URL(this.cfg.publicUrl);
         return {
@@ -956,7 +1107,7 @@ export class AccountService {
             const won = this.store.run("UPDATE enrollments SET status = 'confirmed' WHERE id = ? AND status = 'approved'", e.id);
             if (!won)
                 throw new HttpError(400, "invalid_grant", "already confirmed");
-            return this.admit(a.id, { linkId: e.link_id, name: e.name, fingerprint: e.fingerprint, relays: e.relays, direct: e.direct, origins: e.origins, signal: e.signal ?? null }, now);
+            return this.admit(a.id, { linkId: e.link_id, name: e.name, fingerprint: e.fingerprint, relays: e.relays, direct: e.direct, origins: e.origins, signal: e.signal ?? null, info: e.info ?? null }, now);
         });
         this.log(`[account] join ${e.link_id.slice(0, 8)}: confirmed on the computer, now in ${short(a.id)}${moved ? ` (left ${short(moved)})` : ""}`);
         if (moved)
@@ -975,10 +1126,10 @@ export class AccountService {
         // (back in an account it was once taken out of: that entry would make it leave again)
         this.store.run("DELETE FROM revocations WHERE account_id = ? AND kind = 'computer' AND id = ?", account, c.linkId);
         if (old && old.account_id === account) {
-            this.store.run("UPDATE computers SET name = ?, fingerprint = ?, relays = ?, direct = ?, origins = ?, signal = ?, joined_at = ?, updated_at = ? WHERE link_id = ?", c.name, c.fingerprint, c.relays, c.direct, c.origins, c.signal, now, now, c.linkId);
+            this.store.run("UPDATE computers SET name = ?, fingerprint = ?, relays = ?, direct = ?, origins = ?, signal = ?, info = ?, joined_at = ?, updated_at = ? WHERE link_id = ?", c.name, c.fingerprint, c.relays, c.direct, c.origins, c.signal, c.info, now, now, c.linkId);
         }
         else {
-            this.store.run("INSERT INTO computers (link_id, account_id, name, fingerprint, relays, direct, origins, signal, joined_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", c.linkId, account, c.name, c.fingerprint, c.relays, c.direct, c.origins, c.signal, now, now);
+            this.store.run("INSERT INTO computers (link_id, account_id, name, fingerprint, relays, direct, origins, signal, info, joined_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)", c.linkId, account, c.name, c.fingerprint, c.relays, c.direct, c.origins, c.signal, c.info, now, now);
         }
         return old && old.account_id !== account ? old.account_id : null;
     }
@@ -1019,7 +1170,7 @@ export class AccountService {
             if ((!existing || existing.account_id !== a.id) && this.store.countComputers(a.id) >= this.l.computersPerAccount) {
                 throw new HttpError(403, "too_many_computers", `an account has ${this.l.computersPerAccount} computers at most`);
             }
-            const moved = this.admit(a.id, { linkId, name, fingerprint: f.fingerprint ?? null, relays: JSON.stringify(f.relays ?? []), direct: JSON.stringify(f.direct ?? []), origins: JSON.stringify(f.origins ?? []), signal: f.signal ?? null }, now);
+            const moved = this.admit(a.id, { linkId, name, fingerprint: f.fingerprint ?? null, relays: JSON.stringify(f.relays ?? []), direct: JSON.stringify(f.direct ?? []), origins: JSON.stringify(f.origins ?? []), signal: f.signal ?? null, info: f.info ?? null }, now);
             return { a, moved };
         });
         if (!out) {
@@ -1111,7 +1262,7 @@ export class AccountService {
             const name = b.name === undefined ? c.name : typeof b.name === "string" && cleanText(b.name, 64) ? cleanText(b.name, 64) : null;
             if (name === null)
                 throw new HttpError(400, "invalid_request", "name");
-            this.store.run("UPDATE computers SET name = ?, fingerprint = ?, relays = ?, direct = ?, origins = ?, signal = ?, updated_at = ? WHERE link_id = ?", name, f.fingerprint === undefined ? c.fingerprint : f.fingerprint, f.relays === undefined ? c.relays : JSON.stringify(f.relays), f.direct === undefined ? c.direct : JSON.stringify(f.direct), f.origins === undefined ? c.origins : JSON.stringify(f.origins), f.signal === undefined ? c.signal : f.signal, now, linkId);
+            this.store.run("UPDATE computers SET name = ?, fingerprint = ?, relays = ?, direct = ?, origins = ?, signal = ?, info = ?, updated_at = ? WHERE link_id = ?", name, f.fingerprint === undefined ? c.fingerprint : f.fingerprint, f.relays === undefined ? c.relays : JSON.stringify(f.relays), f.direct === undefined ? c.direct : JSON.stringify(f.direct), f.origins === undefined ? c.origins : JSON.stringify(f.origins), f.signal === undefined ? c.signal : f.signal, f.info === undefined ? c.info : f.info, now, linkId);
             return { computer: computerBody(this.store.computer(linkId)) };
         }
         if (method === "POST" && url.pathname === "/v1/computer/leave") {
@@ -1177,6 +1328,18 @@ function expectMatches(expect, a) {
 /** The optional fields a computer gives about itself (at enroll and update): undefined = not given. */
 function computerFields(b) {
     const out = {};
+    // `info`: what the computer says of itself for its product's own clients (a JSON object; this server does not read
+    // it), or null. Too big or not an object: refused
+    if (b.info !== undefined) {
+        if (b.info === null)
+            out.info = null;
+        else {
+            const text = b.info && typeof b.info === "object" && !Array.isArray(b.info) ? JSON.stringify(b.info) : "";
+            if (!text || Buffer.byteLength(text) > INFO_MAX)
+                throw new HttpError(400, "invalid_request", `info is a JSON object of ${INFO_MAX} bytes at most`);
+            out.info = text;
+        }
+    }
     // `signal`: the signaling service it waits for browsers' offers at — an origin (https; http only on loopback), or
     // null. What a hosted web client sends its offer to 
     if (b.signal !== undefined) {
@@ -1250,5 +1413,5 @@ function computerFields(b) {
     return out;
 }
 function computerBody(c) {
-    return { linkId: c.link_id, name: c.name, fingerprint: c.fingerprint, relays: JSON.parse(c.relays), direct: JSON.parse(c.direct), signal: c.signal ?? null, joinedAt: c.joined_at, updatedAt: c.updated_at };
+    return { linkId: c.link_id, name: c.name, fingerprint: c.fingerprint, relays: JSON.parse(c.relays), direct: JSON.parse(c.direct), signal: c.signal ?? null, info: c.info ? JSON.parse(c.info) : null, joinedAt: c.joined_at, updatedAt: c.updated_at };
 }

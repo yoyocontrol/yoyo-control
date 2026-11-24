@@ -4,6 +4,7 @@ import YoyoConnect
 import YoyoCore
 import YoyoScreen
 import YoyoLinkClient
+import YoyoTerminal
 
 /// Yoyo Control's own `YoyoBackend`: a Mac over uu Link (docs/REMOTE.md, docs/LINK.md): the Mac's own routes
 /// (`/status`, `/stream`, `/input`, `/control`, `/clipboard`…) as RPC over the session, the paired token in its
@@ -430,7 +431,14 @@ extension YoyoClient {
             gone()
             return true
         }
-        let container = DirectScreenContainer(page: YoyoScreen.makePage(backend: backend, host: host),
+        // the Mac's terminal (docs/PROTOCOL.md「终端」), when it has one: a page beside the screen
+        var pages: [YoyoScreenPage] = []
+        if backend.hasTerminal {
+            pages.append(YoyoScreenPage(symbol: "apple.terminal", title: L("Terminal"), identifier: "screen.terminal") {
+                YoyoTerminal.makePage(backend: backend)
+            })
+        }
+        let container = DirectScreenContainer(page: YoyoScreen.makePage(backend: backend, host: host, pages: pages),
                                               events: DirectEvents(backend: backend, unauthorized: gone))
         container.ways = ways
         shown.container = container

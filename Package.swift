@@ -15,8 +15,8 @@ import PackageDescription
 let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let linkLocal = FileManager.default.fileExists(atPath: packageDir + "/link/target/apple/YoyoLinkFFI.xcframework/Info.plist")
 let linkRelease: (url: String, checksum: String)? = (
-    url: "https://github.com/yoyocontrol/yoyo-control/releases/download/link-apple-v0.5.0/YoyoLinkFFI-0.5.0.xcframework.zip",
-    checksum: "6c13d66d3ff9239f6cae3fd8f55c39d871b297131e8d9b55875a153b1a8b44b5")
+    url: "https://github.com/yoyocontrol/yoyo-control/releases/download/link-apple-v0.6.0/YoyoLinkFFI-0.6.0.xcframework.zip",
+    checksum: "cd9fa98ff2fb10014a62486b8cb7ebd5d16a63440fcfa97f680b3792de29d1f1")
 // Yoyo Control Pro (StoreKit) is the product's, not the open-source kits': the public tree (scripts/public) has no
 // ios/YoyoKit/Sources/YoyoPro, and then this package has no `YoyoPro`.
 let hasPro = FileManager.default.fileExists(atPath: packageDir + "/ios/YoyoKit/Sources/YoyoPro")
@@ -34,6 +34,8 @@ let baseProducts: [Product] = [
         .library(name: "YoyoScreen", targets: ["YoyoScreen"]),
         /// The clipboard: the shared clipboard state, its moves, the Clipboard page (the Screen page's keys use it).
         .library(name: "YoyoClipboard", targets: ["YoyoClipboard"]),
+        /// The Terminal page: a shell on the computer (SwiftTerm), the keys a phone lacks, attaching again by itself.
+        .library(name: "YoyoTerminal", targets: ["YoyoTerminal"]),
         /// Reaching a computer over more than one way: candidates raced happy-eyeballs style, the best one used, moved
         /// with the network (a `YoyoRouting` for any backend's own candidates and transport).
         .library(name: "YoyoConnect", targets: ["YoyoConnect"]),
@@ -65,8 +67,11 @@ let baseTargets: [Target] = [
         .target(name: "YoyoScreen", dependencies: ["YoyoCore", "YoyoClipboard"], path: "ios/YoyoKit/Sources/YoyoScreen",
                 resources: [.process("Resources")]),
         .target(name: "YoyoConnect", dependencies: ["YoyoCore"], path: "ios/YoyoKit/Sources/YoyoConnect"),
+        .target(name: "YoyoTerminal", dependencies: ["YoyoCore", .product(name: "SwiftTerm", package: "SwiftTerm")],
+                path: "ios/YoyoKit/Sources/YoyoTerminal", resources: [.process("Resources")]),
         .target(name: "YoyoAccount", path: "ios/YoyoKit/Sources/YoyoAccount"),
-        .target(name: "YoyoDirect", dependencies: ["YoyoCore", "YoyoConnect", "YoyoScreen"] + linkClient,
+        .target(name: "YoyoDirect", dependencies: ["YoyoCore", "YoyoConnect", "YoyoScreen", "YoyoTerminal"] + linkClient
+                    + (linkFFI == nil ? [] : ["YoyoLink"]),
                 path: "ios/YoyoKit/Sources/YoyoDirect", resources: [.process("Resources")]),
         // Swift 5 mode like mac/Package.swift (tools 5.10), where it is built and tested. Every file is inside
         // `#if os(macOS)`: an iOS build of the whole package (the kit's scheme, its tests) finds an empty module.
@@ -109,6 +114,7 @@ let package = Package(
     defaultLocalization: "en",
     platforms: [.iOS("26.0"), .macOS(.v14)],  // `.v26` needs tools 6.2; macOS: YoyoServer only (the kits are iOS'),
     products: baseProducts + proProducts + linkProducts,
-    dependencies: [],
+    // the Terminal page's terminal emulator (MIT); 1.18: no build plugins
+    dependencies: [.package(url: "https://github.com/migueldeicaza/SwiftTerm", exact: "1.18.0")],
     targets: baseTargets + proTargets + linkTargets
 )

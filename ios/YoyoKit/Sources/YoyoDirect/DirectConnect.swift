@@ -27,6 +27,22 @@ final class DirectWays: @unchecked Sendable {
     let pro: Bool
     private let lock = NSLock()
     private var _mac: YoyoMac
+    /// A session of the terminal page's own, while the page's routing has none (`liveConnection`).
+    private var _spare: YoyoLinkConnection?
+
+    var spare: YoyoLinkConnection? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _spare
+    }
+
+    func setSpare(_ c: YoyoLinkConnection) {
+        lock.lock()
+        let old = _spare
+        _spare = c
+        lock.unlock()
+        old?.close()
+    }
 
     init(mac: YoyoMac, pro: Bool, link: DirectLink) {
         _mac = mac
@@ -51,6 +67,11 @@ final class DirectWays: @unchecked Sendable {
     /// The page is gone: the session ends.
     func close() {
         for link in connect.close() { link.release() }
+        lock.lock()
+        let spare = _spare
+        _spare = nil
+        lock.unlock()
+        spare?.close()
     }
 
     /// The link session of `route` (the current one's for nil; nil: none now).

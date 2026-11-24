@@ -420,6 +420,10 @@ pub struct ServerSettings {
     /// in them; nil = `accept_rtc_offer` refuses.
     #[uniffi(default)]
     pub identity_key: Option<Vec<u8>>,
+    /// Takes duplex requests (a WebSocket's upgrade over the link): the sessions' `welcome` says `duplex` and the
+    /// handler answers them with `RpcResponder.accept_duplex` (or as any request). Default off: they get 400.
+    #[uniffi(default)]
+    pub duplex: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -437,6 +441,10 @@ pub struct RpcRequest {
     pub method: String,
     pub path: String,
     pub headers: HashMap<String, String>,
+    /// To a handler: a duplex request (no body; `RpcResponder.accept_duplex` takes it). Ignored by `request` /
+    /// `request_duplex`, which set it themselves.
+    #[uniffi(default)]
+    pub duplex: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -853,8 +861,12 @@ impl core::RpcHandler for ForeignRpc {
         body: Bytes,
         responder: core::RpcResponder,
     ) {
-        let req =
-            RpcRequest { method: request.method, path: request.path, headers: request.headers.into_iter().collect() };
+        let req = RpcRequest {
+            method: request.method,
+            path: request.path,
+            headers: request.headers.into_iter().collect(),
+            duplex: request.duplex,
+        };
         let responder = Arc::new(RpcResponder { inner: tokio::sync::Mutex::new(Some(responder)) });
         let session = Arc::new(LinkSession { inner: session });
         let inner = self.0.clone();
@@ -1071,6 +1083,7 @@ impl LinkEndpoint {
             opts.max_request_body = m as usize;
         }
         opts.media.video.recovery_on_nack = settings.recovery_on_nack;
+        opts.duplex = settings.duplex;
         if let Some(k) = settings.identity_key {
             opts.rtc_identity = Some(Arc::new(guarded(|| Ok(core::IdentityKey::new(&k)?))?));
         }
@@ -1980,6 +1993,19 @@ impl RpcResponder {
         .await
     }
 
+    /// Accepts a duplex request (`RpcRequest.duplex`, head not sent yet): head 101 with `headers`, then the stream's
+    /// two directions. The responder is done after it.
+    pub async fn accept_duplex(self: Arc<Self>, headers: HashMap<String, String>) -> Result<Arc<LinkDuplex>> {
+        on_runtime(async move {
+            let mut g = self.inner.lock().await;
+            let r = g.as_mut().ok_or_else(finished)?;
+            let d = r.accept_duplex(&lower_headers(headers)).await?;
+            *g = None;
+            Ok(Arc::new(LinkDuplex::new(d)))
+        })
+        .await
+    }
+
     /// Resolves when the client stopped reading (cancelled) or the session ended.
     pub async fn stopped(self: Arc<Self>) {
         let _ = on_runtime(async move {
@@ -2016,6 +2042,15 @@ mod tests {
     impl RpcHandler for Echo {
         fn handle(&self, session: Arc<LinkSession>, request: RpcRequest, body: Vec<u8>, responder: Arc<RpcResponder>) {
             core::runtime::runtime().spawn(async move {
+                if request.duplex {
+                    // echo every message, then finish when the client does
+                    let d = responder.accept_duplex(HashMap::from([("x-dup".into(), "1".into())])).await.unwrap();
+                    while let Some(m) = d.recv().await.unwrap() {
+                        d.send(m).await.unwrap();
+                    }
+                    d.finish().await.unwrap();
+                    return;
+                }
                 let mut h = HashMap::new();
                 h.insert("x-path".into(), request.path);
                 h.insert("x-who".into(), session.welcome().principal_json);
@@ -2073,6 +2108,7 @@ mod tests {
                         max_request_body: None,
                         recovery_on_nack: false,
                         identity_key: None,
+                        duplex: true,
                     },
                     Arc::new(Allow),
                     Some(Arc::new(Echo)),
@@ -2120,7 +2156,7 @@ mod tests {
 
             let r = c
                 .request(
-                    RpcRequest { method: "POST".into(), path: "/x".into(), headers: HashMap::new() },
+                    RpcRequest { method: "POST".into(), path: "/x".into(), headers: HashMap::new(), duplex: false },
                     b"abc".to_vec(),
                 )
                 .await
@@ -2128,6 +2164,27 @@ mod tests {
             assert_eq!(r.status(), 200);
             assert_eq!(r.headers()["x-path"], "/x");
             assert_eq!(r.read_all(100).await.unwrap(), b"abc");
+
+            // duplex: the server said it in its welcome and its handler accepts
+            assert!(c.welcome().features.iter().any(|f| f == "duplex"));
+            let r = c
+                .request_duplex(RpcRequest {
+                    method: "GET".into(),
+                    path: "/d".into(),
+                    headers: HashMap::new(),
+                    duplex: false,
+                })
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 101);
+            assert_eq!(r.headers()["x-dup"], "1");
+            let d = r.duplex().unwrap();
+            d.send(DuplexMessage::Binary { data: vec![1, 2, 3] }).await.unwrap();
+            d.send(DuplexMessage::Text { text: "hi".into() }).await.unwrap();
+            assert_eq!(d.recv().await.unwrap(), Some(DuplexMessage::Binary { data: vec![1, 2, 3] }));
+            assert_eq!(d.recv().await.unwrap(), Some(DuplexMessage::Text { text: "hi".into() }));
+            d.finish().await.unwrap();
+            assert_eq!(d.recv().await.unwrap(), None);
 
             c.send_control(r#"{"t":"keyframe","id":1}"#.into()).await.unwrap();
             assert_eq!(s.recv_control().await.unwrap(), r#"{"id":1,"t":"keyframe"}"#);

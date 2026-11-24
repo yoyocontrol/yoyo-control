@@ -167,7 +167,7 @@ App 的处理器（它走现有的 HTTP 路由，同远程访问的白名单，�
   `finish` 就丢掉：流被重置。
 - 服务端要自己说收（`ServerOptions.duplex`，Node 的 `listen({ duplex: true })`，默认关）：收的服务端在会话的 `welcome`
   的 `features` 里加 `duplex`（App 自己的列表里写了也会被拿掉，只有这里说了算）；不收的，双工请求在到处理器之前
-  就回 400，那条流的进向停读（QUIC 上对方再发就失败；WebRTC 上再发来的直接丢掉——都不会堆在服务端）。Swift 的服务端（FFI）不收。
+  就回 400，那条流的进向停读（QUIC 上对方再发就失败；WebRTC 上再发来的直接丢掉——都不会堆在服务端）。Swift 的服务端（FFI）用 `ServerSettings.duplex` 打开，处理器看 `RpcRequest.duplex`、用 `RpcResponder.acceptDuplex(headers:)` 接受（Mac 的终端，`PROTOCOL.md`「终端」）。
 - **经 WebRTC**（浏览器，`link-web` 的 `requestDuplex`）同样收：消息照样按字节流放在那条 `rpc` 通道上（≤ 16 KiB 一条通道消息，零长度 = FIN，
   不带 FIN 关通道 = 重置；双方都 FIN 了由客户端关通道）。数据通道没有接收窗口，所以每条双工流**没读的**最多
   `RTC_DUPLEX_RECV_MAX`（2 MiB + 64 KiB，两条最大的消息多一点；每条等着的通道消息另算 64 字节，一大堆很小的消息也会撞上它）：对方写得比这边读得快、超过它，流就被重置（QUIC 上是流控把对方挡住）；

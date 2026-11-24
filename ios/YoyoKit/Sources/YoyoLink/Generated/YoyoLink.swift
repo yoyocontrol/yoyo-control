@@ -3362,6 +3362,12 @@ public func FfiConverterTypeRpcHandler_lower(_ value: RpcHandler) -> UInt64 {
 public protocol RpcResponderProtocol: AnyObject, Sendable {
     
     /**
+     * Accepts a duplex request (`RpcRequest.duplex`, head not sent yet): head 101 with `headers`, then the stream's
+     * two directions. The responder is done after it.
+     */
+    func acceptDuplex(headers: [String: String]) async throws  -> LinkDuplex
+    
+    /**
      * Ends the body (a 200 head first if none was sent).
      */
     func finish() async throws 
@@ -3433,6 +3439,26 @@ open class RpcResponder: RpcResponderProtocol, @unchecked Sendable {
 
     
 
+    
+    /**
+     * Accepts a duplex request (`RpcRequest.duplex`, head not sent yet): head 101 with `headers`, then the stream's
+     * two directions. The responder is done after it.
+     */
+open func acceptDuplex(headers: [String: String])async throws  -> LinkDuplex  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_uu_link_ffi_fn_method_rpcresponder_accept_duplex(
+                        self.uniffiCloneHandle(),FfiConverterDictionaryStringString.lower(headers)
+                )
+            },
+            pollFunc: ffi_uu_link_ffi_rust_future_poll_u64,
+            completeFunc: ffi_uu_link_ffi_rust_future_complete_u64,
+            freeFunc: ffi_uu_link_ffi_rust_future_free_u64,
+            liftFunc: FfiConverterTypeLinkDuplex_lift,
+            errorHandler: FfiConverterTypeLinkError_lift
+        )
+}
     
     /**
      * Ends the body (a 200 head first if none was sent).
@@ -5561,13 +5587,23 @@ public struct RpcRequest: Equatable, Hashable {
     public var method: String
     public var path: String
     public var headers: [String: String]
+    /**
+     * To a handler: a duplex request (no body; `RpcResponder.accept_duplex` takes it). Ignored by `request` /
+     * `request_duplex`, which set it themselves.
+     */
+    public var duplex: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(method: String, path: String, headers: [String: String]) {
+    public init(method: String, path: String, headers: [String: String], 
+        /**
+         * To a handler: a duplex request (no body; `RpcResponder.accept_duplex` takes it). Ignored by `request` /
+         * `request_duplex`, which set it themselves.
+         */duplex: Bool = false) {
         self.method = method
         self.path = path
         self.headers = headers
+        self.duplex = duplex
     }
 
     
@@ -5588,7 +5624,8 @@ public struct FfiConverterTypeRpcRequest: FfiConverterRustBuffer {
             try RpcRequest(
                 method: FfiConverterString.read(from: &buf), 
                 path: FfiConverterString.read(from: &buf), 
-                headers: FfiConverterDictionaryStringString.read(from: &buf)
+                headers: FfiConverterDictionaryStringString.read(from: &buf), 
+                duplex: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5596,6 +5633,7 @@ public struct FfiConverterTypeRpcRequest: FfiConverterRustBuffer {
         FfiConverterString.write(value.method, into: &buf)
         FfiConverterString.write(value.path, into: &buf)
         FfiConverterDictionaryStringString.write(value.headers, into: &buf)
+        FfiConverterBool.write(value.duplex, into: &buf)
     }
 }
 
@@ -5910,6 +5948,11 @@ public struct ServerSettings: Equatable, Hashable {
      * in them; nil = `accept_rtc_offer` refuses.
      */
     public var identityKey: Data?
+    /**
+     * Takes duplex requests (a WebSocket's upgrade over the link): the sessions' `welcome` says `duplex` and the
+     * handler answers them with `RpcResponder.accept_duplex` (or as any request). Default off: they get 400.
+     */
+    public var duplex: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -5924,13 +5967,18 @@ public struct ServerSettings: Equatable, Hashable {
         /**
          * The identity private key (97-byte X9.63, the identity files' format) that signs rtc answers and the binding
          * in them; nil = `accept_rtc_offer` refuses.
-         */identityKey: Data? = nil) {
+         */identityKey: Data? = nil, 
+        /**
+         * Takes duplex requests (a WebSocket's upgrade over the link): the sessions' `welcome` says `duplex` and the
+         * handler answers them with `RpcResponder.accept_duplex` (or as any request). Default off: they get 400.
+         */duplex: Bool = false) {
         self.server = server
         self.features = features
         self.rpcBlockedPaths = rpcBlockedPaths
         self.maxRequestBody = maxRequestBody
         self.recoveryOnNack = recoveryOnNack
         self.identityKey = identityKey
+        self.duplex = duplex
     }
 
     
@@ -5954,7 +6002,8 @@ public struct FfiConverterTypeServerSettings: FfiConverterRustBuffer {
                 rpcBlockedPaths: FfiConverterOptionSequenceString.read(from: &buf), 
                 maxRequestBody: FfiConverterOptionUInt64.read(from: &buf), 
                 recoveryOnNack: FfiConverterBool.read(from: &buf), 
-                identityKey: FfiConverterOptionData.read(from: &buf)
+                identityKey: FfiConverterOptionData.read(from: &buf), 
+                duplex: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5965,6 +6014,7 @@ public struct FfiConverterTypeServerSettings: FfiConverterRustBuffer {
         FfiConverterOptionUInt64.write(value.maxRequestBody, into: &buf)
         FfiConverterBool.write(value.recoveryOnNack, into: &buf)
         FfiConverterOptionData.write(value.identityKey, into: &buf)
+        FfiConverterBool.write(value.duplex, into: &buf)
     }
 }
 
@@ -8575,6 +8625,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_uu_link_ffi_checksum_method_rpchandler_handle() != 24855) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_uu_link_ffi_checksum_method_rpcresponder_accept_duplex() != 2894) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_uu_link_ffi_checksum_method_rpcresponder_finish() != 5650) {

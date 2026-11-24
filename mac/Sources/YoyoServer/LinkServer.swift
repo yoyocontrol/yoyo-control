@@ -40,7 +40,8 @@ final class LinkServer: @unchecked Sendable {
         case authority(LinkAuthority)
     }
 
-    static let features = ["video", "audio", "cursor", "input", "control", "rpc"]
+    /// `terminal`: `GET /term` and the rest (docs/PROTOCOL.md「终端」; `duplex` comes from the core with them).
+    static let features = ["video", "audio", "cursor", "input", "control", "rpc", "terminal"]
     /// A taken port is tried again this often (the previous service may still hold it), then any port.
     static let portRetries = 5
 
@@ -195,7 +196,9 @@ final class LinkServer: @unchecked Sendable {
                                           // VideoToolbox long-term references make a recovery frame a cheap P-frame
                                           recoveryOnNack: true,
                                           // signs the rtc answers (and the binding in them)
-                                          identityKey: identity.key.x963Representation)
+                                          identityKey: identity.key.x963Representation,
+                                          // the terminals' `GET /term`
+                                          duplex: true)
             listener = try ep.listen(settings, authenticate: { [weak self] request in
                 await self?.authenticate(request) ?? .deny(.busy, message: "shutting down")
             }, rpc: { [weak self] session, request, body, responder in

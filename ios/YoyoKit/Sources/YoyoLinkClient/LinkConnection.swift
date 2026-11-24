@@ -181,6 +181,22 @@ public final class YoyoLinkConnection: YoyoScreenLink, @unchecked Sendable {
         }
     }
 
+    /// The server's `welcome` lists `feature` (`terminal`, `duplex`…).
+    public func serverHas(_ feature: String) -> Bool { session.welcome().features.contains(feature) }
+
+    /// A duplex request (docs/LINK.md「RPC 流」, a WebSocket's upgrade over the link): accepted (101) → the stream;
+    /// any other answer → its status and body (`duplex` nil).
+    public func duplex(_ method: String, _ path: String, headers: [String: String] = [:]) async throws
+        -> (status: Int, body: Data, duplex: LinkDuplex?) {
+        do {
+            let r = try await session.requestDuplex(request: RpcRequest(method, path, headers: headers))
+            if let d = r.duplex() { return (Int(r.status()), Data(), d) }
+            return (Int(r.status()), (try? await r.readAll(limit: 1 << 20)) ?? Data(), nil)
+        } catch {
+            throw URLError(.networkConnectionLost, userInfo: [NSLocalizedDescriptionKey: YoyoLinkClient.describe(error)])
+        }
+    }
+
     /// `request` as RPC (its method, path and query, headers, body), its whole answer (at most `limit` bytes): what
     /// `URLSession.data(for:)` would give over HTTP.
     public func data(for request: URLRequest, limit: Int = 128 << 20) async throws -> (Data, HTTPURLResponse) {

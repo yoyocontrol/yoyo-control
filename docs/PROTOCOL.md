@@ -551,6 +551,66 @@ interface ClipboardItem extends ClipboardSummary {   // GET /clipboard（另有 
 （没有回放）。
 Linux 服务端读 X 的 CLIPBOARD、写入时同时拥有 CLIPBOARD 与 PRIMARY（「Linux 服务端」）。
 
+## 终端
+
+配对的手机在 Mac 上开终端（用户的登录 shell，在伪终端上），像 ssh 一样用，但走的是 uu Link：不用开「远程登录」、不用密码，在哪儿都连得上，
+断线不丢。只在 Link 上、只给远程访问配对过的设备（`welcome.features` 有 `terminal` 和 `duplex`）；本机 socket 没有（本机的程序自己有 shell），
+主人模式（`LinkAuthority`）也没有。实现：`mac/Sources/YoyoServer/Terminal.swift`（伪终端、会话）、`LinkTerminal.swift`（Link 上的路由）；
+iOS 的 `YoyoTerminal`（终端页，SwiftTerm）、`YoyoDirect/DirectTerminal.swift`。Linux / Windows 服务端还没有。
+
+**谁来跑**：服务（菜单栏 App 监督的那个进程）用 `forkpty` 起 `$SHELL -l`（`getpwuid` 的 shell，argv[0] 是 `-zsh`），在登录用户的图形会话里：
+`open`、`pbcopy`、`osascript`、登录钥匙串都和 Terminal.app 里一样；它带的是 Yoyo Control 的 TCC 授权（访问桌面、文稿等文件夹时 Mac 上会问
+Yoyo Control）。环境：服务的环境去掉 `YOYO_*`、`__CF*`、`XPC_*`、`DYLD_*`、`TERM_PROGRAM*` 等，加 `TERM=xterm-256color`、`COLORTERM=truecolor`、
+`HOME` / `USER` / `LOGNAME` / `SHELL`；没有 `LANG` / `LC_*` 时设成用户语言的 UTF-8 locale（系统里有的，否则 `en_US.UTF-8`）。子进程里信号恢复默认
+（服务忽略 SIGPIPE）、只留 0–2 号描述符。
+
+**会话不跟着连接走**：终端一直在 Mac 上跑，输出存进最近 1 MiB 的环形缓冲。手机断开（离开页面、锁屏、换网络）只是 detach；回来时从它已有的
+字节接着收（`since`），那些字节不在了就收整个缓冲（从第一个换行之后开始），并让全屏程序重画一次（行数减一再改回，程序收到 SIGWINCH）。
+一个终端同时只有一个连接；新的连上来，旧的收到 `detached replaced`。终端在这些时候结束：shell 退出、`POST /term/kill`、Mac 菜单「结束所有终端」、
+关掉「允许终端」或远程访问、移除开它的设备、没人连着超过 24 小时；服务重启时也都没了。同时最多 16 个。
+
+**流控**：发给手机还没发出去的输出超过 1 MiB 时停止读伪终端（程序在写的时候等着，像在慢终端上），降到一半再读；没人连着时照常读进缓冲。
+
+**开关**：Mac 菜单「允许终端」（`remote.json` 的 `terminal`，默认开：能控制屏幕的设备本来就能在 Terminal.app 里打字），关掉立即结束所有终端；
+有终端开着时菜单写「N 个终端开着（设备）」并给「结束所有终端」。本机管理接口：`POST /remote/terminal { enabled }`、`POST /remote/terminal/end`，
+`GET /remote` 多 `terminal: { enabled, sessions: [TerminalInfo] }`。
+
+### `GET /term`（双工请求，`LINK.md`「RPC 流」）
+
+查询：`session=<id>` 连上已有的那个（不在了：404 `{code:"gone"}`），否则新开一个；`cols`、`rows`（缺省 80 × 24；连已有的也会改它的大小）；
+`since=<字节>` 手机的副本到哪个字节（只对已有的）；`cwd=<绝对路径>` 新开的起始目录（不是目录就用 home）。
+
+- 接受：101，头 `x-term-session: <id>`。服务端的第一条是文本 `{"t":"attached","session","offset","reset","cols","rows"}`：后面的输出从
+  第 `offset` 个字节开始；`reset: true` = 手机的副本接不上（没给 `since`、或者那些字节已经不在缓冲里），先清屏再显示。新开的终端 `offset` 0、`reset` false。
+- 之后服务端发二进制消息 = 输出（每条 ≤ 64 KiB），文本消息 = 结束：`{"t":"exit","reason":"exit","code"}`（shell 退出，`code` 是退出码，被信号结束是
+  128 + 信号）或 `{"t":"detached","reason":"replaced"|"killed"|"off"}`，然后 FIN。
+- 手机发二进制消息 = 键入的字节（原样写进伪终端），文本 `{"t":"resize","cols","rows"}` = 改大小。手机 FIN 或断开 = detach。
+- 拒绝：403 `{code:"terminal-off"}`（关着），404 `gone`，429 `{code:"too-many"}`，400（不是双工请求）。
+
+### `GET /term/sessions`、`POST /term/kill`
+
+```ts
+interface TerminalInfo {
+  id: string;
+  createdAt: number;                 // unix ms
+  cols: number; rows: number;
+  attached: boolean;                 // 现在有连接
+  command?: string;                  // 前台进程的名字：zsh、vim、claude…
+  device?: { id: string; name: string };  // 开它的设备
+}
+// GET /term/sessions → { ok: true, sessions: TerminalInfo[], max: 16 }
+// POST /term/kill { id } → { ok: true }（404：没有这个）
+```
+
+### 客户端（`YoyoTerminal`）
+
+屏幕页底部那排按钮里有「终端」（`YoyoScreen.makePage(backend:host:pages:)` 的 `YoyoScreenPage`，后端 `hasTerminal` 时才有），推进终端页，返回就是屏幕。
+终端页记住每台电脑上次的终端（`<namespace>Terminal.<cacheScope>`），下次（App 重开也一样）连回它；断了自己重连（从已有的字节接着收）。
+键盘上方一排键：esc、ctrl / alt（点一下管下一个键，连点两下锁住）、tab、⇧tab、^C、方向键（按住连发；按终端的光标键模式发 `ESC [` / `ESC O`）、
+⌥⏎（`ESC CR`：换行不发送）、常用符号、粘贴、编辑框（原生输入框写好整段再发：听写、中文输入法；多行在程序要求时用括号粘贴）、收键盘。
+捏合改字号。导航栏的菜单列出电脑上的终端（切换）、新终端、结束这个终端。SwiftTerm 1.18 带一个 Metal 着色器：编 `YoyoTerminal` 要装 Xcode 的
+Metal Toolchain（`xcodebuild -downloadComponent MetalToolchain`）。
+
 ## Linux 服务端
 
 `linux/`（`linux/README.md`）是这套接口在 Linux 上的实现：无头（没有 App），把一个 X 显示经 TCP + Bearer 令牌给出去；带

@@ -73,6 +73,7 @@ public final class RemoteAccess: @unchecked Sendable {
         settings = RemoteSettings.load(home + "/remote.json")
         deviceCount = devices.list.count
         devices.onChange = { [weak self] in self?.devicesChanged() }
+        TerminalStore.shared.onChange = { [weak self] in self?.onChange?() }
     }
 
     // MARK: Lifecycle
@@ -283,6 +284,7 @@ public final class RemoteAccess: @unchecked Sendable {
             "control": control.json,
             "signal": ["connected": signalUp],
             "direct": direct,
+            "terminal": ["enabled": s.terminal, "sessions": TerminalStore.shared.all.map(\.json)] as [String: Any],
             "link": linkJSON,
             "account": membership?.json ?? ["account": NSNull()],
         ]
@@ -403,6 +405,7 @@ public final class RemoteAccess: @unchecked Sendable {
         lock.unlock()
         log("remote: access turned \(on ? "on" : "off")")
         if !on {
+            TerminalStore.shared.endAll(.off)
             devices.stopPairing()
             control.releaseAny(why: "remote access turned off")
         }
@@ -425,6 +428,24 @@ public final class RemoteAccess: @unchecked Sendable {
         #if canImport(YoyoLink)
         l?.setPortMapping(on && maps)
         #endif
+        onChange?()
+    }
+
+    /// Paired phones may open terminals now.
+    var terminalEnabled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return settings.enabled && settings.terminal
+    }
+
+    /// Terminals on or off (`POST /remote/terminal`): off ends the open ones.
+    func setTerminal(_ on: Bool) {
+        lock.lock()
+        guard settings.terminal != on else { lock.unlock(); return }
+        settings.terminal = on
+        settings.save(home + "/remote.json")
+        lock.unlock()
+        log("remote: terminals turned \(on ? "on" : "off")")
+        if !on { TerminalStore.shared.endAll(.off) }
         onChange?()
     }
 
@@ -480,15 +501,19 @@ struct RemoteSettings: Equatable {
     var serverId: String
     var enabled: Bool
     var direct = true
+    /// Paired phones may open terminals (docs/PROTOCOL.md「终端」). On by default: a phone that controls the screen can
+    /// type into Terminal.app anyway; the menu says when terminals are open and ends them.
+    var terminal = true
 
     static func load(_ path: String) -> RemoteSettings {
         let json = FileManager.default.contents(atPath: path).flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } ?? [:]
         let id = (json["serverId"] as? String).flatMap { $0.count >= 16 ? $0 : nil } ?? RemoteDevices.random(16)
-        return RemoteSettings(serverId: id, enabled: json["enabled"] as? Bool ?? true, direct: json["direct"] as? Bool ?? true)
+        return RemoteSettings(serverId: id, enabled: json["enabled"] as? Bool ?? true, direct: json["direct"] as? Bool ?? true,
+                              terminal: json["terminal"] as? Bool ?? true)
     }
 
     func save(_ path: String) {
-        let body: [String: Any] = ["version": 2, "serverId": serverId, "enabled": enabled, "direct": direct]
+        let body: [String: Any] = ["version": 2, "serverId": serverId, "enabled": enabled, "direct": direct, "terminal": terminal]
         guard let data = try? JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys]) else { return }
         try? RemoteIdentity.writePrivate(data, to: path)
     }

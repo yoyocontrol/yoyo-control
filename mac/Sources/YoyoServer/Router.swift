@@ -34,6 +34,11 @@ enum Router {
         case ("POST", "/remote/pairing/stop"): try remoteAccess(req).stopPairing(); conn.json(200, try remoteAccess(req).json)
         case ("POST", "/remote/enabled"): try remoteEnabled(req, conn)
         case ("POST", "/remote/direct"): try remoteDirect(req, conn)
+        case ("POST", "/remote/terminal"): try remoteTerminal(req, conn)
+        case ("POST", "/remote/terminal/end"):
+            let access = try remoteAccess(req)
+            TerminalStore.shared.endAll(.killed)
+            conn.json(200, access.json)
         case ("POST", "/remote/devices/remove"): try remoteRemove(req, conn)
         case ("POST", "/remote/disconnect"): try remoteDisconnect(req, conn)
         case ("POST", "/remote/account/leave"): try remoteAccountLeave(req, conn)
@@ -54,7 +59,7 @@ enum Router {
             guard req.remote == nil else { throw HTTPError(404, "no such endpoint \(req.path)") }
             throw HTTPError(405, "method \(req.method) not allowed on \(req.path)")
         case (_, "/control"), (_, "/remote"), (_, "/remote/pairing"), (_, "/remote/pairing/stop"), (_, "/remote/enabled"),
-             (_, "/remote/direct"), (_, "/remote/devices/remove"), (_, "/remote/disconnect"), (_, "/remote/account/leave"),
+             (_, "/remote/direct"), (_, "/remote/terminal"), (_, "/remote/terminal/end"), (_, "/remote/devices/remove"), (_, "/remote/disconnect"), (_, "/remote/account/leave"),
              (_, "/account"), (_, "/account/join"), (_, "/account/leave"):
             throw HTTPError(405, "method \(req.method) not allowed on \(req.path)")
         case (_, "/status"), (_, "/frame"), (_, "/stream"), (_, "/input"), (_, "/permissions/request"),
@@ -202,11 +207,20 @@ enum Router {
         conn.json(200, access.json)
     }
 
-    /// `POST /remote/devices/remove { id }` → `GET /remote`'s answer; 404 for a device not paired.
+    /// `POST /remote/terminal { enabled }` → `GET /remote`'s answer (docs/PROTOCOL.md「终端」): off ends the open ones.
+    static func remoteTerminal(_ req: HTTPRequest, _ conn: Connection) throws {
+        let access = try remoteAccess(req)
+        guard let on = (try jsonBody(req))["enabled"] as? Bool else { throw HTTPError(400, "enabled must be a boolean") }
+        access.setTerminal(on)
+        conn.json(200, access.json)
+    }
+
+    /// `POST /remote/devices/remove { id }` → `GET /remote`'s answer; 404 for a device not paired. Its terminals end.
     static func remoteRemove(_ req: HTTPRequest, _ conn: Connection) throws {
         let access = try remoteAccess(req)
         guard let id = (try jsonBody(req))["id"] as? String else { throw HTTPError(400, "id is required") }
         guard access.devices.remove(id: id) else { throw HTTPError(404, "no paired device \(id)") }
+        for t in TerminalStore.shared.all where t.device?.id == id { t.end(.killed) }
         log("remote: removed device \(id)")
         conn.json(200, access.json)
     }

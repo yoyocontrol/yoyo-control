@@ -62,13 +62,14 @@ Link 收 WebRTC（`link.rtc`）而且 Mac 登记着信令服务（浏览器的 o
 网页经 signal1 拨 Link 的 WebRTC（`LINK.md`「WebRTC」，钉 `fp`），同样 `hello.credential = "Pair <配对码>"`，令牌绑到这个浏览器的 DTLS 证书。
 
 Mac 菜单里「已配对的设备」可以逐个移除：令牌立刻失效，**这台设备正开着的会话（包括视频流）立刻被断开**。
-「允许远程访问」关掉：停止监听、断开所有会话、放开控制权。
+「允许远程访问」关掉：停止监听、断开所有会话、放开控制权、结束所有终端。移除设备也结束它开的终端。
 
 ## 远程能用的接口
 
 经 Link 的 RPC（`LINK.md`「RPC 流」）：`GET /status`、`GET /frame`、`GET /stream`、`POST /stream/ack`、`GET /events`、`GET /focus`、`GET /audio`、
 `POST /input`、`POST /control`、`GET /clipboard`、`POST /clipboard`（只收 `text`；`files` 是 Mac 上的路径，远程不收）、
-`GET /clipboard/image`、`GET /clipboard/file`。其它（`/windows`、`/hit`、`/app/*`、`/agent-control`、`/maps/*`、
+`GET /clipboard/image`、`GET /clipboard/file`；终端的 `GET /term`（双工请求）、`GET /term/sessions`、`POST /term/kill`（`PROTOCOL.md`「终端」，
+不经 HTTP 路由，只在 Link 上）。其它（`/windows`、`/hit`、`/app/*`、`/agent-control`、`/maps/*`、
 `/permissions/request`、`/remote*`）对远程一律 404。画面、声音、指针、输入走 Link 自己的通道（`video.open`、`audio.open`、`send_input`）。
 
 ## 控制权
@@ -131,6 +132,8 @@ Mac 菜单里「已配对的设备」可以逐个移除：令牌立刻失效，*
 | `POST /remote/pairing/stop` | 作废配对码 |
 | `POST /remote/enabled { enabled }` | 开 / 关远程访问 |
 | `POST /remote/direct { enabled }` | 开 / 关外网直连（关掉即删映射），回答同 `GET /remote` |
+| `POST /remote/terminal { enabled }` | 开 / 关终端（关掉即结束开着的，`PROTOCOL.md`「终端」），回答同 `GET /remote` |
+| `POST /remote/terminal/end` | 结束所有终端，回答同 `GET /remote` |
 | `POST /remote/devices/remove { id }` | 移除设备（404：没这台） |
 | `POST /remote/disconnect` | 放开控制权（设备仍然配对） |
 | `POST /remote/account/leave` | 退出账号（`ACCOUNT.md`；配对不受影响，凭账号进来的设备不再认），回答同 `GET /remote` |

@@ -25,7 +25,7 @@ A dict value is a plural variation (CLDR categories: one / other / …) on the k
 import glob, json, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-KITS = ["core", "clipboard", "screen", "direct", "pro"]
+KITS = ["core", "clipboard", "screen", "direct", "pro", "terminal"]
 CATALOGS = {
     **{k: (f"YoyoKit/Sources/Yoyo{k.capitalize()}/Resources/Localizable.xcstrings", [f"YoyoKit/Sources/Yoyo{k.capitalize()}"])
        for k in KITS},

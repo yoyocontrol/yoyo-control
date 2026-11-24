@@ -121,7 +121,7 @@
 3. **Yoyo Control 自己换过来**：`account.yoyocontrol.com`（relay1）跑 `account-server`（Apple 登录、Pro 订阅），Mac 的 `AccountMembership`、Linux / Windows
    用 `@yoyocontrol/account`，iOS 用 `YoyoAccount`；电脑由已配对的 iPhone 自动加入（加入钥匙）；「定向码」批准删了。库为此加了 Apple 原生登录、
    App 的加入钥匙、电脑的 `info`、App Store 订阅、自己删账号（0.2.0）。和 nest 一样先不开设备锁（入场券就够），锁在第 4 步。旧的 signal1 账号
-   只有一个测试账号、没有电脑，没有迁移。（有，2026-11-23；Mac / Linux / Windows / TestFlight 的新版本还没发）
+   只有一个测试账号、没有电脑，没有迁移。（有，2026-11-23：公开仓库 `account-v0.2.0`、`account-server-v0.2.0`、`remote-v0.5.0`、`kit-v0.7.1`，Mac 1.3.0、`linux-v0.14.0` / `windows-v0.14.0`（预发布）、TestFlight 0.4.0）
 4. **设备锁**：链、背书、关锁密钥，账号服务器、电脑端、iOS、网页一起。（没做）
 5. **`account-web`**：网页的登录和清单。（没做）
 

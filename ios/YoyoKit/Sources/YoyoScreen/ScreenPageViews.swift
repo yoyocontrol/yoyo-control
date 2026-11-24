@@ -339,3 +339,19 @@ final class ScreenHintPill: UIControl {
         })
     }
 }
+
+/// Another page of the same computer, reached from the Screen page (`YoyoScreen.makePage(backend:host:pages:)`): its
+/// terminal (`YoyoTerminal.makePage`), its files. A button in the page's row, `symbol` drawn, `title` said.
+public struct YoyoScreenPage {
+    public var symbol: String
+    public var title: String
+    public var identifier: String
+    public var make: @MainActor () -> UIViewController
+
+    public init(symbol: String, title: String, identifier: String, make: @escaping @MainActor () -> UIViewController) {
+        self.symbol = symbol
+        self.title = title
+        self.identifier = identifier
+        self.make = make
+    }
+}

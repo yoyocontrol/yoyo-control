@@ -11,8 +11,14 @@ public enum YoyoScreen {
     /// swipe to close: `YoyoPageSwipeGate`). A page of one's own: `YoyoScreenSession` with `YoyoScreenPictureView`,
     /// `YoyoTrackpadView` and `YoyoScreenKeyboard`, which this page is made of.
     @MainActor public static func makePage(backend: any YoyoBackend, host: YoyoHost? = nil) -> UINavigationController {
+        makePage(backend: backend, host: host, pages: [])
+    }
+
+    /// The same, with more pages of the same computer (its terminal, its files): each a button in the page's row that
+    /// pushes it (made once, kept while the page lives, so it keeps its state), and back is the Screen page.
+    @MainActor public static func makePage(backend: any YoyoBackend, host: YoyoHost? = nil, pages: [YoyoScreenPage]) -> UINavigationController {
         if let host { YoyoHost.current = host }
-        let nav = ScreenNavigationController(rootViewController: ScreenViewController(backend: backend))
+        let nav = ScreenNavigationController(rootViewController: ScreenViewController(backend: backend, pages: pages))
         nav.isNavigationBarHidden = true
         nav.isToolbarHidden = true
         switch YoyoHost.current.presentation {
@@ -116,7 +122,13 @@ final class ScreenViewController: UIViewController {
     /// The phone's hint was considered on this visit (once the server's clipboard is known).
     private var phoneHintAsked = false
 
-    init(backend: any YoyoBackend) {
+    /// More pages of the computer (`YoyoScreenPage`), their buttons, and each page once made.
+    private let pages: [YoyoScreenPage]
+    private var pageButtons: [ScreenGlassButton] = []
+    private var madePages: [Int: UIViewController] = [:]
+
+    init(backend: any YoyoBackend, pages: [YoyoScreenPage] = []) {
+        self.pages = pages
         session = YoyoScreenSession(backend: backend, controlPolicy: .takeOnInput)
         picture = YoyoScreenPictureView(session: session)
         trackpad = YoyoTrackpadView(session: session, picture: picture)
@@ -184,7 +196,14 @@ final class ScreenViewController: UIViewController {
         clipboardButton.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] completion in
             MainActor.assumeIsolated { completion(self?.clipboardMenu() ?? []) }
         }])
-        for (stack, buttons) in [(leadingButtons, [closeButton, helpButton, displayButton]),
+        for (i, page) in pages.enumerated() {
+            let b = ScreenGlassButton(symbol: page.symbol)
+            b.accessibilityLabel = page.title
+            b.accessibilityIdentifier = page.identifier
+            b.addAction(UIAction { [weak self] _ in self?.showPage(i) }, for: .primaryActionTriggered)
+            pageButtons.append(b)
+        }
+        for (stack, buttons) in [(leadingButtons, [closeButton] + pageButtons + [helpButton, displayButton]),
                                  (trailingButtons, [clipboardButton, audioButton, keyboardButton])] {
             for b in buttons { stack.addArrangedSubview(b) }
             stack.spacing = 10
@@ -398,6 +417,13 @@ final class ScreenViewController: UIViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         session.start()
+    }
+
+    /// Pushes page `i` (`pages`), made the first time.
+    private func showPage(_ i: Int) {
+        let page = madePages[i] ?? pages[i].make()
+        madePages[i] = page
+        navigationController?.pushViewController(page, animated: true)
     }
 
     override func viewDidAppear(_ animated: Bool) {

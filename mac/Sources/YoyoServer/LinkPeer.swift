@@ -10,6 +10,8 @@ enum LinkHooks {
     nonisolated(unsafe) static var audioClient: (() throws -> AudioCapture.Client)?
     /// Instead of `POST /input` (after the link's own control check): the route's answer.
     nonisolated(unsafe) static var input: ((HTTPRequest) -> (status: Int, body: [String: Any]))?
+    /// Without remote access in the process (tests): whether terminals are on.
+    nonisolated(unsafe) static var terminals: Bool?
 }
 
 /// One link session on the server (docs/LINK.md「会话协议」): its control messages (video and audio streams, the
@@ -352,6 +354,13 @@ final class LinkPeer: @unchecked Sendable {
             try? await responder.respond(status: status, headers: ["content-type": "application/json"], body: data)
         }
         let path = request.path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? request.path
+        if LinkTerminal.handles(path) {
+            // a paired device's own (not in authority mode: the host decides what its sessions do)
+            guard authority == nil else { return await fail(404, "no such endpoint \(path)") }
+            guard let d = server?.pairedDevice(device.id) else { return await fail(401, "unauthorized") }
+            return await LinkTerminal.serve(request, body, responder, device: d, session: session)
+        }
+        if request.duplex { return await fail(400, "no duplex requests on \(path)") }
         guard RemoteAccess.allowed.contains("\(request.method.uppercased()) \(path)") else {
             return await fail(404, "no such endpoint \(path)")
         }

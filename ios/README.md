@@ -3,7 +3,7 @@
 Yoyo Control 的手机端：经 uu Link 连 Mac 上的 Yoyo Control.app（配对与远程访问见 `../docs/REMOTE.md`，Link 见 `../docs/LINK.md`，流与输入见 `../docs/PROTOCOL.md`）。
 
 - **`YoyoKit/`**：iOS 的 kit（Swift Package，iOS 26+，包在仓库根 `Package.swift`：SwiftPM 的远程依赖要求包在仓库根），
-  六个 product，见下「Kit」。屏幕页本身（画面解码与平滑播放、声音与音画同步、手势 / 键盘 / 修饰键、显示器切换、
+  七个 product，见下「Kit」。屏幕页本身（画面解码与平滑播放、声音与音画同步、手势 / 键盘 / 修饰键、显示器切换、
   控制权与「别的手机在控制」（打开时只看，第一次真正输入或点胶囊上的「开始控制」/「接管」才拿控制权：`ScreenControlPolicy`，`../docs/PROTOCOL.md`「客户端什么时候拿控制权」）、
   剪贴板键与提示）、剪贴板页，加上 Yoyo Control 自己的后端 `YoyoDirect`：配对（`YoyoInvite`、
   `YoyoClient.pair`：在 Link 上用 `Pair <码>`）、连 Mac（Link 的绑定先核对钉住的身份指纹）、`/status` / `/events` /
@@ -32,6 +32,7 @@ ios/App/testflight.sh                                              # Release 归
 | `YoyoConnect` | 不止一条路时的选路（见下「YoyoConnect」）：候选（`ConnectCandidate`：lan / direct / relay / tunnel，钉公钥 / 钉整张证书 / 系统校验）、happy-eyeballs 竞速（`ConnectRace`）、`YoyoConnector`（一个 `YoyoRouting`：网络变化重选、差路上每 30 s 再试、捷径失败立刻回落、401 换凭证、续期）、`ConnectWays`（后端按路取链接） | Core |
 | `YoyoDirect` | Yoyo Control 自己的 `YoyoBackend`：在 Link 上配对和连接、记录里缺绑定时问信令服务（`SignalLookup`）、Link 候选（`DirectConnect`，跑在 YoyoConnect 上）、`RemoteAccess` | Core、Connect、Screen、YoyoLinkClient |
 | `YoyoPro` | StoreKit 付费墙（`ProStore`、`ProPaywall`） | Core |
+| `YoyoTerminal` | 终端页 `YoyoTerminal.makePage(backend:)`（`docs/PROTOCOL.md`「终端」）：SwiftTerm 画终端、键盘上方的键、编辑框、会话菜单、断线自己连回去；屏幕页用 `YoyoScreen.makePage(backend:host:pages:)` 把它放进按钮里。编它要 Xcode 的 Metal Toolchain（SwiftTerm 的着色器） | Core、SwiftTerm 1.18 |
 | `YoyoLinkClient` | uu Link 的手机端（`../docs/LINK.md`「客户端：iOS」）：每个进程一个端点、钥匙串里的钥匙、拨一台电脑的绑定（先核对钉住的指纹）、会话作为 `YoyoScreenLink` 和 RPC 通道（`YoyoLinkConnection`）。只有根 `Package.swift` 找到 YoyoLink（本地 `scripts/link-apple.sh build` 或发布仓库）时才有；YoyoDirect 离不开它 | Core、Connect、YoyoLink |
 
 别的 App 嵌入屏幕页：依赖 `YoyoScreen`（剪贴板页加 `YoyoClipboard`），写自己的 `YoyoBackend`（自己的服务器、隧道、鉴权），
@@ -163,17 +164,20 @@ kit 有改动就升 patch，不挪 tag。
 Link 会话的路径：对端地址是私有 / 链路本地 / ULA 算局域网（`YoyoLinkConnection.isLocalNetwork`，`RemoteAccess.allows(onLocalNetwork:pro:)`）；
 中继、公网地址、100.64/10 都不算。
 
-- 商品：订阅组「Yoyo Control Pro」，`ca.sarria.yoyocontrol.pro.monthly`（$2.99 / 月）和
-  `ca.sarria.yoyocontrol.pro.yearly`（$19.99 / 年，新用户 1 周免费试用），都开家人共享。
+- 商品：订阅组「Yoyo Control Pro」，`ca.sarria.yoyocontrol.pro.month`（$2.99 / 月）和
+  `ca.sarria.yoyocontrol.pro.year`（$19.99 / 年，新用户 1 周免费试用），都**不开**家人共享：Pro 是账号的，一人一份
+  （家人共享一旦打开就关不掉，所以 2026-11-23 用这两个换掉了开着它、从没提交过的 `.monthly` / `.yearly`，旧 ID 不能再用）。
 - `ProStore`（StoreKit 2）：`hasPro` 来自 `Transaction.currentEntitlements`（只认验证过、没退款的这两个商品），
   启动时读一次，`Transaction.updates` 每来一条、购买和恢复购买之后都再读。App 启动就建好它，整个生命周期都在。
 - 连 Mac 时（`YoyoClient.connect(_:deviceId:pro:unpaired:)`）拨 Link（记录里的绑定；没有、或拨不通时问一次信令服务）。没有 Pro：会话要在
   1.5 s 内落在局域网路径上（iroh 同时试局域网地址和中继，中继可能先答），否则抛 `Failure.needsPro`，App 弹付费墙（`ProPaywall`：StoreKit 的
   `SubscriptionStoreView` 加上说明、恢复购买、条款 / 隐私链接），买到或恢复后接着连那台 Mac。已经打开的屏幕页不受影响。
   `/status` 的 `link` 和 `platform` 记进 `YoyoMac`（App 保存 `connect` 返回的 Mac）。
-- TestFlight 版本（`AppTransaction.environment == .sandbox`）和开发者装的版本（Xcode、`devicectl`：App 里带着
-  `embedded.mobileprovision`，App Store / TestFlight 的没有）不用买就算有 Pro（`ProStore.isTestBuild`），测试者能试所有连法；
-  App Store 版照旧要买。
+- App 的 `pro:` 不是 `ProStore.hasPro`：Pro 是 Yoyo Control 账号的（`AccountStore.hasPro`，`docs/ACCOUNT.md`「订阅」），`ProStore` 只用来买
+  和拿交易上报；没登录时要 Pro 先登录（`ProSignInSheet`），再看账号有没有，没有才弹付费墙。
+- 每个版本都要买 Pro：TestFlight 版本（`AppTransaction.environment == .sandbox`）和开发者装的版本（`devicectl`：App 里带着
+  `embedded.mobileprovision`，App Store / TestFlight 的没有）在 App Store 的沙盒里买，不花钱（`ProStore.isTestBuild`）；沙盒买的只在这种
+  版本里算数（`AccountStore.acceptsSandbox`）。从 Xcode 跑、用 StoreKit 文件买的交易不是 Apple 签的，账号服务器不收：模拟器上用 `-YoyoAssumePro YES`。
 - 本地测试：从 Xcode 运行用 `App/YoyoControl.storekit`（scheme 的 StoreKit Configuration），不连 App Store；
   TestFlight 用沙盒账号买真的商品。`-YoyoShowPaywall YES`（DEBUG）启动就打开付费墙，截图用；
   `-YoyoSignalURL https://…`（DEBUG）换一个信令服务，`-YoyoAssumePro YES` 当作已经买了 Pro。

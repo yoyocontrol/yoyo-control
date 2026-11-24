@@ -72,6 +72,17 @@ public protocol YoyoBackend: Sendable {
     /// The computer's events while a page shows (who controls, the displays' states, its clipboard). Each call is a new
     /// subscription, ended when the caller stops reading. Default nil: none (the pages poll).
     func events() -> AsyncStream<YoyoEvent>?
+
+    /// Whether the computer has terminals (docs/PROTOCOL.md「终端」). Default false.
+    var hasTerminal: Bool { get }
+    /// Attaches to terminal `session` (from byte `since` of its output when this phone's copy goes up to there; nil: a
+    /// new copy), or opens a new one (`session` nil) of `cols` × `rows` in `cwd` (nil: home). Errors:
+    /// `YoyoTerminalError`, `YoyoError`. Default: 404.
+    func openTerminal(session: String?, since: UInt64?, cols: Int, rows: Int, cwd: String?) async throws -> any YoyoTerminalChannel
+    /// The terminals open on the computer. Default: 404.
+    func terminals() async throws -> [YoyoTerminalInfo]
+    /// Ends terminal `id` (its shell gets SIGHUP). Default: 404.
+    func endTerminal(id: String) async throws
 }
 
 extension YoyoBackend {
@@ -95,6 +106,12 @@ extension YoyoBackend {
         throw YoyoError.http(404, nil)
     }
     public func events() -> AsyncStream<YoyoEvent>? { nil }
+    public var hasTerminal: Bool { false }
+    public func openTerminal(session: String?, since: UInt64?, cols: Int, rows: Int, cwd: String?) async throws -> any YoyoTerminalChannel {
+        throw YoyoError.http(404, nil)
+    }
+    public func terminals() async throws -> [YoyoTerminalInfo] { throw YoyoError.http(404, nil) }
+    public func endTerminal(id: String) async throws { throw YoyoError.http(404, nil) }
 }
 
 /// One way a backend's requests reach the computer.

@@ -122,6 +122,8 @@ final class LinkSessionTests: XCTestCase {
         LinkHooks.videoSource = nil
         LinkHooks.audioClient = nil
         LinkHooks.input = nil
+        LinkHooks.terminals = nil
+        TerminalStore.shared.endAll(.killed)
         server?.stop()
         RemoteControl.shared.releaseAny(why: "test over")
         if !home.isEmpty { try? FileManager.default.removeItem(atPath: home) }
@@ -492,6 +494,103 @@ final class LinkSessionTests: XCTestCase {
         XCTAssertFalse(session.isClosed())
         await session.close(.normal, reason: "test over")
         await ep.close()
+    }
+
+    /// A terminal over the link (docs/PROTOCOL.md「终端」): open, type, see the output, come back from where it was.
+    func testATerminalOverTheLink() async throws {
+        home = NSTemporaryDirectory() + "link-term-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+        let devices = RemoteDevices(path: home + "/devices.json")
+        let token = try devices.pair(code: devices.startPairing().code, id: "phone-term-test", name: "Term Phone")
+        let identity = try RemoteIdentity.loadOrCreate(directory: home)
+        let s = LinkServer(options: LinkOptions(port: 0, portMapping: false, bindAddresses: ["127.0.0.1"]), mode: .devices(devices),
+                           identity: .init(serverId: "test-server-id-0002", name: "Test Mac", key: identity.signingKey),
+                           keyDirectory: home)
+        server = s
+        s.start()
+        var status: [String: Any]?
+        for _ in 0..<100 where status == nil {
+            status = s.statusJSON
+            if status == nil { try await Task.sleep(nanoseconds: 20_000_000) }
+        }
+        let link = try XCTUnwrap(status)
+        let binding = Binding(id: link["id"] as! String, key: link["key"] as! String, sig: link["sig"] as! String)
+        let ep = try await bindEndpoint(config: EndpointConfig(role: .client, secretKey: generateLinkKey(), port: 0, relays: [],
+                                                               portmapper: false, guard: nil, bindIps: ["127.0.0.1"]))
+        defer { Task { await ep.close() } }
+        let session = try await ep.dial(target: DialTarget(id: binding.id, relays: [], direct: ["127.0.0.1:\(link["port"] as! Int)"]),
+                                        hello: Hello(credential: "Bearer \(token)", device: DeviceInfo(id: "phone-term-test", name: "Term Phone"),
+                                                     app: AppInfo(name: "t", version: "1"), features: []),
+                                        connectTimeoutMs: 10_000)
+        XCTAssertTrue(session.welcome().features.contains("terminal"))
+        XCTAssertTrue(session.welcome().features.contains("duplex"))
+
+        // off: 403
+        LinkHooks.terminals = false
+        let off = try await session.requestDuplex(request: RpcRequest(method: "GET", path: "/term?cols=80&rows=24", headers: [:]))
+        XCTAssertEqual(off.status(), 403)
+        LinkHooks.terminals = true
+
+        func open(_ path: String) async throws -> (LinkDuplex, [String: Any]) {
+            let r = try await session.requestDuplex(request: RpcRequest(method: "GET", path: path, headers: [:]))
+            XCTAssertEqual(r.status(), 101)
+            let d = try XCTUnwrap(r.duplex())
+            guard case .text(let hello)? = try await d.recv() else { XCTFail("no hello"); throw CancellationError() }
+            let o = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(hello.utf8)) as? [String: Any])
+            XCTAssertEqual(o["t"] as? String, "attached")
+            return (d, o)
+        }
+        /// Output until `needle` shows (its bytes counted into `seen`).
+        func read(_ d: LinkDuplex, until needle: String, seen: inout Int) async throws -> String {
+            var text = ""
+            while !text.contains(needle) {
+                guard let m = try await d.recv() else { XCTFail("ended before \(needle): \(text)"); return text }
+                if case .binary(let data) = m {
+                    seen += data.count
+                    text += String(decoding: data, as: UTF8.self)
+                }
+            }
+            return text
+        }
+        let (d, hello) = try await open("/term?cols=90&rows=20")
+        let id = try XCTUnwrap(hello["session"] as? String)
+        XCTAssertEqual(hello["offset"] as? Int, 0)
+        XCTAssertEqual(hello["reset"] as? Bool, false)
+        var seen = 0
+        try await d.send(message: .binary(data: Data("stty size; echo mark-$((40+2))\r".utf8)))
+        let out = try await read(d, until: "mark-42", seen: &seen)
+        XCTAssertTrue(out.contains("20 90"), out)
+
+        // the list says it is there, attached
+        let list = try await session.request(request: RpcRequest(method: "GET", path: "/term/sessions", headers: [:]), body: Data())
+        let listed = try JSONSerialization.jsonObject(with: try await list.readAll(limit: 1 << 20)) as? [String: Any]
+        let sessions = listed?["sessions"] as? [[String: Any]] ?? []
+        XCTAssertEqual(sessions.first?["id"] as? String, id)
+        XCTAssertEqual(sessions.first?["attached"] as? Bool, true)
+
+        // the phone goes; the terminal goes on; back from where it was, it gets what it missed
+        d.cancel()
+        try? await d.finish()
+        for _ in 0..<100 where TerminalStore.shared.session(id)?.isAttached == true { try await Task.sleep(nanoseconds: 20_000_000) }
+        let (d2, hello2) = try await open("/term?session=\(id)&since=\(seen)")
+        XCTAssertEqual(hello2["offset"] as? Int, seen)
+        XCTAssertEqual(hello2["reset"] as? Bool, false)
+        try await d2.send(message: .text(text: #"{"t":"resize","cols":70,"rows":15}"#))
+        try await d2.send(message: .binary(data: Data("stty size; exit 4\r".utf8)))
+        var more = 0
+        let after = try await read(d2, until: "15 70", seen: &more)
+        XCTAssertFalse(after.contains("mark-42"), after)
+        // the shell exits: `exit` with its code, then the stream ends
+        var exit: [String: Any]?
+        while let m = try await d2.recv() {
+            if case .text(let t) = m { exit = try JSONSerialization.jsonObject(with: Data(t.utf8)) as? [String: Any] }
+        }
+        XCTAssertEqual(exit?["t"] as? String, "exit")
+        XCTAssertEqual(exit?["code"] as? Int, 4)
+        XCTAssertNil(TerminalStore.shared.session(id))
+        let gone = try await session.requestDuplex(request: RpcRequest(method: "GET", path: "/term?session=\(id)", headers: [:]))
+        XCTAssertEqual(gone.status(), 404)
+        await session.close(code: 0, reason: "done")
     }
 }
 #endif

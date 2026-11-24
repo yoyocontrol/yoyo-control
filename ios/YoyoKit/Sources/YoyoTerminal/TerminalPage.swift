@@ -24,7 +24,7 @@ public enum YoyoTerminal {
 @MainActor
 final class TerminalPage: UIViewController, @preconcurrency TerminalViewDelegate {
     private let backend: any YoyoBackend
-    private let terminal: TerminalView
+    private let terminal: PageTerminalView
     private let keyBar = TerminalKeyBar()
     private let card = TerminalCard()
 
@@ -66,7 +66,7 @@ final class TerminalPage: UIViewController, @preconcurrency TerminalViewDelegate
         self.backend = backend
         let saved = UserDefaults.standard.double(forKey: Self.fontKey)
         let size = saved >= 7 && saved <= 28 ? saved : 12
-        terminal = TerminalView(frame: CGRect(x: 0, y: 0, width: 320, height: 480),
+        terminal = PageTerminalView(frame: CGRect(x: 0, y: 0, width: 320, height: 480),
                                 font: .monospacedSystemFont(ofSize: size, weight: .regular))
         sessionId = UserDefaults.standard.string(forKey: Self.sessionKey(backend))
         super.init(nibName: nil, bundle: nil)
@@ -102,6 +102,13 @@ final class TerminalPage: UIViewController, @preconcurrency TerminalViewDelegate
         terminal.accessibilityIdentifier = "terminal.view"
         view.addSubview(terminal)
         keyBar.onKey = { [weak self] key in self?.key(key) }
+        // a tap on the terminal brings the keyboard back by itself (SwiftTerm): the row goes with it
+        terminal.onFocus = { [weak self] in
+            guard let self, self.keyRowDocked else { return }
+            self.keyRowDocked = false
+            self.keyBar.keyboardShown = true
+            self.keyBar.bottomPadding = 0
+        }
         terminal.addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:))))
 
         card.translatesAutoresizingMaskIntoConstraints = false
@@ -148,13 +155,19 @@ final class TerminalPage: UIViewController, @preconcurrency TerminalViewDelegate
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         resume()
-        if card.isHidden { _ = terminal.becomeFirstResponder() }
+        if card.isHidden { showKeyboard() }
+        #if DEBUG
+        // `-<namespace>TerminalKeyboardHidden YES` (screenshots): the keyboard away, the key row docked
+        if UserDefaults.standard.bool(forKey: YoyoHost.key("TerminalKeyboardHidden")) {
+            Task { try? await Task.sleep(for: .seconds(1)); hideKeyboard() }
+        }
+        #endif
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         visible = false
-        _ = terminal.resignFirstResponder()
+        hideKeys()
         // back on the Screen page, which draws its own buttons
         if isMovingFromParent, let nav = navigationController {
             nav.setNavigationBarHidden(true, animated: animated)
@@ -277,7 +290,7 @@ final class TerminalPage: UIViewController, @preconcurrency TerminalViewDelegate
         terminal.getTerminal().resetToInitialState()
         terminal.setNeedsDisplay()
         attach()
-        _ = terminal.becomeFirstResponder()
+        showKeyboard()
     }
 
     private func sendSize() {
@@ -316,7 +329,7 @@ final class TerminalPage: UIViewController, @preconcurrency TerminalViewDelegate
     private func showCard(_ title: String, _ detail: String?, button: String, action: @escaping () -> Void) {
         card.set(title: title, detail: detail, button: button, action: action)
         card.isHidden = false
-        _ = terminal.resignFirstResponder()
+        hideKeys()
     }
 
     // MARK: The menu
@@ -370,17 +383,51 @@ final class TerminalPage: UIViewController, @preconcurrency TerminalViewDelegate
                 self.draft = ""
                 self.paste(text)
                 if enter { self.channel?.send(Data([0x0d])) }
-                _ = self.terminal.becomeFirstResponder()
+                self.showKeyboard()
             }
             let nav = UINavigationController(rootViewController: composer)
             nav.overrideUserInterfaceStyle = .dark
             if let sheet = nav.sheetPresentationController { sheet.detents = [.medium(), .large()] }
             present(nav, animated: true)
-        case .hide:
-            _ = terminal.resignFirstResponder()
+        case .keyboard:
+            if keyBar.keyboardShown { hideKeyboard() } else { showKeyboard() }
         case .ctrl, .alt:
             break
         }
+    }
+
+    // MARK: The keyboard
+
+    // While the keyboard is away the page itself is the first responder, with the key row as its input accessory: the
+    // row stays at the bottom of the page (its keyboard button, or a tap on the terminal, brings the keyboard back).
+    override var canBecomeFirstResponder: Bool { keyRowDocked }
+    override var inputAccessoryView: UIView? { keyRowDocked ? keyBar : nil }
+    private var keyRowDocked = false
+
+    private func hideKeyboard() {
+        keyRowDocked = true
+        keyBar.keyboardShown = false
+        keyBar.bottomPadding = view.window?.safeAreaInsets.bottom ?? 0
+        _ = terminal.resignFirstResponder()
+        _ = becomeFirstResponder()
+        reloadInputViews()
+    }
+
+    private func showKeyboard() {
+        keyRowDocked = false
+        keyBar.keyboardShown = true
+        keyBar.bottomPadding = 0
+        _ = resignFirstResponder()
+        _ = terminal.becomeFirstResponder()
+    }
+
+    /// Nothing at the bottom (a card shows, the page goes).
+    private func hideKeys() {
+        keyRowDocked = false
+        keyBar.keyboardShown = true
+        keyBar.bottomPadding = 0
+        _ = terminal.resignFirstResponder()
+        _ = resignFirstResponder()
     }
 
     /// Bytes from the key row, with the armed modifiers.
@@ -458,6 +505,17 @@ final class TerminalPage: UIViewController, @preconcurrency TerminalViewDelegate
     }
 
     func clipboardRead(source: TerminalView) -> Data? { nil }
+}
+
+/// SwiftTerm's view, saying when it takes the keyboard.
+final class PageTerminalView: TerminalView {
+    var onFocus: (() -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok { onFocus?() }
+        return ok
+    }
 }
 
 /// A deferred menu's completion, handed to the main actor's task.

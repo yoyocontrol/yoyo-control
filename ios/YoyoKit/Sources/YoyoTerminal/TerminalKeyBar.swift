@@ -2,7 +2,9 @@ import UIKit
 import YoyoCore
 
 /// The row over the keyboard (the terminal's `inputAccessoryView`): the keys a phone keyboard doesn't have, in the
-/// order a shell and full-screen programs (vim, htop, coding agents) need them. Scrolls sideways when it doesn't fit.
+/// order a shell and full-screen programs (vim, htop, coding agents) need them. Scrolls sideways when it doesn't fit;
+/// the keyboard button stays on the right: it puts the keyboard away, and with the keyboard away the row stays at the
+/// bottom of the page (`TerminalPage` holds it then) and the same button brings the keyboard back.
 ///
 /// - Ctrl and Alt are sticky: tapped, the next key typed on the keyboard goes with them (Ctrl-C, Alt-B…); tapped
 ///   twice, they stay on until tapped again. `TerminalPage` applies them (`modifiers`).
@@ -16,7 +18,17 @@ final class TerminalKeyBar: UIInputView {
         case bytes([UInt8])
         /// Arrows: their sequences depend on the terminal's cursor key mode.
         case arrow(Character)
-        case ctrl, alt, paste, compose, hide
+        case ctrl, alt, paste, compose
+        /// Keyboard away / back (`keyboardShown` says which).
+        case keyboard
+    }
+
+    /// The keyboard is up (the right button puts it away), or away (it brings it back).
+    var keyboardShown = true {
+        didSet {
+            guard keyboardShown != oldValue else { return }
+            updateKeyboardButton()
+        }
     }
 
     /// What the bar does.
@@ -34,6 +46,20 @@ final class TerminalKeyBar: UIInputView {
     private let stack = UIStackView()
     private var ctrlButton: UIButton!
     private var altButton: UIButton!
+    private var keyboardButton: UIButton!
+    private var bottom: NSLayoutConstraint!
+
+    /// Room under the keys: the home indicator's while the row stays at the bottom without the keyboard.
+    var bottomPadding: CGFloat = 0 {
+        didSet {
+            guard bottomPadding != oldValue else { return }
+            bottom.constant = -bottomPadding
+            invalidateIntrinsicContentSize()
+        }
+    }
+
+    // the height the system gives an input accessory: the keys' row, and the room under it when docked
+    override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: 48 + bottomPadding) }
     private var repeatTimer: Timer?
     private var lastTap: (key: String, at: Date)?
 
@@ -49,35 +75,50 @@ final class TerminalKeyBar: UIInputView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scroll)
         scroll.addSubview(stack)
+        keyboardButton = button(symbol: "keyboard.chevron.compact.down", label: L("Hide Keyboard"), .keyboard)
+        keyboardButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(keyboardButton)
+        // a hairline between the row that scrolls and the button that stays
+        let divider = UIView()
+        divider.backgroundColor = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(divider)
+        autoresizingMask = .flexibleHeight
+        bottom = scroll.bottomAnchor.constraint(equalTo: bottomAnchor)
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 48),
-            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bottom,
+            keyboardButton.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -8),
+            keyboardButton.centerYAnchor.constraint(equalTo: scroll.frameLayoutGuide.centerYAnchor),
+            divider.widthAnchor.constraint(equalToConstant: 1),
+            divider.heightAnchor.constraint(equalToConstant: 24),
+            divider.centerYAnchor.constraint(equalTo: keyboardButton.centerYAnchor),
+            divider.trailingAnchor.constraint(equalTo: keyboardButton.leadingAnchor, constant: -6),
+            scroll.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: divider.leadingAnchor, constant: -2),
             scroll.topAnchor.constraint(equalTo: topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 8),
             stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -8),
             stack.centerYAnchor.constraint(equalTo: scroll.frameLayoutGuide.centerYAnchor),
             stack.heightAnchor.constraint(equalToConstant: 36),
         ])
 
+        // the ones most used first: what a shell completes with, what stops it, what moves in it
         add(text: "esc", label: L("Escape"), .bytes([0x1b]))
+        add(text: "tab", label: L("Tab"), .bytes([0x09]))
         ctrlButton = add(text: "ctrl", label: L("Control"), .ctrl)
-        altButton = add(text: "alt", label: L("Option"), .alt)
-        add(symbol: "arrow.right.to.line", label: L("Tab"), .bytes([0x09]))
-        add(symbol: "arrow.left.to.line", label: L("Shift-Tab"), .bytes([0x1b, 0x5b, 0x5a]))
-        add(text: "^C", label: L("Interrupt (Control-C)"), .bytes([0x03]))
         add(symbol: "arrow.left", label: L("Left"), .arrow("D"), repeats: true)
         add(symbol: "arrow.up", label: L("Up"), .arrow("A"), repeats: true)
         add(symbol: "arrow.down", label: L("Down"), .arrow("B"), repeats: true)
         add(symbol: "arrow.right", label: L("Right"), .arrow("C"), repeats: true)
-        add(symbol: "return", label: L("New line without sending (Option-Return)"), .bytes([0x1b, 0x0d]))
+        add(text: "^C", label: L("Interrupt (Control-C)"), .bytes([0x03]))
+        altButton = add(text: "alt", label: L("Option"), .alt)
+        add(text: "⇧tab", label: L("Shift-Tab"), .bytes([0x1b, 0x5b, 0x5a]))
+        add(text: "⌥⏎", label: L("New line without sending (Option-Return)"), .bytes([0x1b, 0x0d]))
         for c in ["|", "~", "/", "-", "_", "*", "&", "$"] {
             add(text: c, label: c, .bytes(Array(c.utf8)), monospaced: true)
         }
         add(symbol: "doc.on.clipboard", label: L("Paste"), .paste)
         add(symbol: "square.and.pencil", label: L("Compose"), .compose)
-        add(symbol: "keyboard.chevron.compact.down", label: L("Hide Keyboard"), .hide)
         update()
     }
 
@@ -92,6 +133,13 @@ final class TerminalKeyBar: UIInputView {
     @discardableResult
     private func add(text: String? = nil, symbol: String? = nil, label: String, _ key: Key, repeats: Bool = false,
                      monospaced: Bool = false) -> UIButton {
+        let b = button(text: text, symbol: symbol, label: label, key, repeats: repeats, monospaced: monospaced)
+        stack.addArrangedSubview(b)
+        return b
+    }
+
+    private func button(text: String? = nil, symbol: String? = nil, label: String, _ key: Key, repeats: Bool = false,
+                        monospaced: Bool = false) -> UIButton {
         var c = UIButton.Configuration.glass()
         c.cornerStyle = .capsule
         c.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12)
@@ -120,8 +168,14 @@ final class TerminalKeyBar: UIInputView {
         } else {
             b.addAction(UIAction { [weak self] _ in self?.tapped(key, name: text ?? symbol ?? "") }, for: .primaryActionTriggered)
         }
-        stack.addArrangedSubview(b)
         return b
+    }
+
+    private func updateKeyboardButton() {
+        guard var c = keyboardButton.configuration else { return }
+        c.image = UIImage(systemName: keyboardShown ? "keyboard.chevron.compact.down" : "keyboard")
+        keyboardButton.configuration = c
+        keyboardButton.accessibilityLabel = keyboardShown ? L("Hide Keyboard") : L("Show Keyboard")
     }
 
     private func tapped(_ key: Key, name: String) {

@@ -606,8 +606,9 @@ interface TerminalInfo {
 
 屏幕页底部那排按钮里有「终端」（`YoyoScreen.makePage(backend:host:pages:)` 的 `YoyoScreenPage`，后端 `hasTerminal` 时才有），推进终端页，返回就是屏幕。
 终端页记住每台电脑上次的终端（`<namespace>Terminal.<cacheScope>`），下次（App 重开也一样）连回它；断了自己重连（从已有的字节接着收）。
-键盘上方一排键：esc、ctrl / alt（点一下管下一个键，连点两下锁住）、tab、⇧tab、^C、方向键（按住连发；按终端的光标键模式发 `ESC [` / `ESC O`）、
-⌥⏎（`ESC CR`：换行不发送）、常用符号、粘贴、编辑框（原生输入框写好整段再发：听写、中文输入法；多行在程序要求时用括号粘贴）、收键盘。
+键盘上方一排键（最常用的在前）：esc、tab、ctrl（点一下管下一个键，连点两下锁住）、方向键（按住连发；按终端的光标键模式发 `ESC [` / `ESC O`）、
+^C、alt、⇧tab、⌥⏎（`ESC CR`：换行不发送）、常用符号、粘贴、编辑框（原生输入框写好整段再发：听写、中文输入法；多行在程序要求时用括号粘贴）；
+右边固定一个键盘键：收起键盘后这排键留在页面底部，同一个键（或点一下终端）再展开键盘。
 捏合改字号。导航栏的菜单列出电脑上的终端（切换）、新终端、结束这个终端。SwiftTerm 1.18 带一个 Metal 着色器：编 `YoyoTerminal` 要装 Xcode 的
 Metal Toolchain（`xcodebuild -downloadComponent MetalToolchain`）。
 

@@ -337,6 +337,22 @@
         }
       }
     },
+    "Show Keyboard" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show Keyboard"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示键盘"
+          }
+        }
+      }
+    },
     "Tab" : {
       "localizations" : {
         "en" : {

@@ -7,7 +7,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { loadLink, rpcExchange, streamId, withPort } from "../link.mjs";
+import { bindFree, loadLink, rpcExchange, streamId, withPort } from "../link.mjs";
 import { RemoteAccess, adminCall } from "../remote.mjs";
 import { YoyoLinux } from "../server.mjs";
 import { fakeSpawn } from "./fakes.mjs";
@@ -84,6 +84,50 @@ async function controlReply(s, rid) {
     if (m.rid === rid) return m;
   }
 }
+
+test("bindFree: its own ports; a taken one moves the rtc socket first, then both; any other failure thrown", async () => {
+  const bindOf = (taken, free = 50001) => {
+    const calls = [];
+    const bind = async ({ port, rtcPort }) => {
+      calls.push([port, rtcPort]);
+      if (taken.includes(port) || (rtcPort !== null && taken.includes(rtcPort))) throw new Error("Failed to bind sockets");
+      return { port: port || free, rtcPort: rtcPort === null ? null : rtcPort || free + 1 };
+    };
+    return { bind, calls };
+  };
+  const logs = [];
+  const log = (l) => logs.push(l);
+  const o = { settleMs: 0 };
+  let b = bindOf([]);
+  assert.deepEqual(await bindFree(b.bind, { port: 47821, rtcPort: 47822 }, log, o), { port: 47821, rtcPort: 47822 });
+  assert.deepEqual(logs, []);
+  // only the rtc port taken: the link keeps its own
+  b = bindOf([47822]);
+  assert.deepEqual(await bindFree(b.bind, { port: 47821, rtcPort: 47822 }, log, o), { port: 47821, rtcPort: 50002 });
+  assert.deepEqual(b.calls, [[47821, 47822], [47821, 47822], [47821, 0]]);
+  assert.match(logs.pop(), /a port is taken \(Failed to bind sockets\): rtc udp 47822 → 50002/);
+  // the link's taken (WSL's block on Windows, 2026-11-25): both on any
+  b = bindOf([47821]);
+  assert.deepEqual(await bindFree(b.bind, { port: 47821, rtcPort: 47822 }, log, o), { port: 50001, rtcPort: 50002 });
+  assert.match(logs.pop(), /udp 47821 → 50001, rtc udp 47822 → 50002/);
+  // no rtc socket
+  b = bindOf([47821]);
+  assert.deepEqual(await bindFree(b.bind, { port: 47821, rtcPort: null }, log, o), { port: 50001, rtcPort: null });
+  // held a moment by its own stopped endpoint: the same ports on the second try
+  let once = true;
+  const held = async ({ port, rtcPort }) => {
+    if (once) {
+      once = false;
+      throw new Error("Failed to bind sockets");
+    }
+    return { port, rtcPort };
+  };
+  const before = logs.length;
+  assert.deepEqual(await bindFree(held, { port: 47821, rtcPort: 47822 }, log, o), { port: 47821, rtcPort: 47822 });
+  assert.equal(logs.length, before, "nothing moved, nothing said");
+  // nothing binds: the first error
+  await assert.rejects(bindFree(async () => { throw new Error("no network"); }, { port: 47821, rtcPort: 47822 }, log, o), /no network/);
+});
 
 test("helpers: stream ids, ports", () => {
   assert.equal(streamId(1), 1);

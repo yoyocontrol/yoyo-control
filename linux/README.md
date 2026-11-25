@@ -133,6 +133,10 @@ node server.mjs account join --remote ~/.yoyo-remote --key <加入钥匙> https:
 远程访问的门（上面）。手机经 UDP / QUIC 连上来，画面经 Link 的媒体层（FEC、NACK、按延迟调码率）走。实现在 `link.mjs`。
 
 - UDP `--link-port`（缺省 47820），`0.0.0.0` 和 `[::]`；主人模式下 `--link-bind <ip,…>` 只绑这些本机地址。
+- 端口被别的程序占着（Windows 上 WSL 的 mirrored 网络在它启动时替 Linux 预留一整块主机的 UDP 端口，可能正好盖住这里的）：
+  先放一下自己刚停的、再试一次同样的端口，然后 WebRTC 换任意空闲端口，再不行两个都换（`link.mjs` 的 `bindFree`）。
+  Link 照样开着，日志一行 `link: a port is taken (…): udp 47820 → …`，实际端口看 `/status.link.port` / `.rtc.port`，
+  路由器映射跟着实际端口。为原端口开的防火墙规则管不到新端口：直连可能少一些，中继和打洞的路照旧。
 - 中继：`--link-relay <url,…|off>`（`YOYO_LINK_RELAYS` 同），缺省没有（服务端不带任何中继，`docs/LINK.md`「端点、地址、路径」）：
   给了的话直连不上的手机经它进来，打洞也靠它；不给或 `off` 就只有直连。
 - 信令服务：`--signal <url|off>`（`YOYO_SIGNAL_URL` 同），缺省没有（浏览器的 WebRTC 配对、按指纹查绑定都要它）。

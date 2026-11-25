@@ -225,7 +225,8 @@ export class RemoteAccess {
     const base = nodeNetwork();
     const network = o.internalClient || o.gateway || o.upnpLocation ? overrideNetwork(base, o) : base;
     this.linkMapper = new PortMapping({
-      internalPort: o.internalPort ?? this.linkPort,
+      // the port it listens on (another program may have had the usual one: link.mjs bindFree)
+      internalPort: o.internalPort ?? link.ep?.port ?? this.linkPort,
       protocol: "udp",
       externalPort: this.settings.linkPublicPort ?? o.externalPort,
       description: "Yoyo Control Link",

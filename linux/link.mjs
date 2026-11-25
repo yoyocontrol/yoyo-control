@@ -26,8 +26,13 @@
 //   the same protocol; offers come through `POST /link/rtc` on the token listener (`acceptRtcOffer`), answers are signed
 //   with the identity key. The router maps it like the link port; `--advertise` hosts are offered on it too;
 //   `/status.link.rtc = { port, direct? }`.
+// - A port another program has (on Windows, WSL's mirrored networking reserves a block of the host's UDP ports for
+//   Linux when it starts, and that block can take the link's): the rtc socket on any port first, then both — the link
+//   listens all the same, on the ports `/status.link` says (`bindFree`).
 import { EventEmitter } from "node:events";
 import { join } from "node:path";
+import v8 from "node:v8";
+import { runInNewContext } from "node:vm";
 import { CURSOR_MIN_INTERVAL, SENT_SHAPES_MAX } from "./cursor.mjs";
 import { RefineSchedule, TUNING, limitedTuning, linkBufferKbit, liveBudget, parsePlayoutReport, playoutLine, refineKbps } from "./flow.mjs";
 import { InputError } from "./input.mjs";
@@ -107,6 +112,42 @@ export function streamId(v) {
  * LinkAuthority, `home`: the keys' folder, `serverId`, `name`). `svc`: the YoyoLinux service. `relays`: iroh relay
  * URLs published in the binding (empty: direct only, and no hole punching, which needs a relay on both ends).
  */
+/**
+ * An endpoint on `port` and `rtcPort` (null: no rtc socket), else, when one of them is taken (still after a collection),
+ * with the rtc socket on any port, then both on any (0): the link listens either way, its ports are the endpoint's. A failure that is not a
+ * port's (any port fails as well) is thrown as it came. A failed try's sockets are let go only when its native objects
+ * are collected (Windows has no address reuse): collected before the next.
+ */
+export async function bindFree(bind, { port, rtcPort }, log = () => {}, { settleMs = 300 } = {}) {
+  // the same ports once more first: this server's own endpoint just stopped may still hold them until collected
+  const tries = [{ port, rtcPort }, { port, rtcPort }];
+  if (rtcPort) tries.push({ port, rtcPort: 0 });
+  if (port) tries.push({ port: 0, rtcPort: rtcPort === null ? null : 0 });
+  let first = null;
+  for (const t of tries) {
+    if (first) {
+      collectGarbage();
+      await new Promise((r) => setTimeout(r, settleMs));
+    }
+    try {
+      const ep = await bind(t);
+      const moved = [t.port !== port ? `udp ${port} → ${ep.port}` : null, t.rtcPort !== rtcPort ? `rtc udp ${rtcPort} → ${ep.rtcPort}` : null].filter(Boolean);
+      if (moved.length) log(`link: a port is taken (${first.message}): ${moved.join(", ")}`);
+      return ep;
+    } catch (err) {
+      first ??= err;
+    }
+  }
+  throw first;
+}
+
+function collectGarbage() {
+  try {
+    v8.setFlagsFromString("--expose-gc");
+    runInNewContext("gc")();
+  } catch {}
+}
+
 export class LinkServer {
   constructor({ L, svc, remote = null, authority = null, home, serverId, name, port = DEFAULT_LINK_PORT, relays = [], rtcPort = defaultRtcPort(port), stun = [], advertise = [], exempt = [], bind = [], log = () => {}, clock = monotonic }) {
     this.L = L;
@@ -149,16 +190,21 @@ export class LinkServer {
       if (level !== "debug") this.log(message);
     });
     const key = L.loadOrCreateLinkKey(join(this.home, "link-key"));
-    this.ep = await L.bindEndpoint({
-      role: "server",
-      secretKey: key,
-      port: this.port,
-      relays: this.relays,
-      portmapper: false,
-      guard: { exempt: this.exempt },
-      ...(this.bind.length ? { bindIps: this.bind } : {}),
-      ...(this.rtcPort === null ? {} : { rtcPort: this.rtcPort, rtcStunServers: this.stun }),
-    });
+    this.ep = await bindFree(
+      ({ port, rtcPort }) =>
+        L.bindEndpoint({
+          role: "server",
+          secretKey: key,
+          port,
+          relays: this.relays,
+          portmapper: false,
+          guard: { exempt: this.exempt },
+          ...(this.bind.length ? { bindIps: this.bind } : {}),
+          ...(rtcPort === null ? {} : { rtcPort, rtcStunServers: this.stun }),
+        }),
+      { port: this.port, rtcPort: this.rtcPort },
+      this.log,
+    );
     const { x963Private } = await import("./vendor/remote/index.js");
     const identityKey = x963Private(identity.key);
     this.binding = this.ep.binding(identityKey);

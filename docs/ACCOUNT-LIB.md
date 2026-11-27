@@ -38,9 +38,9 @@
 | --- | --- | --- |
 | `@yoyocontrol/account-server`（`packages/account-server`） | 运营者的服务器 | 账号服务器本身：登录、目录、入场券、撤销名单、设备锁的链、服务、订阅、管理命令 |
 | `@yoyocontrol/account`（`packages/account`） | 电脑（Node：Linux、Windows 服务端，及任何 Node 写的服务）；借出服务的那一端 | 电脑这一半（`AccountMember`）：加入 / 退出、钉主人、验入场券和背书、跟撤销名单、取服务；服务验服务票（`ServiceKeys`） |
-| `YoyoServer` 里的 `AccountMembership` | 电脑（Mac） | 同上，Swift，同一份成员文件；还没有：加入码、服务 |
-| YoyoKit 的 `YoyoAccount` | iPhone / iPad | `AccountClient`：通过 Apple 登录、电脑清单、入场券、加入钥匙、订阅、设备、退出、删除（还没有：扫码添加电脑、锁钥匙和批准） |
-| `@yoyocontrol/account-web`（`packages/account-web`） | 浏览器 | 网页的登录（会话绑在不可导出的设备钥匙上，每个请求签名）、清单、入场券 |
+| `YoyoServer` 里的 `AccountMembership` | 电脑（Mac） | 同上，Swift，同一份成员文件，含加入码（`startJoin` / `confirmJoin` / `cancelJoin`）；还没有：服务 |
+| YoyoKit 的 `YoyoAccount` | iPhone / iPad | `AccountClient`：通过 Apple 登录、邮箱、电脑清单、入场券、加入钥匙、订阅、设备、退出、删除、同意扫码登录和加入码（还没有：锁钥匙和批准） |
+| `@yoyocontrol/account-web`（`packages/account-web`） | 浏览器 | 网页的登录（会话绑在不可导出的设备钥匙上，每个请求签名；含扫码登录）、清单、入场券、同意别的端的码 |
 
 电脑这一半给服务端的只是一个判断：「这个 hello 带的入场券（和背书）放不放行，放行的是账号里的哪部设备」，以及撤销名单变了时「哪些令牌作废」。
 令牌怎么发、存在哪仍是服务端自己的事（Mac / Linux 的 `devices.json`：`RemoteDevices.admit` / `@yoyocontrol/remote` 的 `DeviceStore.admit` 发、
@@ -58,9 +58,42 @@
   谁都能注册的登录系统必须给 `allow`（`sub` 或 `@域名`）或明说 `open`。
 - `apple`：iOS 上的原生「通过 Apple 登录」（`POST /v1/auth/apple { identityToken, nonce, name?, device }`：服务器验 Apple 的公钥、`aud` 在
   `ACCOUNT_APPLE_AUDIENCES` 里、nonce 的 SHA-256）。只有它时不用配 OIDC（`/v1/signin` 404）。Apple 谁都能注册：要 `ACCOUNT_OPEN=1` 或 `ACCOUNT_ALLOW`。
-  Apple 也是 OIDC 提供方，网页走 `oidc` 那条（同一个 `iss` + `sub`，同一个账号）。删除账号时撤销 Apple 授权（`ACCOUNT_APPLE_TEAM_ID` +
+  Apple 也是 OIDC 提供方，网页走 `oidc` 那条（同一个 `iss` + `sub`，同一个账号）：`ACCOUNT_OIDC_ISSUER=https://appleid.apple.com`、
+  `ACCOUNT_OIDC_CLIENT_ID=<Services ID>`（开发者网站 › Identifiers › Services IDs，开 Sign in with Apple，主 App ID 是 App 的，
+  Return URL 是 `<ACCOUNT_PUBLIC_URL>/v1/callback`）；不给 `ACCOUNT_OIDC_CLIENT_SECRET` 时，客户端密钥用 Sign in with Apple 的钥匙
+  （`ACCOUNT_APPLE_TEAM_ID` / `_KEY_ID` / `_KEY`）每次现签（`AccountConfig.appleSecret`）。对 Apple 只要 `openid`（Apple 不认 `profile`，
+  `name` / `email` 要 form_post 回调）：网页上新注册的账号没有名字，App 先登录过的账号沿用它的。删除账号时撤销 Apple 授权（`ACCOUNT_APPLE_TEAM_ID` +
   `_KEY_ID` + `_KEY`，三个一起给才做）。
+- `password`：**邮箱和密码**，账号服务器自己就是登录系统（`ACCOUNT_PASSWORD=1`；`AccountConfig.password = { mailer }`）。
+  注册：`POST /v1/auth/password/register { email, password, locale? }` 往邮箱发 6 位验证码，`POST /v1/auth/password/verify { email, code, name?, device }`
+  建账号、发会话；登录：`POST /v1/auth/password { email, password, device }`；忘记密码：`/v1/auth/password/reset { email }` 发码、
+  `/reset/confirm { email, code, password, device }` 换密码（账号的其他会话全部结束）。账号 = `iss` `<ACCOUNT_PUBLIC_URL>/password` + 随机的 `sub`，
+  邮箱（小写）记在 `password_logins`；和 Apple 登录的账号是两个账号。密码 8–256 字符，存 scrypt（N 2^15、r 8、p 1，加盐）；验证码只存哈希，
+  10 分钟、5 次错就作废，同一个邮箱一分钟一封、一小时最多 5 封；同一个邮箱 15 分钟错 10 次密码就等着。对外不泄露谁注册过：已注册的邮箱再注册
+  回答一样（邮件里说「已经有账号」，不给码），忘记密码对没注册的邮箱也回答一样（不发信）。请求带着网页的 `Origin`（`ACCOUNT_WEB_REDIRECTS`
+  的源）时，会话就是网页的那种（绑设备钥匙，要 `device.key`）。谁都能注册：要 `ACCOUNT_OPEN=1` 或 `ACCOUNT_ALLOW` 的 `@域名`。
+  发信：`Mailer`（`send({ to, subject, text })`，使用方自己给），或环境变量里的 Amazon SES（`ACCOUNT_MAIL_FROM`、`ACCOUNT_SES_REGION`、
+  `ACCOUNT_SES_ACCESS_KEY_ID`、`ACCOUNT_SES_SECRET_ACCESS_KEY`；v2 `SendEmail`，请求在库里用 SigV4 签，不带 AWS SDK）。
+  客户端：`@yoyocontrol/account-web` 的 `emailSignIn`，YoyoKit `YoyoAccount` 的 `registerEmail` / `verifyEmail` / `signIn(email:password:)` /
+  `requestPasswordReset` / `resetPassword`。试用：`yoyo-account-dev --password`（邮件打在终端里）。
 - 设备拿到的会话：令牌只存 SHA-256；App 最长 90 天，网页 30 天且绑在设备钥匙上。
+
+**扫码登录**（2026-11-27，`SCHEMA_VERSION` 6，表 `qr_signins`；总是开着，`/v1/config` 的 `signin.qr`）：已登录的设备把另一个端登录到同一个账号，
+像 OAuth 的设备授权（RFC 8628），但新端的会话绑在它自己的钥匙上。
+
+- 新端（浏览器、以后的桌面客户端）：`POST /v1/auth/qr { device: { name, platform?, key } }`（`key` 必须有：raw Ed25519，base64url）→
+  `{ code, user_code, request, expires_in: 150, interval: 2 }`。`code`（8 个字母，同加入码的字母表）显示成二维码和文字；`request` 是只有它知道的
+  轮询凭据（服务器只存哈希）。`POST /v1/auth/qr/poll { request }`：`authorization_pending` / `slow_down` / `access_denied` / `expired_token`，
+  同意后 200 一次给出会话（和网页登录的一样：hosted、30 天、绑 `key`、每个请求 `<ns>-proof`），之后 `invalid_grant`。凭据被偷了也没用：
+  会话离了那把私钥什么都不是。
+- 已登录的设备（App 的会话，或带签名的网页会话）：`GET /v1/auth/qr/lookup?code=` 先看是什么（设备名、平台、发起时间、IP），
+  `POST /v1/auth/qr/approve|decline { code }`。第一个同意的算数；码 150 秒、只能用一次；同意之后、新端取会话之前同意的那台设备被移除了，就不给。
+- 限速：发起每个地址 6 个起、之后每 10 秒一个，同时开着的每个地址 5 个、总共 2000；轮询每个地址 30 个起、之后每秒一个，未知凭据算坏令牌；
+  查看 / 同意的错码和加入码共用限额（每个会话每分钟 5、每个地址每分钟 10、每个账号每小时 30）。
+- 新端进账号的设备列表，像别的设备一样能移除。二维码里是什么由产品定（库给 `code`）：一个 https 地址、码放在 `#` 后面（不进服务器日志）。
+- 客户端：`@yoyocontrol/account-web` 的 `beginQrSignIn` / `qrSignInLink` / `signInCode`，`AccountClient.lookupSignIn` / `approveSignIn` /
+  `declineSignIn`；YoyoKit `YoyoAccount` 的 `signInCode(_:)`、`lookupSignIn` / `approveSignIn` / `declineSignIn`（加入码：`joinCode(_:)`、
+  `lookupJoin` / `approveJoin`）。试用：`yoyo-account-dev`（总是开着）。
 - 删除账号（`DELETE /v1/me { authorizationCode? }`，账号自己的人）：撤销名单标记停用、列出它的电脑，账号删掉；不留墓碑（重新登录是新账号）。
   管理员的 `remove` 留墓碑。
 
@@ -123,6 +156,8 @@
    App 的加入钥匙、电脑的 `info`、App Store 订阅、自己删账号（0.2.0）。和 nest 一样先不开设备锁（入场券就够），锁在第 4 步。旧的 signal1 账号
    只有一个测试账号、没有电脑，没有迁移。（有，2026-11-23：公开仓库 `account-v0.2.0`、`account-server-v0.2.0`、`remote-v0.5.0`、`kit-v0.7.1`，Mac 1.3.0、`linux-v0.14.0` / `windows-v0.14.0`（预发布）、TestFlight 0.4.0）
 4. **设备锁**：链、背书、关锁密钥，账号服务器、电脑端、iOS、网页一起。（没做）
-5. **`account-web`**：网页的登录和清单。（没做）
+5. **`account-web`**：网页的登录和清单。（有，2026-11-26：`packages/account-web` 0.1.0，以 nest 网页的 `transport/account.ts` 为底子，
+   命名空间做成参数、去掉产品的文案、清单多给电脑的 `info`、`me()`；账号服务器能把 Apple 当网页的 OIDC 提供方（客户端密钥现签）；
+   Yoyo Control 的网页用它登录（`webapp/`）、`@yoyocontrol/direct-web` 的 `admit` 凭入场券进电脑。nest 换用这个库还没做。）
 
 每一步做完在这里改状态；发布 npm 包按 `scripts/git-dist.sh`，Swift 按 `kit-vX.Y.Z`。

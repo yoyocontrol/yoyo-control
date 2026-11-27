@@ -97,3 +97,61 @@ test("an earlier build's own certificate moves to link-web's store (the Macs' bi
   assert.equal((await other.w.identity()).certificate, current.kept);
   assert.equal(current.saves, 0);
 });
+
+test("an account's computer: let in with Ticket <t>, kept with its Link id; a token that stops working gets a new ticket, then a new token", async () => {
+  const tickets: string[] = [];
+  let ticketAnswer: () => Promise<string> = async () => "t2";
+  const steps: (() => FakeSession | Error)[] = [
+    () => new FakeSession(undefined, { id: "srv-9", name: "Lab", platform: "linux" }, { token: "tok1", server: { id: "srv-9", name: "Lab PC" } }),
+    () => new LinkError("denied", "unknown token", "unauthorized"),
+    () => new FakeSession(undefined, { id: "srv-9", name: "Lab", platform: "linux" }, { token: "tok2" }),
+    () => new FakeSession(undefined, { id: "srv-9", name: "Lab", platform: "linux" }),
+  ];
+  const dialer = new FakeDialer(() => steps.shift()!());
+  const store = memoryStore();
+  const w = new DirectWeb({
+    app: { name: "test", version: "1" }, store, relay: "https://relay.test", deviceName: "Chrome on Mac", dial: dialer.dial, turn: false,
+    certificateStore: new FakeCertificates(),
+    ticket: (linkId) => (tickets.push(linkId), ticketAnswer()),
+  });
+  const mac = await w.admit({ id: "srv-9", name: "Lab", fingerprint: fp, linkId: "link-9" }, "t1");
+  assert.equal(dialer.dials[0]!.credential, "Ticket t1");
+  assert.equal(dialer.dials[0]!.media, false);
+  assert.equal(dialer.dials[0]!.pinnedFingerprint, fp);
+  assert.equal(mac.token, "tok1");
+  assert.equal(mac.account, "link-9");
+  assert.equal(mac.name, "Lab PC");
+  assert.equal(mac.platform, "linux");
+  assert.equal(mac.relay, "https://relay.test");
+  // the token is refused: a new ticket, Ticket t2 → tok2, then the dial with tok2; tok2 is kept
+  const b = await w.backend(mac);
+  await b.connection.session();
+  assert.deepEqual(dialer.dials.map((d) => d.credential), ["Ticket t1", "Bearer tok1", "Ticket t2", "Bearer tok2"]);
+  assert.deepEqual(tickets, ["link-9"]);
+  assert.equal((await w.macs())[0]!.token, "tok2");
+
+  // signed out of the account: the computer no longer takes this browser (not a network failure)
+  w.disconnect("srv-9");
+  ticketAnswer = async () => {
+    throw Object.assign(new Error("account server: 401 invalid_token"), { status: 401 });
+  };
+  steps.push(() => new LinkError("denied", "unknown token", "unauthorized"));
+  const again = await w.backend((await w.macs())[0]!);
+  await assert.rejects(again.connection.session(), (e: unknown) => e instanceof DirectError && e.kind === "unpaired");
+});
+
+test("a paired computer (no account) whose token is refused is unpaired, no ticket asked", async () => {
+  let asked = 0;
+  const steps: (() => FakeSession | Error)[] = [
+    () => new FakeSession(undefined, { id: "srv-1", name: "Studio", platform: "mac" }, { token: "tok" }),
+    () => new LinkError("denied", "unknown token", "unauthorized"),
+  ];
+  const dialer = new FakeDialer(() => steps.shift()!());
+  const w = new DirectWeb({
+    app: { name: "test", version: "1" }, store: memoryStore(), relay: "https://relay.test", dial: dialer.dial, turn: false,
+    certificateStore: new FakeCertificates(), ticket: async () => (asked++, "t"),
+  });
+  const mac = await w.pair(link);
+  await assert.rejects((await w.backend(mac)).connection.session(), (e: unknown) => e instanceof DirectError && e.kind === "unpaired");
+  assert.equal(asked, 0);
+});

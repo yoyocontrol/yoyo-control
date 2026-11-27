@@ -81,7 +81,7 @@ let baseTargets: [Target] = [
                 swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(
             name: "YoyoKitTests",
-            dependencies: ["YoyoCore", "YoyoClipboard", "YoyoConnect", "YoyoScreen", "YoyoDirect"]
+            dependencies: ["YoyoCore", "YoyoClipboard", "YoyoConnect", "YoyoScreen", "YoyoDirect", "YoyoAccount"]
                 + (hasPro ? ["YoyoPro"] : []) + linkClient + (linkFFI == nil ? [] : ["YoyoLink"]),
             path: "ios/YoyoKit/Tests/YoyoKitTests"  // ProAccessTests.swift: not in the public tree either
         ),

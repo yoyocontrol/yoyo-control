@@ -1,8 +1,8 @@
-import { clientCertificate, dialRtc, indexedDbCertificateStore, type CertificateStore } from "@yoyocontrol/link-web";
+import { clientCertificate, indexedDbCertificateStore, type CertificateStore } from "@yoyocontrol/link-web";
 import { deviceName } from "@yoyocontrol/screen-web";
 import { DirectBackend, type DirectBackendOptions } from "./backend.js";
-import { dialOptions, iceServersFor, MacConnection, type Dialer, type DialSettings } from "./connection.js";
-import { DirectError, directError, type DirectMessages } from "./errors.js";
+import { admitWith, MacConnection, type Dialer, type DialSettings } from "./connection.js";
+import { DirectError, type DirectMessages } from "./errors.js";
 import type { PairingLink } from "./pairing.js";
 import { DEFAULT_ICE_SERVERS, DEFAULT_SIGNALS } from "./signal.js";
 import { browserStore, type DeviceIdentity, type DirectStore, type PairedMac } from "./store.js";
@@ -30,17 +30,13 @@ export interface DirectWebOptions {
   /** Where the DTLS certificate (this browser's key to the Macs) is kept: default link-web's IndexedDB store
    *  (`indexedDbCertificateStore()`, database `yoyocontrol-link`), the one every link-web dial uses by default. */
   certificateStore?: CertificateStore;
+  /** A ticket into an account's computer (its Link id; `@yoyocontrol/account-web`'s `AccountClient.ticket`): what a
+   *  computer let in through the account (`admit`) gets a new token with when its own stops working. */
+  ticket?: (linkId: string) => Promise<string>;
   /** Tests / other runtimes: the dialer, the relay's fetch, the screen media of a session. */
   dial?: Dialer;
   fetch?: typeof fetch;
   screenLink?: DirectBackendOptions["screenLink"];
-}
-
-/** The `welcome.principal` of a pairing session (docs/LINK.md「配对」). */
-interface PairingPrincipal {
-  token?: unknown;
-  device?: { id?: unknown; name?: unknown };
-  server?: { id?: unknown; name?: unknown };
 }
 
 /**
@@ -102,6 +98,7 @@ export class DirectWeb {
       ...(o.dial ? { dial: o.dial } : {}),
       ...(o.fetch ? { fetch: o.fetch } : {}),
       ...(o.messages ? { messages: o.messages } : {}),
+      ...(o.ticket ? { ticket: o.ticket } : {}),
     };
   }
 
@@ -115,34 +112,49 @@ export class DirectWeb {
     const settings = await this.settings();
     const relay = this.options.relay;
     if (!relay) throw new Error("DirectWeb: no signaling server to pair through (options.relay); none is built in");
-    const dial = settings.dial ?? dialRtc;
-    let session;
-    try {
-      const target = { fingerprint: link.fingerprint, relay };
-      session = await dial(dialOptions(settings, target, `Pair ${link.code}`, { media: false, iceServers: await iceServersFor(settings, target) }));
-    } catch (e) {
-      throw directError(e, true, this.options.messages);
-    }
-    try {
-      const p = (session.principal ?? {}) as PairingPrincipal;
-      if (typeof p.token !== "string" || !p.token) throw new DirectError("pairing", "the Mac did not hand out a token (an older Mac: update Yoyo Control)");
-      const server = session.server;
-      const mac: PairedMac = {
-        id: (typeof p.server?.id === "string" && p.server.id) || server.id || link.serverId,
-        name: (typeof p.server?.name === "string" && p.server.name) || server.name || link.name,
-        fingerprint: link.fingerprint,
-        token: p.token,
-        relay,
-        pairedAt: Date.now(),
-        platform: server.platform || null,
-      };
-      this.backends.get(mac.id)?.close();
-      this.backends.delete(mac.id);
-      await this.store.saveMac(mac);
-      return mac;
-    } finally {
-      void session.close(0, "paired");
-    }
+    const { token, principal: p, server } = await admitWith(settings, { fingerprint: link.fingerprint, relay }, `Pair ${link.code}`, true);
+    return this.keep({
+      id: (typeof p.server?.id === "string" && p.server.id) || server.id || link.serverId,
+      name: (typeof p.server?.name === "string" && p.server.name) || server.name || link.name,
+      fingerprint: link.fingerprint,
+      token,
+      relay,
+      pairedAt: Date.now(),
+      platform: server.platform || null,
+    });
+  }
+
+  /**
+   * Lets this browser into a computer of the account it is signed in to, without pairing: `ticket` (one use, two
+   * minutes, from the account server) goes in the hello (`Ticket <ticket>`, docs/ACCOUNT.md「设备进电脑」), the
+   * computer hands out a token bound to this browser as a pairing does, and the computer is kept with its Link id
+   * (`PairedMac.account`: when the token runs out, `options.ticket` gets a new one). `computer`: what the account's
+   * list says of it — its server id, name, identity fingerprint (pinned), Link id; `signal`: the signaling server it
+   * waits at (default `options.relay`). Rejects with a `DirectError` as `pair` does (`unpaired`: the ticket refused).
+   */
+  async admit(computer: { id: string; name: string; fingerprint: string; linkId: string; signal?: string | null }, ticket: string): Promise<PairedMac> {
+    const settings = await this.settings();
+    const relay = computer.signal || this.options.relay;
+    if (!relay) throw new Error("DirectWeb: no signaling server to reach the computer through (options.relay); none is built in");
+    const { token, principal: p, server } = await admitWith(settings, { fingerprint: computer.fingerprint, relay }, `Ticket ${ticket}`, false);
+    return this.keep({
+      id: (typeof p.server?.id === "string" && p.server.id) || server.id || computer.id,
+      name: (typeof p.server?.name === "string" && p.server.name) || server.name || computer.name,
+      fingerprint: computer.fingerprint,
+      token,
+      relay,
+      pairedAt: Date.now(),
+      platform: server.platform || null,
+      account: computer.linkId,
+    });
+  }
+
+  /** A computer just let in: kept (its old session, if any, ends). */
+  private async keep(mac: PairedMac): Promise<PairedMac> {
+    this.backends.get(mac.id)?.close();
+    this.backends.delete(mac.id);
+    await this.store.saveMac(mac);
+    return mac;
   }
 
   /** Forgets the Mac here (its session ends). The Mac keeps listing this browser until it is removed there. */

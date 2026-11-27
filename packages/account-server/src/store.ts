@@ -4,14 +4,14 @@
 // entry listens on, the origins of their own
 // pages) and devices (id, name, the digest of their public key, last use); device sessions (their tokens only as
 // SHA-256, the IdP refresh token that came with that sign-in); sign-ins on their way through the IdP; join codes;
-// join keys the admin made (as SHA-256); revocations and those still to take effect. Never a password (the IdP has those), never a computer's own tokens.
+// join keys the admin made (as SHA-256); sign-ins by QR code on their way; revocations and those still to take effect. Never a password (the IdP has those), never a computer's own tokens.
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { DEFAULT_WIRE, type RevocationEntry, type RevocationState, type Wire } from "@yoyocontrol/account";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 6;
 /** How long a device's revocation stays on the list (seconds): past the longest a computer's token of it can live. */
 export const REVOCATION_KEEP_S = 200 * 86_400;
 export const sha256 = (s: string) => createHash("sha256").update(s, "utf8").digest("base64url");
@@ -136,6 +136,49 @@ export interface OutboxRow {
   payload: string;
 }
 
+/** An email's password: the account it signs in to, its scrypt hash. */
+export interface PasswordLogin {
+  email: string;
+  account_id: string;
+  hash: string;
+  created_at: number;
+  updated_at: number;
+}
+
+/** A sign-in by QR code (docs/ACCOUNT-LIB.md「扫码登录」): a new device asked with its key; a signed-in one approves
+ *  the code it shows; the new device polls with its secret (kept only as SHA-256) and gets its session, once. */
+export interface QrSignin {
+  id: string;
+  request_hash: string;
+  user_code: string;
+  device_name: string;
+  platform: string;
+  /** The new device's raw Ed25519 public key (base64url): its session is bound to it. */
+  key: string;
+  ip: string;
+  created_at: number;
+  expires_at: number;
+  last_poll_at: number | null;
+  status: "pending" | "approved" | "declined" | "done";
+  approved_account: string | null;
+  approved_device: string | null;
+  approved_at: number | null;
+}
+
+/** A one-time code mailed for a sign-up (`pending`: the password's hash, set once the code is given) or a reset. */
+export interface EmailCode {
+  email: string;
+  purpose: string;
+  code_hash: string;
+  pending: string | null;
+  expires_at: number;
+  attempts: number;
+  sent_at: number;
+  /** The hour `sends` counts in (its start). */
+  window_at: number;
+  sends: number;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS accounts (
   id TEXT PRIMARY KEY, iss TEXT NOT NULL, sub TEXT NOT NULL, name TEXT,
@@ -182,6 +225,17 @@ CREATE TABLE IF NOT EXISTS entitlements (
   product_id TEXT NOT NULL, expires_at INTEGER, revoked_at INTEGER, environment TEXT NOT NULL, updated_at INTEGER NOT NULL,
   PRIMARY KEY (source, original_id));
 CREATE INDEX IF NOT EXISTS entitlements_account ON entitlements (account_id);
+CREATE TABLE IF NOT EXISTS password_logins (
+  email TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
+  hash TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS email_codes (
+  email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, pending TEXT, expires_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0, sent_at INTEGER NOT NULL, window_at INTEGER NOT NULL, sends INTEGER NOT NULL,
+  PRIMARY KEY (email, purpose));
+CREATE TABLE IF NOT EXISTS qr_signins (
+  id TEXT PRIMARY KEY, request_hash TEXT NOT NULL UNIQUE, user_code TEXT NOT NULL UNIQUE, device_name TEXT NOT NULL,
+  platform TEXT NOT NULL, key TEXT NOT NULL, ip TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  last_poll_at INTEGER, status TEXT NOT NULL, approved_account TEXT, approved_device TEXT, approved_at INTEGER);
 CREATE TABLE IF NOT EXISTS outbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, seq INTEGER NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL);
 `;
@@ -214,6 +268,10 @@ export class Store {
       2: () => ["computers", "enrollments"].filter(hasTable).map((t) => `ALTER TABLE ${t} ADD COLUMN signal TEXT;`).join(" "),
       // 3 → 4: what a computer says of itself for its product's clients (`info`); entitlements are a new table
       3: () => ["computers", "enrollments"].filter(hasTable).map((t) => `ALTER TABLE ${t} ADD COLUMN info TEXT;`).join(" "),
+      // 4 → 5: email and password (`password_logins`, `email_codes`: new tables, made whole below)
+      4: () => "",
+      // 5 → 6: sign-in by QR code (`qr_signins`: a new table, made whole below)
+      5: () => "",
     };
     for (let from = v; from > 0 && from < SCHEMA_VERSION; from++) {
       this.db.exec("BEGIN IMMEDIATE");
@@ -281,6 +339,15 @@ export class Store {
   tombstone(iss: string, sub: string) {
     return this.get<{ account_id: string; removed_at: number }>("SELECT account_id, removed_at FROM tombstones WHERE iss = ? AND sub = ?", iss, sub);
   }
+  /** An email's password login (docs/ACCOUNT-LIB.md「邮箱和密码」). */
+  passwordLogin(email: string) {
+    return this.get<PasswordLogin>("SELECT * FROM password_logins WHERE email = ?", email);
+  }
+  /** The code on its way for `email` and `purpose`. */
+  emailCode(email: string, purpose: string) {
+    return this.get<EmailCode>("SELECT * FROM email_codes WHERE email = ? AND purpose = ?", email, purpose);
+  }
+
   /** The account of `iss` + `sub` (made now when there is none), or why there is none to be had. */
   signInAccount(iss: string, sub: string, name: string | null, now: number): { account: Account } | { refused: "removed" | "disabled" } {
     return this.tx(() => {
@@ -425,6 +492,19 @@ export class Store {
       : this.get<{ n: number }>("SELECT count(*) AS n FROM enrollments WHERE expires_at > ? AND status IN ('pending','approved') AND ip = ?", now, ip)!.n;
   }
 
+  // --------------------------------------------------------------------------- sign-ins by QR code
+
+  qrSigninOfCode(userCode: string) {
+    return this.get<QrSignin>("SELECT * FROM qr_signins WHERE user_code = ?", userCode);
+  }
+  qrSigninOfRequest(request: string) {
+    return this.get<QrSignin>("SELECT * FROM qr_signins WHERE request_hash = ?", sha256(request));
+  }
+  /** The addresses the open QR sign-ins were asked from (one entry per sign-in). */
+  openQrSigninAddresses(now: number): string[] {
+    return this.all<{ ip: string }>("SELECT ip FROM qr_signins WHERE expires_at > ? AND status IN ('pending','approved')", now).map((r) => r.ip);
+  }
+
   // --------------------------------------------------------------------------- join keys (the admin's)
 
   /** A new join key of `account` (admin.ts join-key): a computer that has it joins that account without anyone's
@@ -515,6 +595,7 @@ export class Store {
     // a device with no key that is signed in nowhere can never come back as itself (a browser whose 30 days ran out, a
     // script's sign-in): it is gone
     this.run("UPDATE devices SET removed_at = ? WHERE removed_at IS NULL AND key_digest IS NULL AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.device_id = devices.id AND s.ended_at IS NULL AND s.expires_at > ?)", now, now);
+    this.run("DELETE FROM qr_signins WHERE expires_at <= ?", now - 600_000);
     this.run("DELETE FROM enrollments WHERE expires_at <= ? OR status IN ('declined','confirmed') AND created_at <= ?", now - 3_600_000, now - 600_000);
     this.run("DELETE FROM sessions WHERE (ended_at IS NOT NULL AND ended_at <= ?) OR expires_at <= ?", now - 7 * 86_400_000, now - 7 * 86_400_000);
     this.run("UPDATE sessions SET idp_refresh = NULL WHERE expires_at <= ? AND idp_refresh IS NOT NULL", now);

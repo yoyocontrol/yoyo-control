@@ -25,6 +25,38 @@ export interface DialSettings {
   fetch?: typeof fetch;
   /** The host's words for failures (`DirectError.message` by kind). */
   messages?: DirectMessages;
+  /** A ticket into an account's computer (its Link id), for a computer let in through the account whose token no
+   *  longer works (`PairedMac.account`). Throws when there is none (signed out, not in the account any more). */
+  ticket?: (linkId: string) => Promise<string>;
+}
+
+/** The `welcome.principal` of a session dialed with a pairing code or a ticket (docs/LINK.md「配对」). */
+export interface AdmitPrincipal {
+  token?: unknown;
+  device?: { id?: unknown; name?: unknown };
+  server?: { id?: unknown; name?: unknown };
+}
+
+/**
+ * Dials `target` with `credential` (`Pair <code>`, `Ticket <ticket>`), takes the token the computer hands out in
+ * `welcome.principal` and closes the session (the next dials use the token). Rejects with a `DirectError`
+ * (`pairing`: dialed with a pairing code, whose refusal is the code's).
+ */
+export async function admitWith(settings: DialSettings, target: Pick<PairedMac, "fingerprint" | "relay">, credential: string, pairing: boolean): Promise<{ token: string; principal: AdmitPrincipal; server: LinkSession["server"] }> {
+  const dial = settings.dial ?? dialRtc;
+  let session: LinkSession;
+  try {
+    session = await dial(dialOptions(settings, target, credential, { media: false, iceServers: await iceServersFor(settings, target) }));
+  } catch (e) {
+    throw directError(e, pairing, settings.messages);
+  }
+  try {
+    const p = (session.principal ?? {}) as AdmitPrincipal;
+    if (typeof p.token !== "string" || !p.token) throw new DirectError("pairing", "the computer did not hand out a token (an older version: update it)");
+    return { token: p.token, principal: p, server: session.server };
+  } finally {
+    void session.close(0, "admitted");
+  }
 }
 
 /** The first retry waits this long after a failed dial, doubling up to `MAX_BACKOFF_MS`. */
@@ -130,7 +162,14 @@ export class MacConnection {
     let session: LinkSession;
     try {
       const iceServers = await iceServersFor(this.settings, this.mac);
-      session = await dial(dialOptions(this.settings, this.mac, `Bearer ${this.mac.token}`, { iceServers }));
+      try {
+        session = await dial(dialOptions(this.settings, this.mac, `Bearer ${this.mac.token}`, { iceServers }));
+      } catch (e) {
+        // a computer of the account whose token no longer works: a new ticket, a new token, the dial again
+        if (directError(e).kind !== "unpaired" || !this.mac.account || !this.settings.ticket) throw e;
+        await this.readmit(this.mac.account, this.settings.ticket);
+        session = await dial(dialOptions(this.settings, this.mac, `Bearer ${this.mac.token}`, { iceServers }));
+      }
     } catch (e) {
       const err = directError(e, false, this.settings.messages);
       this.failure = err;
@@ -152,6 +191,22 @@ export class MacConnection {
     }
     for (const l of this.listeners) l(session);
     return session;
+  }
+
+  /** A new token through the account: a ticket (none: `unpaired`), traded on the link. */
+  private async readmit(linkId: string, ticket: (linkId: string) => Promise<string>): Promise<void> {
+    let t: string;
+    try {
+      t = await ticket(linkId);
+    } catch (e) {
+      // (an account error that says no — signed out, not this account's any more — is no network failure)
+      const status = (e as { status?: unknown }).status;
+      if (typeof status === "number" && status >= 400 && status < 500) throw new DirectError("unpaired", "the account no longer lets this browser in", { cause: e });
+      throw new DirectError("unreachable", "the account server can't be reached", { cause: e });
+    }
+    const { token } = await admitWith(this.settings, this.mac, `Ticket ${t}`, false);
+    this.mac = { ...this.mac, token };
+    this.onMacChanged(this.mac);
   }
 
   private wait(ms: number): Promise<void> {

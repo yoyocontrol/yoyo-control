@@ -1,0 +1,28 @@
+{
+  "name": "@yoyocontrol/account-web",
+  "version": "0.3.0",
+  "description": "A browser's side of an account server (@yoyocontrol/account-server): sign in, a session bound to a device key the page cannot read out, the account's computers, tickets into them",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "devDependencies": {
+    "@yoyocontrol/account-server": "^0.3.0"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "npm --prefix ../account-server run build && node --test --import tsx \"test/*.test.ts\""
+  }
+}

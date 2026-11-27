@@ -213,6 +213,8 @@ export class RemoteAccess {
     this.link = link;
     if (this.signalUrl !== null) {
       this.signal = new SignalClient({ identity: this.identity, url: this.signalUrl, log: this.log, WebSocket: this.WebSocket });
+      // browsers' WebRTC offers come through the room too (docs/RELAY.md「WebRTC」), as they do to a Mac
+      this.signal.rtcAnswerer = async (offer, from) => JSON.parse(await link.acceptRtcOffer(JSON.stringify(offer), from));
       this.signal.setLink(link.json());
       this.signal.start();
     }

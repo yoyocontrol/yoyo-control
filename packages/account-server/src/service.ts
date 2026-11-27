@@ -11,6 +11,13 @@
 //   POST /v1/token             sign-in code + PKCE verifier + device → a device session (90 days; the hosted web
 //                                client's: 30, bound to its device key — each request it makes is signed, `<ns>-proof`)
 //   POST /v1/auth/apple        an app's native Sign in with Apple: its identity token + the nonce → a device session
+//   POST /v1/auth/password/register|verify, /v1/auth/password, /v1/auth/password/reset|reset/confirm
+//                              email and password (ACCOUNT_PASSWORD): a code mailed to sign up and to reset, then a
+//                              device session (from a web page's origin: its key-bound one)
+//   POST /v1/auth/qr, /v1/auth/qr/poll   a new device's sign-in by QR code: it asks with its key (a code to show, a
+//                              secret to poll with), a signed-in device approves, the new one polls for its session
+//                              (key-bound, 30 days, like a web page's)
+//   GET  /v1/auth/qr/lookup, POST /v1/auth/qr/approve|decline   (a signed-in app or hosted web client: the code shown)
 //   GET  /v1/me, POST /v1/signout, DELETE /v1/me (the account itself, from the app; its Apple grant revoked)
 //   POST /v1/join-keys         a signed-in app's one-use join key for its own account (a computer it is paired with
 //                                joins with it: docs/ACCOUNT-LIB.md「经已配对的设备」)
@@ -37,7 +44,8 @@ import { allowed } from "./config.js";
 import type { KeyRing } from "./keys.js";
 import { cleanText, IdpError, type Idp } from "./oidc.js";
 import { APPLE_ISSUER, cachedAppleKeys, revokeAppleGrant, verifyIdentityToken, verifyStoreKit, type AppleKeys, type StoreTransaction } from "./apple.js";
-import { randomId, sha256, type Account, type Computer, type Enrollment, type Session, type Store } from "./store.js";
+import { randomId, sha256, type Account, type Computer, type EmailCode, type Enrollment, type Session, type Store } from "./store.js";
+import { codeHash, codeMail, decoyHash, hashPassword, newCode as newEmailCode, normalizeEmail, passwordProblem, verifyPassword, type CodePurpose } from "./password.js";
 import { signRevocationList, signServiceToken, signTicket, TICKET_TTL_S } from "./ticket.js";
 
 export const SESSION_MAX_AGE_MS = 90 * 86_400_000;
@@ -61,6 +69,8 @@ export const INFO_MAX = 2048;
 /** After an approval the computer has this long to confirm it on its own screen. */
 export const JOIN_CONFIRM_MS = 10 * 60_000;
 export const POLL_INTERVAL_S = 2;
+/** A sign-in by QR code: the code is good this long, once. */
+export const QR_SIGNIN_TTL_MS = 150_000;
 export const BODY_MAX = 16 * 1024;
 /** RFC 8628's alphabet: 20 consonants (no vowels: no words; no 0/O, 1/I). 8 of them = 34.6 bits. */
 export const CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
@@ -82,6 +92,14 @@ export const LIMITS = {
   codeFailuresPerSession: 5,
   codeFailuresPerAddress: 10,
   codeFailuresPerAccountHour: 30,
+  /** Sign-ins by QR code started per address: 6 at once, then 6 a minute; at most 5 open per address, 2000 in all. */
+  qrBurst: 6,
+  qrEveryMs: 10_000,
+  qrOpenPerAddress: 5,
+  qrOpenMax: 2_000,
+  /** Their polls per address: 30 at once, then one a second (several waiting behind one address). */
+  qrPollBurst: 30,
+  qrPollEveryMs: 1_000,
   /** Tickets per device: 30 at once, then 30 a minute. */
   ticketBurst: 30,
   ticketEveryMs: 2_000,
@@ -143,6 +161,12 @@ export function verifyLinkSignature(id: string, text: string, sig: string): bool
   }
 }
 
+/** An email code: good for 10 minutes, 5 tries; one mailed a minute at most, 5 an hour per email. */
+const CODE_TTL_MS = 10 * 60_000;
+const CODE_ATTEMPTS = 5;
+const CODE_RESEND_MS = 60_000;
+const CODE_SENDS_PER_HOUR = 5;
+
 class HttpError extends Error {
   constructor(readonly status: number, readonly error: string, readonly description?: string, readonly headers: Record<string, string> = {}) {
     super(error);
@@ -200,9 +224,13 @@ export class AccountService {
   private readonly callbacks: TokenBuckets;
   private readonly exchanges: TokenBuckets;
   private readonly enrolls: TokenBuckets;
+  private readonly qrStarts: TokenBuckets;
+  private readonly qrPolls: TokenBuckets;
   private readonly tickets: TokenBuckets;
   private readonly computerReqs: TokenBuckets;
   private readonly badTokens: FailureLimiter;
+  /** Wrong passwords per email: 10 in 15 minutes, then that email waits. */
+  private readonly passwordFails = new FailureLimiter(10, 15 * 60_000);
   private readonly codeFailSession: FailureLimiter;
   private readonly codeFailAddress: FailureLimiter;
   private readonly codeFailAccount: FailureLimiter;
@@ -231,6 +259,8 @@ export class AccountService {
     this.callbacks = new TokenBuckets(this.l.signinBurst, this.l.signinEveryMs, this.now);
     this.exchanges = new TokenBuckets(this.l.signinBurst, this.l.signinEveryMs, this.now);
     this.enrolls = new TokenBuckets(this.l.enrollBurst, this.l.enrollEveryMs, this.now);
+    this.qrStarts = new TokenBuckets(this.l.qrBurst, this.l.qrEveryMs, this.now);
+    this.qrPolls = new TokenBuckets(this.l.qrPollBurst, this.l.qrPollEveryMs, this.now);
     this.tickets = new TokenBuckets(this.l.ticketBurst, this.l.ticketEveryMs, this.now);
     this.computerReqs = new TokenBuckets(this.l.computerBurst, this.l.computerEveryMs, this.now);
     this.badTokens = new FailureLimiter(this.l.badTokensPerMinute, 60_000);
@@ -412,6 +442,18 @@ export class AccountService {
     if (method === "GET" && path === "/v1/signin") return this.signin(url, res, ipKey);
     if (method === "GET" && path === "/v1/callback") return this.callback(url, res, ipKey);
     if (method === "POST" && path === "/v1/auth/apple" && this.cfg.apple) return send(200, await this.appleSignIn(req, ipKey));
+    if (method === "POST" && path.startsWith("/v1/auth/password") && this.cfg.password) {
+      if (path === "/v1/auth/password") return send(200, await this.passwordSignIn(req, ipKey));
+      if (path === "/v1/auth/password/register") return send(200, await this.passwordRegister(req, ipKey));
+      if (path === "/v1/auth/password/verify") return send(200, await this.passwordVerify(req, ipKey));
+      if (path === "/v1/auth/password/reset") return send(200, await this.passwordReset(req, ipKey));
+      if (path === "/v1/auth/password/reset/confirm") return send(200, await this.passwordResetConfirm(req, ipKey));
+    }
+    if (method === "POST" && path === "/v1/auth/qr") return send(200, await this.qrStart(req, ip, ipKey));
+    if (method === "POST" && path === "/v1/auth/qr/poll") {
+      const r = await this.qrPoll(req, ipKey);
+      return send(r.status, r.body);
+    }
     if (method === "GET" && path === "/v1/app-return") return this.page(res, 200, "Signed in", "<p>Go back to the app.</p>");
     if (method === "POST" && path === "/v1/token") return send(200, await this.token(req, ipKey));
 
@@ -451,6 +493,12 @@ export class AccountService {
         const b = await this.readBody(req);
         return send(200, this.approve(a, String(b.user_code ?? ""), ipKey));
       }
+      // (a sign-in by QR code is approved the same way: from the app, or a web page with its key's proof)
+      if (method === "GET" && path === "/v1/auth/qr/lookup") return send(200, this.qrLookup(a, url.searchParams.get("code") ?? "", ipKey));
+      if (method === "POST" && (path === "/v1/auth/qr/approve" || path === "/v1/auth/qr/decline")) {
+        const b = await this.readBody(req);
+        return send(200, path.endsWith("approve") ? this.qrApprove(a, String(b.code ?? ""), ipKey) : this.qrDecline(a, String(b.code ?? ""), ipKey));
+      }
       const cm = /^\/v1\/computers\/([0-9a-f]{64})$/.exec(path);
       if (cm && method === "PATCH") return send(200, await this.renameComputer(a, cm[1]!, await this.readBody(req)));
       if (cm && method === "DELETE") {
@@ -481,7 +529,7 @@ export class AccountService {
     return {
       server: { url: this.cfg.publicUrl, name: this.cfg.serverName },
       idp: { issuer: this.cfg.issuer, name: this.cfg.idpName },
-      signin: { appReturn: `${this.cfg.publicUrl}/v1/app-return`, redirects: this.cfg.appRedirects, oidc: this.cfg.oidc, apple: !!this.cfg.apple },
+      signin: { appReturn: `${this.cfg.publicUrl}/v1/app-return`, redirects: this.cfg.appRedirects, oidc: this.cfg.oidc, apple: !!this.cfg.apple, password: !!this.cfg.password, qr: true },
       ticketTtl: TICKET_TTL_S,
       sessionMaxAgeDays: SESSION_MAX_AGE_MS / 86_400_000,
     };
@@ -612,11 +660,11 @@ export class AccountService {
 
   /** A new session for the device a sign-in named (`device`: `{ name, platform, key }`, each optional): the account's
    *  device with that key, else a new one. What /v1/token and /v1/auth/apple answer. */
-  private deviceSession(a: Account, device: unknown, hosted: boolean, idpRefresh: string | null) {
+  private deviceSession(a: Account, device: unknown, hosted: boolean, idpRefresh: string | null, hostedPlatform = "web") {
     const now = this.now();
     const d = (device && typeof device === "object" ? device : {}) as Record<string, unknown>;
     const name = typeof d.name === "string" && cleanText(d.name, 64) ? cleanText(d.name, 64) : hosted ? "Browser" : "Device";
-    const platform = hosted ? "web" : typeof d.platform === "string" && /^[a-z]{1,16}$/.test(d.platform) ? d.platform : null;
+    const platform = hosted ? hostedPlatform : typeof d.platform === "string" && /^[a-z]{1,16}$/.test(d.platform) ? d.platform : null;
     let key: string | null = null;
     if (d.key !== undefined) {
       if (typeof d.key !== "string" || !B64URL_RE.test(d.key) || Buffer.from(d.key, "base64url").length !== 32) throw new HttpError(400, "invalid_request", "device.key is a raw Ed25519 public key, base64url");
@@ -640,8 +688,13 @@ export class AccountService {
       expiresAt: out.sess.expiresAt,
       account: { id: a.id, name: a.name },
       device: { id: out.dev.id, name: out.dev.name },
-      idp: { issuer: a.iss, name: a.iss === this.cfg.issuer ? this.cfg.idpName : a.iss === APPLE_ISSUER ? "Apple" : new URL(a.iss).host },
+      idp: { issuer: a.iss, name: this.idpNameOf(a) },
     };
+  }
+
+  /** How an account signs in, as shown: "Email", the OpenID provider's name, "Apple", or the issuer's host. */
+  private idpNameOf(a: Account): string {
+    return a.iss === this.passwordIss ? "Email" : a.iss === this.cfg.issuer ? this.cfg.idpName : a.iss === APPLE_ISSUER ? "Apple" : new URL(a.iss).host;
   }
 
   /**
@@ -675,6 +728,189 @@ export class AccountService {
     }
     this.log(`[account] Apple sign-in ${short(got.account.id)}`);
     return this.deviceSession(got.account, b.device, false, null);
+  }
+
+  // --------------------------------------------------------------------------- email and password
+
+  /** The accounts of email and password: their `iss` (the `sub` is random, the email is in `password_logins`). */
+  private get passwordIss() {
+    return `${this.cfg.publicUrl}/password`;
+  }
+
+  /** A request from a hosted web client's page (its origin is one of ACCOUNT_WEB_REDIRECTS'): its session is the
+   *  key-bound one. */
+  private fromWebPage(req: IncomingMessage): boolean {
+    const o = req.headers.origin;
+    return typeof o === "string" && this.webOrigins.has(o);
+  }
+
+  private emailOf(b: Record<string, unknown>): string {
+    const email = normalizeEmail(b.email);
+    if (!email) throw new HttpError(400, "invalid_email", "an email address");
+    return email;
+  }
+
+  /** A web page's request must name its device key (checked before anything is made or used up). */
+  private needKey(req: IncomingMessage, device: unknown) {
+    if (!this.fromWebPage(req)) return;
+    const key = device && typeof device === "object" ? (device as Record<string, unknown>).key : undefined;
+    if (typeof key !== "string" || !B64URL_RE.test(key) || Buffer.from(key, "base64url").length !== 32) {
+      throw new HttpError(400, "invalid_request", "a web page's session is bound to its device key: give device.key");
+    }
+  }
+
+  private passwordOf(b: Record<string, unknown>): string {
+    const problem = passwordProblem(b.password);
+    if (problem) throw new HttpError(400, "weak_password", `the password: ${problem}`);
+    return b.password as string;
+  }
+
+  /**
+   * Mails a code for `purpose` (a new one each time; at most one a minute and `CODE_SENDS_PER_HOUR` an hour per
+   * email). `pending`: what the code finishes (a sign-up's password hash). `existing`: a sign-up for an email that
+   * has its login already — the mail says so instead (the answer is the same: nobody learns whose email has an account).
+   */
+  private async mailCode(email: string, purpose: CodePurpose, locale: unknown, pending: string | null, existing = false) {
+    const now = this.now();
+    const prev = this.store.emailCode(email, purpose);
+    if (prev && now - prev.sent_at < CODE_RESEND_MS) {
+      throw new HttpError(429, "slow_down", "a code was sent a moment ago: wait a minute", { "retry-after": String(Math.ceil((prev.sent_at + CODE_RESEND_MS - now) / 1000)) });
+    }
+    const windowAt = prev && now - prev.window_at < 3_600_000 ? prev.window_at : now;
+    const sends = prev && windowAt === prev.window_at ? prev.sends + 1 : 1;
+    if (sends > CODE_SENDS_PER_HOUR) {
+      this.refuse("codes over the hourly limit for one email");
+      throw new HttpError(429, "slow_down", "too many codes for this email: try again later", { "retry-after": String(Math.ceil((windowAt + 3_600_000 - now) / 1000)) });
+    }
+    const code = existing ? null : newEmailCode();
+    this.store.run(
+      `INSERT INTO email_codes (email, purpose, code_hash, pending, expires_at, attempts, sent_at, window_at, sends) VALUES (?,?,?,?,?,0,?,?,?)
+       ON CONFLICT (email, purpose) DO UPDATE SET code_hash = excluded.code_hash, pending = excluded.pending, expires_at = excluded.expires_at,
+         attempts = 0, sent_at = excluded.sent_at, window_at = excluded.window_at, sends = excluded.sends`,
+      email, purpose, code ? codeHash(email, purpose, code) : "-", pending, now + CODE_TTL_MS, now, windowAt, sends,
+    );
+    const mail = codeMail({ purpose, code, serverName: this.cfg.serverName, locale: typeof locale === "string" ? locale : undefined, minutes: CODE_TTL_MS / 60_000 });
+    try {
+      await this.cfg.password!.mailer.send({ to: email, ...mail });
+    } catch (e) {
+      this.log(`[account] a ${purpose} code was not mailed: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
+      // (sent nothing: may be asked again at once)
+      this.store.run("UPDATE email_codes SET sent_at = 0 WHERE email = ? AND purpose = ?", email, purpose);
+      throw new HttpError(502, "mail_failed", "the email could not be sent: try again");
+    }
+  }
+
+  /** The code given for `email`'s `purpose`: right (the row, still there), or 400 (`invalid_code`, `code_expired`). A
+   *  wrong one counts; the fifth wrong one ends it. */
+  private checkCode(email: string, purpose: CodePurpose, given: unknown): EmailCode {
+    const now = this.now();
+    const row = this.store.emailCode(email, purpose);
+    if (!row || row.code_hash === "-" || row.expires_at <= now || row.attempts >= CODE_ATTEMPTS) throw new HttpError(400, "code_expired", "this code ran out: ask for a new one");
+    const code = typeof given === "string" ? given.replace(/\s+/g, "") : "";
+    if (!/^\d{6}$/.test(code) || !eq(codeHash(email, purpose, code), row.code_hash)) {
+      this.store.run("UPDATE email_codes SET attempts = attempts + 1 WHERE email = ? AND purpose = ?", email, purpose);
+      this.refuse("wrong email codes");
+      throw new HttpError(400, row.attempts + 1 >= CODE_ATTEMPTS ? "code_expired" : "invalid_code", "the code is not right");
+    }
+    return row;
+  }
+
+  /** POST /v1/auth/password/register `{ email, password, locale? }`: a code mailed (always `{ sent: true }`). */
+  private async passwordRegister(req: IncomingMessage, ipKey: string) {
+    const b = await this.readBody(req);
+    this.limited(this.signins, ipKey, "sign-ups");
+    const email = this.emailOf(b);
+    const password = this.passwordOf(b);
+    if (!allowed(this.cfg.allow, this.passwordIss, { sub: "", email, email_verified: true })) throw new HttpError(403, "access_denied", "this email may not sign up here");
+    const existing = !!this.store.passwordLogin(email);
+    await this.mailCode(email, "register", b.locale, existing ? null : await hashPassword(password), existing);
+    this.log(`[account] a sign-up code mailed`);
+    return { sent: true, expiresIn: CODE_TTL_MS / 1000 };
+  }
+
+  /** POST /v1/auth/password/verify `{ email, code, name?, device }`: the account made, and this device's session. */
+  private async passwordVerify(req: IncomingMessage, ipKey: string) {
+    const b = await this.readBody(req);
+    this.limited(this.exchanges, ipKey, "sign-ins");
+    const email = this.emailOf(b);
+    this.needKey(req, b.device);
+    const row = this.checkCode(email, "register", b.code);
+    if (!row.pending) throw new HttpError(400, "code_expired", "this code ran out: ask for a new one");
+    const given = typeof b.name === "string" ? cleanText(b.name, 64) : "";
+    const now = this.now();
+    const made = this.store.tx(() => {
+      if (this.store.passwordLogin(email)) return null;
+      const got = this.store.signInAccount(this.passwordIss, randomId("pw_"), given || email, now);
+      if ("refused" in got) return null;
+      this.store.run("INSERT INTO password_logins (email, account_id, hash, created_at, updated_at) VALUES (?,?,?,?,?)", email, got.account.id, row.pending, now, now);
+      this.store.run("DELETE FROM email_codes WHERE email = ? AND purpose = 'register'", email);
+      return got.account;
+    });
+    if (!made) throw new HttpError(409, "already_registered", "this email has an account: sign in");
+    this.log(`[account] email sign-up ${short(made.id)}`);
+    return this.deviceSession(made, b.device, this.fromWebPage(req), null);
+  }
+
+  /** POST /v1/auth/password `{ email, password, device }`: this device's session. Wrong: 401 `invalid_credentials`
+   *  (one answer for no such email and a wrong password); ten wrong for one email in 15 minutes: 429. */
+  private async passwordSignIn(req: IncomingMessage, ipKey: string) {
+    const b = await this.readBody(req);
+    this.limited(this.exchanges, ipKey, "sign-ins");
+    const email = this.emailOf(b);
+    this.needKey(req, b.device);
+    const password = typeof b.password === "string" && b.password.length <= 1024 ? b.password : "";
+    const blocked = this.passwordFails.blockedFor(email);
+    if (blocked) {
+      this.refuse("password sign-ins for an email with too many wrong ones");
+      throw new HttpError(429, "slow_down", "too many wrong passwords: wait a while", { "retry-after": String(blocked) });
+    }
+    const login = this.store.passwordLogin(email);
+    const ok = (await verifyPassword(password, login?.hash ?? (await decoyHash()))) && !!login;
+    if (!ok || !login) {
+      this.passwordFails.fail(email);
+      this.refuse("password sign-ins with a wrong email or password");
+      throw new HttpError(401, "invalid_credentials", "the email or the password is not right");
+    }
+    const a = this.store.account(login.account_id);
+    if (!a || a.disabled_at !== null) throw new HttpError(403, "account_disabled", "the account is disabled");
+    this.log(`[account] email sign-in ${short(a.id)}`);
+    return this.deviceSession(a, b.device, this.fromWebPage(req), null);
+  }
+
+  /** POST /v1/auth/password/reset `{ email, locale? }`: a code mailed when the email has a login (always `{ sent: true }`). */
+  private async passwordReset(req: IncomingMessage, ipKey: string) {
+    const b = await this.readBody(req);
+    this.limited(this.signins, ipKey, "password resets");
+    const email = this.emailOf(b);
+    if (this.store.passwordLogin(email)) {
+      await this.mailCode(email, "reset", b.locale, null);
+      this.log(`[account] a reset code mailed`);
+    }
+    return { sent: true, expiresIn: CODE_TTL_MS / 1000 };
+  }
+
+  /** POST /v1/auth/password/reset/confirm `{ email, code, password, device }`: the new password; the account's other
+   *  sessions end; this device's session. */
+  private async passwordResetConfirm(req: IncomingMessage, ipKey: string) {
+    const b = await this.readBody(req);
+    this.limited(this.exchanges, ipKey, "password resets");
+    const email = this.emailOf(b);
+    const password = this.passwordOf(b);
+    this.needKey(req, b.device);
+    this.checkCode(email, "reset", b.code);
+    const login = this.store.passwordLogin(email);
+    if (!login) throw new HttpError(400, "code_expired", "this code ran out: ask for a new one");
+    const hash = await hashPassword(password);
+    const now = this.now();
+    this.store.tx(() => {
+      this.store.run("UPDATE password_logins SET hash = ?, updated_at = ? WHERE email = ?", hash, now, email);
+      this.store.run("DELETE FROM email_codes WHERE email = ? AND purpose = 'reset'", email);
+      this.store.endSessions("account_id", login.account_id, "password_reset", now);
+    });
+    const a = this.store.account(login.account_id);
+    if (!a || a.disabled_at !== null) throw new HttpError(403, "account_disabled", "the account is disabled");
+    this.log(`[account] password reset ${short(a.id)}`);
+    return this.deviceSession(a, b.device, this.fromWebPage(req), null);
   }
 
   /** The device session of a request's bearer token (an app's), or 401 / 429. */
@@ -929,6 +1165,142 @@ export class AccountService {
     return { ok: true };
   }
 
+  // --------------------------------------------------------------------------- sign-in by QR code
+
+  /**
+   * POST /v1/auth/qr `{ device: { name, platform?, key } }`: a new device (a browser, a desktop client) asks to be
+   * signed in by one that is. It gets a code to show (as a QR code and as text: what the signed-in device looks up and
+   * approves) and `request`, a secret only it holds, to poll with. Its session will be bound to `device.key` (raw
+   * Ed25519, base64url; each request signed, `<ns>-proof`), so the secret alone is worth nothing to anyone without the
+   * key. 150 seconds, once.
+   */
+  private async qrStart(req: IncomingMessage, ip: string, ipKey: string) {
+    const b = await this.readBody(req);
+    this.limited(this.qrStarts, ipKey, "QR sign-ins");
+    const now = this.now();
+    if (this.store.openQrSigninAddresses(now).filter((x) => ipBucket(x) === ipKey).length >= this.l.qrOpenPerAddress) throw new HttpError(429, "slow_down", "too many open QR sign-ins from this address");
+    if (this.store.get<{ n: number }>("SELECT count(*) AS n FROM qr_signins WHERE expires_at > ? AND status IN ('pending','approved')", now)!.n >= this.l.qrOpenMax) throw new HttpError(503, "temporarily_unavailable", "too many open QR sign-ins");
+    const d = (b.device && typeof b.device === "object" ? b.device : {}) as Record<string, unknown>;
+    if (typeof d.key !== "string" || !B64URL_RE.test(d.key) || Buffer.from(d.key, "base64url").length !== 32) throw new HttpError(400, "invalid_request", "device.key is a raw Ed25519 public key, base64url (the session is bound to it)");
+    const name = typeof d.name === "string" && cleanText(d.name, 64) ? cleanText(d.name, 64) : "Browser";
+    const platform = typeof d.platform === "string" && /^[a-z]{1,16}$/.test(d.platform) ? d.platform : "web";
+    const request = randomBytes(32).toString("base64url");
+    let code = "";
+    for (let i = 0; i < 5 && !code; i++) {
+      const c = newCode();
+      if (!this.store.qrSigninOfCode(c)) code = c;
+    }
+    if (!code) throw new HttpError(503, "temporarily_unavailable");
+    this.store.run(
+      "INSERT INTO qr_signins (id, request_hash, user_code, device_name, platform, key, ip, created_at, expires_at, status) VALUES (?,?,?,?,?,?,?,?,?, 'pending')",
+      randomId("q_", 12), sha256(request), code, name, platform, d.key, ip, now, now + QR_SIGNIN_TTL_MS,
+    );
+    this.log(`[account] QR sign-in asked (${platform})`);
+    return { request, code, user_code: showCode(code), expires_in: QR_SIGNIN_TTL_MS / 1000, expiresAt: now + QR_SIGNIN_TTL_MS, interval: POLL_INTERVAL_S };
+  }
+
+  /** The open QR sign-in of a code looked up or approved on a signed-in device: wrong codes count like a computer's
+   *  (the session, the address, the account); 404 for a wrong or used one, 429 once over. */
+  private qrTarget(a: Authed, raw: string, ipKey: string) {
+    const keys: [FailureLimiter, string][] = [
+      [this.codeFailSession, a.session.id],
+      [this.codeFailAddress, ipKey],
+      [this.codeFailAccount, a.account.id],
+    ];
+    for (const [l, k] of keys) {
+      const w = l.blockedFor(k);
+      if (w) {
+        this.refuse("QR sign-ins over the wrong-code limit");
+        throw new HttpError(429, "slow_down", "too many wrong codes: wait", { "retry-after": String(w) });
+      }
+    }
+    const code = normCode(raw);
+    const q = validCode(code) ? this.store.qrSigninOfCode(code) : undefined;
+    if (!q || q.expires_at <= this.now() || !(q.status === "pending" || (q.status === "approved" && q.approved_account === a.account.id))) {
+      for (const [l, k] of keys) l.fail(k);
+      this.refuse("wrong, used or expired QR sign-in codes");
+      throw new HttpError(404, "not_found", "no such code (or it expired, or it was used)");
+    }
+    return q;
+  }
+
+  /** GET /v1/auth/qr/lookup?code=: what asks to be signed in, for the person to check before approving. */
+  private qrLookup(a: Authed, raw: string, ipKey: string) {
+    const q = this.qrTarget(a, raw, ipKey);
+    return {
+      device: { name: q.device_name, platform: q.platform },
+      requestedAt: q.created_at,
+      from: q.ip,
+      expiresIn: Math.max(0, Math.round((q.expires_at - this.now()) / 1000)),
+      status: q.status,
+      account: { id: a.account.id, name: a.account.name },
+    };
+  }
+
+  /** POST /v1/auth/qr/approve `{ code }`: the new device signs in to this account (at its next poll). The first
+   *  approval wins. */
+  private qrApprove(a: Authed, raw: string, ipKey: string) {
+    if (a.session.kind !== "app" && a.session.kind !== "hosted") throw new HttpError(403, "invalid_token", "an app's or a web page's session only");
+    const q = this.qrTarget(a, raw, ipKey);
+    if (q.status !== "pending") throw new HttpError(409, "already_approved", "this code was already approved");
+    const now = this.now();
+    const digest = createHash("sha256").update(Buffer.from(q.key, "base64url")).digest("base64url");
+    const known = this.store.get<{ id: string }>("SELECT id FROM devices WHERE account_id = ? AND key_digest = ? AND removed_at IS NULL", a.account.id, digest);
+    if (!known && this.store.countDevices(a.account.id, now) >= this.l.devicesPerAccount) throw new HttpError(403, "too_many_devices", `an account has ${this.l.devicesPerAccount} devices at most: remove one`);
+    const won = this.store.run(
+      "UPDATE qr_signins SET status = 'approved', approved_account = ?, approved_device = ?, approved_at = ? WHERE id = ? AND status = 'pending' AND expires_at > ?",
+      a.account.id, a.session.device_id, now, q.id, now,
+    );
+    if (!won) throw new HttpError(409, "already_approved", "this code was already approved");
+    this.log(`[account] QR sign-in approved for ${short(a.account.id)} by device ${short(a.session.device_id ?? "")}`);
+    return { status: "approved", device: { name: q.device_name, platform: q.platform } };
+  }
+
+  /** POST /v1/auth/qr/decline `{ code }`: refused; the new device's poll says `access_denied`. */
+  private qrDecline(a: Authed, raw: string, ipKey: string) {
+    const q = this.qrTarget(a, raw, ipKey);
+    this.store.run("UPDATE qr_signins SET status = 'declined' WHERE id = ? AND status IN ('pending','approved')", q.id);
+    this.log(`[account] QR sign-in declined by device ${short(a.session.device_id ?? "")}`);
+    return { ok: true };
+  }
+
+  /**
+   * POST /v1/auth/qr/poll `{ request }`: the new device's wait, as RFC 8628's — 400 `authorization_pending` (ask again
+   * in `interval` s), `slow_down`, `access_denied` (declined), `expired_token`; 200 its session (once: the code is
+   * used up), key-bound like a web page's.
+   */
+  private async qrPoll(req: IncomingMessage, ipKey: string): Promise<{ status: number; body: unknown }> {
+    const b = await this.readBody(req);
+    this.limited(this.qrPolls, ipKey, "QR sign-in polls");
+    const blocked = this.badTokens.blockedFor(ipKey);
+    if (blocked) throw new HttpError(429, "slow_down", "too many unknown requests: wait", { "retry-after": String(blocked) });
+    const request = String(b.request ?? "");
+    const q = /^[A-Za-z0-9_-]{43}$/.test(request) ? this.store.qrSigninOfRequest(request) : undefined;
+    if (!q) {
+      this.badTokens.fail(ipKey);
+      this.refuse("QR sign-in polls with an unknown request");
+      throw new HttpError(400, "invalid_grant", "unknown request");
+    }
+    const now = this.now();
+    if (q.status === "done") return { status: 400, body: { error: "invalid_grant", error_description: "already signed in" } };
+    if (q.expires_at <= now) return { status: 400, body: { error: "expired_token", error_description: "the code expired: start again" } };
+    const tooSoon = q.last_poll_at !== null && now - q.last_poll_at < POLL_INTERVAL_S * 1000 - 250;
+    this.store.run("UPDATE qr_signins SET last_poll_at = ? WHERE id = ?", now, q.id);
+    if (tooSoon) return { status: 400, body: { error: "slow_down", interval: POLL_INTERVAL_S + 1 } };
+    if (q.status === "pending") return { status: 400, body: { error: "authorization_pending", interval: POLL_INTERVAL_S } };
+    if (q.status === "declined") return { status: 400, body: { error: "access_denied", error_description: "declined" } };
+    const a = this.store.account(q.approved_account ?? "");
+    const approver = q.approved_device ? this.store.device(q.approved_device) : undefined;
+    // (the approving device must still be one of the account's: one removed since approves nothing)
+    if (!a || a.disabled_at !== null || (q.approved_device && (!approver || approver.removed_at !== null))) {
+      this.store.run("UPDATE qr_signins SET status = 'declined' WHERE id = ?", q.id);
+      return { status: 400, body: { error: "access_denied" } };
+    }
+    if (!this.store.run("UPDATE qr_signins SET status = 'done' WHERE id = ? AND status = 'approved'", q.id)) return { status: 400, body: { error: "invalid_grant", error_description: "already signed in" } };
+    this.log(`[account] QR sign-in ${short(a.id)}: session made`);
+    return { status: 200, body: this.deviceSession(a, { name: q.device_name, key: q.key }, true, null, q.platform) };
+  }
+
   // --------------------------------------------------------------------------- the join code
 
   private async enroll(req: IncomingMessage, ip: string, ipKey: string) {
@@ -1074,7 +1446,7 @@ export class AccountService {
       body: {
         status: "approved",
         // what the computer shows before the person there confirms (or, headless, compares with what it expects)
-        claimant: { account: { id: a.id, name: a.name }, idp: { issuer: a.iss, name: this.cfg.idpName, sub: a.sub }, approvedAt: e.approved_at, by: e.approved_device_name },
+        claimant: { account: { id: a.id, name: a.name }, idp: { issuer: a.iss, name: this.idpNameOf(a), sub: a.sub }, approvedAt: e.approved_at, by: e.approved_device_name },
         server: { url: this.cfg.publicUrl, keys: this.deps.ring.jwks() },
         confirmBy: e.expires_at,
       },

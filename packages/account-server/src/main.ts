@@ -3,10 +3,14 @@
 // behind a TLS front (ACCOUNT_TRUST_PROXY=1 takes the client's address from its X-Forwarded-For). Its configuration
 // is the environment (config.ts; the three that say which IdP, and the rest):
 //   ACCOUNT_OIDC_ISSUER, ACCOUNT_OIDC_CLIENT_ID, ACCOUNT_OIDC_CLIENT_SECRET (or ACCOUNT_OIDC_CLIENT_SECRET_FILE)
+//     (issuer https://appleid.apple.com, client id a Services ID: Sign in with Apple on the web; without a secret it is
+//     signed with the Sign in with Apple key below)
 //   ACCOUNT_APPLE_AUDIENCES  the apps' bundle ids: their native Sign in with Apple (beside the IdP, or without one)
 //     ACCOUNT_APPLE_TEAM_ID + ACCOUNT_APPLE_KEY_ID + ACCOUNT_APPLE_KEY (or _FILE: the .p8)   to revoke a deleted
 //     account's Apple grant
 //   ACCOUNT_APPSTORE_BUNDLE_ID + ACCOUNT_APPSTORE_PRODUCTS   App Store subscriptions the apps report
+//   ACCOUNT_PASSWORD=1      email and password; with ACCOUNT_MAIL_FROM and Amazon SES's ACCOUNT_SES_REGION +
+//     ACCOUNT_SES_ACCESS_KEY_ID + ACCOUNT_SES_SECRET_ACCESS_KEY (the codes are mailed through it)
 //   ACCOUNT_PUBLIC_URL      its own public origin, https://account.example.com — needed
 //   ACCOUNT_ALLOW           subs and @domains that may sign in (needed for an IdP anyone can sign up at, or ACCOUNT_OPEN=1)
 //   ACCOUNT_IDP_RECHECK     1: re-check each session with the IdP hourly (default off)

@@ -461,6 +461,31 @@ public final class RemoteAccess: @unchecked Sendable {
         }
     }
 
+    /// A join code for this Mac (the menu's: `POST /remote/account/join { server }`), shown until somebody approves it.
+    func startJoin(server: String) async throws {
+        guard let m = membership else { throw HTTPError(503, "remote access is not running") }
+        do {
+            try await m.startJoin(server: server)
+        } catch AccountMembership.Failure.join(let status, let why) {
+            throw HTTPError(status, why)
+        }
+    }
+
+    /// The person at this Mac agrees to who approved its join code.
+    func confirmJoin() async throws {
+        guard let m = membership else { throw HTTPError(503, "remote access is not running") }
+        do {
+            try await m.confirmJoin()
+        } catch AccountMembership.Failure.join(let status, let why) {
+            throw HTTPError(status, why)
+        }
+    }
+
+    /// The join code given up (or the approval refused).
+    func cancelJoin() async {
+        await membership?.cancelJoin()
+    }
+
     /// Leaves the account (the menu's, or a phone paired here): the account's devices are let in no more. Paired phones
     /// stay paired.
     func leaveAccount() async {

@@ -14,7 +14,9 @@ import Foundation
 ///   seconds while the server is up; while it is away everything already let in goes on.
 /// - Every request of its own is signed with the link key (`<Ns>Link <linkId>.<ts>.<sig>`), the raw Ed25519 seed in
 ///   `link-key`.
-/// - Not here (yet): joining with a code shown on the Mac, the services an account lends (a Mac has its own).
+/// - Joining with a code (`startJoin`): the Mac shows it (a QR code and text), somebody signed in approves it, the Mac
+///   shows who (`pending.claimant`) and its person confirms (`confirmJoin`) or not (`cancelJoin`).
+/// - Not here (yet): the services an account lends (a Mac has its own).
 public final class AccountMembership: @unchecked Sendable {
     /// The wire's names, made of one namespace (protocol.ts `Wire`).
     public struct Wire: Sendable {
@@ -28,6 +30,9 @@ public final class AccountMembership: @unchecked Sendable {
         var joinKeyPrefix: String { "\(ns)_jk_" }
         func computerProofText(_ origin: String, _ method: String, _ pathQ: String, _ ts: Int, _ bodyHash: String) -> String {
             "\(ns)-account-computer-v1\n\(origin)\n\(method) \(pathQ)\n\(ts)\n\(bodyHash)"
+        }
+        func joinProofText(_ origin: String, _ linkId: String, _ account: String, _ deviceCode: String) -> String {
+            "\(ns)-account-join-v1\n\(origin)\n\(linkId)\n\(account)\n\(AccountMembership.sha256b64url(Data(deviceCode.utf8)))"
         }
         func joinKeyProofText(_ origin: String, _ linkId: String, _ key: String) -> String {
             "\(ns)-account-joinkey-v1\n\(origin)\n\(linkId)\n\(AccountMembership.sha256b64url(Data(key.utf8)))"
@@ -65,6 +70,28 @@ public final class AccountMembership: @unchecked Sendable {
             case .ticket(let code): "the ticket was refused (\(code))"
             }
         }
+    }
+
+    /// A join code under way (`startJoin`): shown here until somebody approves it, then who did, until confirmed.
+    public struct PendingJoin: Sendable, Equatable {
+        public enum State: String, Sendable { case waiting, approved, failed }
+        public var server: String
+        /// The code as people read and type it (`BCDF-GHJK`).
+        public var userCode: String
+        /// The account server's QR text (`HTTPS://HOST/C/<code>`): an app's scanner reads it.
+        public var qr: String
+        public var expiresAt: Date
+        public var state: State
+        /// Who approved, once somebody did: the account (id, name), its sign-in system's name, the device it was done on.
+        public var claimant: Claimant?
+        public var error: String?
+    }
+
+    public struct Claimant: Sendable, Equatable {
+        public var accountId: String
+        public var accountName: String?
+        public var idpName: String?
+        public var by: String?
     }
 
     /// What a ticket says (the parts a Mac uses).
@@ -127,6 +154,9 @@ public final class AccountMembership: @unchecked Sendable {
     private var syncAt: Date?
     private var syncError: String?
     private var loop: Task<Void, Never>?
+    private var pendingJoin: PendingJoin?
+    private var deviceCode = ""
+    private var pollTask: Task<Void, Never>?
     private var kicked = false
     /// Waits on the revocation list at most this long (s), and the retry backoff (tests set them lower).
     var waitS = 25
@@ -170,7 +200,25 @@ public final class AccountMembership: @unchecked Sendable {
                             "disabled": r.disabled != nil] as [String: Any]
         }
         if let syncError { j["error"] = syncError }
+        if let p = pendingJoin {
+            var pj: [String: Any] = ["server": p.server, "userCode": p.userCode, "qr": p.qr, "expiresAt": p.expiresAt.timeIntervalSince1970 * 1000,
+                                     "state": p.state.rawValue]
+            if let c = p.claimant {
+                var cj: [String: Any] = ["account": ["id": c.accountId, "name": c.accountName ?? NSNull()] as [String: Any]]
+                if let n = c.idpName { cj["idp"] = ["name": n] }
+                if let by = c.by { cj["by"] = by }
+                pj["claimant"] = cj
+            }
+            if let e = p.error { pj["error"] = e }
+            j["pending"] = pj
+        }
         return j
+    }
+
+    /// The join code under way, if any.
+    public var pending: PendingJoin? {
+        lock.lock(); defer { lock.unlock() }
+        return pendingJoin
     }
 
     /// Whether a token made for a ticket still counts: the same account and this membership of it, the device's
@@ -227,6 +275,11 @@ public final class AccountMembership: @unchecked Sendable {
         guard status == 200 else {
             throw Failure.join(status == 429 ? 429 : 403, "the account server refused the key (\(answer["error"] as? String ?? "\(status)"))")
         }
+        try adopt(server: server, me: me, answer: answer)
+    }
+
+    /// The server's answer to a join (with a key, or a confirmed code) taken as this Mac's membership: pinned, saved.
+    private func adopt(server: String, me: SelfInfo, answer: [String: Any]) throws {
         let account = answer["account"] as? [String: Any]
         let srv = answer["server"] as? [String: Any]
         let keys = (srv?["keys"] as? [Any] ?? []).compactMap { cleanKey($0) }
@@ -245,11 +298,132 @@ public final class AccountMembership: @unchecked Sendable {
             sentSelf = Self.serialized(Self.selfBody(me))
             saveLocked()
             kicked = true
+            pendingJoin = nil
+            pollTask?.cancel()
+            pollTask = nil
             return true
         }
         guard taken else { throw Failure.join(409, "this Mac is in an account already: leave it first") }
         log("account: this Mac joined account \(id.prefix(10))…\(r.accountName.map { " (\($0))" } ?? "") at \(server)")
         onChange?()
+    }
+
+    // MARK: Joining with a code
+
+    /// Asks the account server for a join code, shown on this Mac; somebody signed in approves it (an app scans it, or
+    /// it is typed in a client), then this Mac shows who (`pending.claimant`) and its person confirms or cancels.
+    @discardableResult
+    public func startJoin(server raw: String) async throws -> PendingJoin {
+        guard let server = Self.origin(raw) else { throw Failure.join(400, "the account server is an https address (https://account.example.com)") }
+        guard !joined else { throw Failure.join(409, "this Mac is in an account already: leave it first") }
+        guard let me = selfInfo() else { throw Failure.join(409, "this Mac has no Link entry yet: it cannot join an account") }
+        await cancelJoin()
+        var body = Self.selfBody(me)
+        body["linkId"] = me.linkId
+        let (status, b) = try await post(server + "/v1/computers/enroll", body)
+        guard status == 200, let code = b["device_code"] as? String, let user = b["user_code"] as? String, let qr = b["qr"] as? String else {
+            throw Failure.join(status == 429 ? 429 : 502, "the account server gave no code (\(b["error"] as? String ?? "\(status)"))")
+        }
+        let ttl = min(3600, max(30, (b["expires_in"] as? NSNumber)?.doubleValue ?? 600))
+        let interval = min(30, max(1, (b["interval"] as? NSNumber)?.doubleValue ?? 2))
+        let p = PendingJoin(server: server, userCode: user, qr: qr, expiresAt: now().addingTimeInterval(ttl), state: .waiting)
+        lock.withLock {
+            pendingJoin = p
+            deviceCode = code
+            pollTask?.cancel()
+            pollTask = Task { [weak self] in await self?.pollJoin(interval: interval) }
+        }
+        log("account: join code asked of \(server)")
+        onChange?()
+        return p
+    }
+
+    /// Waits for the approval (the server's poll); once approved, only the expiry is watched.
+    private func pollJoin(interval start: TimeInterval) async {
+        var interval = start
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(interval))
+            guard !Task.isCancelled, let (p, code) = lock.withLock({ pendingJoin.map { ($0, deviceCode) } }), p.state != .failed else { return }
+            if now() >= p.expiresAt {
+                setPending { $0.state = .failed; $0.error = "the code expired" }
+                return
+            }
+            guard p.state == .waiting else { continue }
+            guard let (status, b) = try? await post(p.server + "/v1/computers/poll", ["device_code": code]) else { continue }
+            guard lock.withLock({ deviceCode == code && pendingJoin != nil }) else { return }
+            if status == 200, b["status"] as? String == "approved" {
+                let c = b["claimant"] as? [String: Any]
+                let acc = c?["account"] as? [String: Any]
+                guard let id = acc?["id"] as? String, id.range(of: Self.accountIdPattern, options: .regularExpression) != nil else {
+                    setPending { $0.state = .failed; $0.error = "the account server's answer names no account" }
+                    return
+                }
+                let claimant = Claimant(accountId: id, accountName: (acc?["name"] as? String).map { String($0.prefix(64)) },
+                                        idpName: ((c?["idp"] as? [String: Any])?["name"] as? String).map { String($0.prefix(64)) },
+                                        by: (c?["by"] as? String).map { String($0.prefix(64)) })
+                let confirmBy = (b["confirmBy"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1000) }
+                setPending {
+                    $0.state = .approved
+                    $0.claimant = claimant
+                    if let confirmBy { $0.expiresAt = confirmBy }
+                }
+                log("account: join approved by account \(id.prefix(10))…; waiting for the confirmation on this Mac")
+                continue
+            }
+            let err = b["error"] as? String ?? ""
+            if err == "authorization_pending" || err == "slow_down" || status >= 500 || status == 429 || status == 0 {
+                if err == "slow_down" { interval = min(30, interval + 1) }
+                continue
+            }
+            setPending {
+                $0.state = .failed
+                $0.error = err == "access_denied" ? "declined" : err == "expired_token" ? "the code expired" : "the account server said \(err.isEmpty ? "\(status)" : err)"
+            }
+            return
+        }
+    }
+
+    private func setPending(_ change: (inout PendingJoin) -> Void) {
+        let changed: Bool = lock.withLock {
+            guard var p = pendingJoin else { return false }
+            change(&p)
+            pendingJoin = p
+            return true
+        }
+        if changed { onChange?() }
+    }
+
+    /// The person at this Mac agrees to who approved: this Mac is that account's.
+    public func confirmJoin() async throws {
+        guard let (p, code) = lock.withLock({ pendingJoin.map { ($0, deviceCode) } }), p.state == .approved, let c = p.claimant else {
+            throw Failure.join(409, "nothing approved to confirm")
+        }
+        guard let me = selfInfo() else { throw Failure.join(409, "this Mac has no Link entry") }
+        guard let proof = sign(me.linkId, wire.joinProofText(p.server, me.linkId, c.accountId, code)) else {
+            throw Failure.join(409, "this Mac's link key cannot sign")
+        }
+        let (status, answer) = try await post(p.server + "/v1/computers/confirm", ["device_code": code, "proof": proof])
+        guard status == 200 else { throw Failure.join(502, "the account server refused the confirmation (\(answer["error"] as? String ?? "\(status)"))") }
+        // (the server's answer must name the account that was shown here)
+        guard (answer["account"] as? [String: Any])?["id"] as? String == c.accountId else {
+            throw Failure.join(502, "the account server confirmed another account than the one shown")
+        }
+        try adopt(server: p.server, me: me, answer: answer)
+    }
+
+    /// The join under way given up (the server told, so the code is dead).
+    public func cancelJoin() async {
+        let (p, code): (PendingJoin?, String) = lock.withLock {
+            let out = (pendingJoin, deviceCode)
+            pendingJoin = nil
+            deviceCode = ""
+            pollTask?.cancel()
+            pollTask = nil
+            return out
+        }
+        guard let p else { return }
+        onChange?()
+        if p.state != .failed { _ = try? await post(p.server + "/v1/computers/decline", ["device_code": code]) }
     }
 
     /// Out of the account (from this Mac): every token made for a ticket is void at once; the server is told when it

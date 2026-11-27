@@ -142,4 +142,50 @@ final class AccountMembershipTests: XCTestCase {
         XCTAssertFalse(m.ticketValid(AccountGrant(acc: c2.account, dev: c2.deviceId, tat: c2.iat, sx: c2.sx)))
         wait("the account no longer lists it") { ((try? self.call(s["control"]! + "/computers")["computers"] as? [Any]) ?? [1]).isEmpty }
     }
+
+    func testJoinsWithACodeSomebodyApprovesThenThisMacConfirms() async throws {
+        let s = try startServer()
+        let seed = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+        FileManager.default.createFile(atPath: dir + "/link-key", contents: seed)
+        let linkId = try Curve25519.Signing.PrivateKey(rawRepresentation: seed).publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+        let m = AccountMembership(path: dir + "/account.json", linkKeyPath: dir + "/link-key") {
+            .init(linkId: linkId, name: "Studio", relays: [], direct: [], info: ["id": "server-2", "platform": "mac"])
+        }
+        // a code, shown here: nothing to confirm yet
+        let p = try await m.startJoin(server: s["url"]!)
+        XCTAssertEqual(p.state, .waiting)
+        XCTAssertTrue(p.userCode.range(of: "^[A-Z]{4}-[A-Z]{4}$", options: .regularExpression) != nil)
+        XCTAssertTrue(p.qr.hasSuffix("/C/" + p.userCode.replacingOccurrences(of: "-", with: "")))
+        XCTAssertEqual((m.json["pending"] as? [String: Any])?["userCode"] as? String, p.userCode)
+        do {
+            try await m.confirmJoin()
+            XCTFail("nothing approved yet")
+        } catch AccountMembership.Failure.join(let status, _) { XCTAssertEqual(status, 409) }
+        // the phone approves; the Mac shows who
+        _ = try call(s["control"]! + "/approve?code=\(p.userCode)", "POST")
+        wait("the approval is seen") { m.pending?.state == .approved }
+        XCTAssertEqual(m.pending?.claimant?.accountId, s["account"])
+        XCTAssertEqual(m.pending?.claimant?.by, "iPhone")
+        XCTAssertFalse(m.joined, "not before its person confirms")
+        try await m.confirmJoin()
+        XCTAssertTrue(m.joined)
+        XCTAssertNil(m.pending)
+        XCTAssertEqual((m.json["account"] as? [String: Any])?["id"] as? String, s["account"])
+        let computers = try XCTUnwrap(try call(s["control"]! + "/computers")["computers"] as? [[String: Any]])
+        XCTAssertEqual(computers.first?["linkId"] as? String, linkId)
+        XCTAssertEqual((computers.first?["info"] as? [String: Any])?["id"] as? String, "server-2")
+        // in an account: no second code
+        do {
+            try await m.startJoin(server: s["url"]!)
+            XCTFail("one account at a time")
+        } catch AccountMembership.Failure.join(let status, _) { XCTAssertEqual(status, 409) }
+        _ = await m.leave()
+
+        // a code given up: the server is told, the code is dead
+        let q = try await m.startJoin(server: s["url"]!)
+        await m.cancelJoin()
+        XCTAssertNil(m.pending)
+        let late = try call(s["control"]! + "/approve?code=\(q.userCode)", "POST")
+        XCTAssertEqual(late["error"] as? String, "not_found")
+    }
 }

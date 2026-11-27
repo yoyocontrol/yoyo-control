@@ -4,9 +4,9 @@ import Foundation
 import Security
 
 /// A device's side of an account server (docs/ACCOUNT-LIB.md; @yoyocontrol/account-server): sign in (the app's native
-/// Sign in with Apple), the account's computers and a ticket into each, a one-use join key for a computer this phone
+/// Sign in with Apple, or email and password), the account's computers and a ticket into each, a one-use join key for a computer this phone
 /// is paired with, App Store purchases kept with the account, the account's devices, signing out, deleting the
-/// account. The session is kept in the keychain under `keychainService` (this device only, after the first unlock).
+/// account, approving another device's sign-in by QR code and a computer's join code. The session is kept in the keychain under `keychainService` (this device only, after the first unlock).
 ///
 /// Nothing here is a way into a computer by itself: a ticket only says "this device of the account may come in"; the
 /// computer checks it against the keys it pinned when it joined and gives the device a token of its own.
@@ -28,6 +28,11 @@ public final class AccountClient: @unchecked Sendable {
         public let name: String?
         /// What the account bought, by source (`appstore`): active, its product, until when (unix ms), sandbox.
         public let entitlements: [String: Entitlement]
+        /// Who it signs in with: Apple's issuer, the account server's own `<server>/password` (email and password), or
+        /// an OpenID provider's (nil: not said).
+        public var issuer: String? = nil
+        /// It signs in with Apple (deleting it asks Apple to confirm).
+        public var viaApple: Bool { issuer == "https://appleid.apple.com" }
     }
 
     public struct Entitlement: Sendable, Equatable {
@@ -54,6 +59,37 @@ public final class AccountClient: @unchecked Sendable {
         public let name: String
         public let platform: String?
         public let current: Bool
+    }
+
+    /// What asks to be signed in with a sign-in code (another device's QR code): for the person to check first.
+    public struct SignInRequest: Sendable, Equatable {
+        /// The code as the server takes it (8 letters).
+        public let code: String
+        public let deviceName: String
+        /// `web`, `windows`, `macos`, … as the device says.
+        public let platform: String
+        public let requestedAt: Date?
+        /// The address it asked from.
+        public let from: String?
+        /// Seconds left.
+        public let expiresIn: Int
+        /// The account it would sign in to (this device's), by name.
+        public let account: String
+    }
+
+    /// What a computer's join code stands for: for the person to check before approving (the computer then asks its own
+    /// person).
+    public struct JoinRequest: Sendable, Equatable {
+        public let code: String
+        public let linkId: String
+        public let name: String
+        public let requestedAt: Date?
+        public let from: String?
+        /// `pending`, or `approved` (by this account: only the computer's own yes is missing).
+        public let status: String
+        /// The computer said beforehand which account it expects; false = not this one.
+        public let matchesExpected: Bool?
+        public let account: String
     }
 
     public let server: URL
@@ -105,6 +141,55 @@ public final class AccountClient: @unchecked Sendable {
         return try await me()
     }
 
+    // MARK: Email and password
+
+    /// Email and password (the server's `ACCOUNT_PASSWORD`; docs/ACCOUNT-LIB.md「邮箱和密码」). Refusals are `Failure`s
+    /// with the server's `code`: `invalid_email`, `weak_password` (8–256 characters), `invalid_code`, `code_expired`,
+    /// `invalid_credentials` (a wrong email or password: one answer), `already_registered`, `access_denied`,
+    /// `mail_failed`, `slow_down` (429).
+    ///
+    /// Mails a sign-up code to `email` (`locale`: the mail's language, "zh-Hans" / "en"). The same answer for an email
+    /// that has a login already (its mail says so instead of a code).
+    public func registerEmail(_ email: String, password: String, locale: String? = nil) async throws {
+        var body: [String: Any] = ["email": email, "password": password]
+        if let locale { body["locale"] = locale }
+        _ = try await call("POST", "v1/auth/password/register", body: body, auth: false)
+    }
+
+    /// The mailed code: the account is made, and this device signed in to it.
+    @discardableResult
+    public func verifyEmail(_ email: String, code: String, deviceName: String, platform: String = "ios") async throws -> Account {
+        try await emailSession("v1/auth/password/verify", ["email": email, "code": code], deviceName: deviceName, platform: platform)
+    }
+
+    /// Signs in with email and password.
+    @discardableResult
+    public func signIn(email: String, password: String, deviceName: String, platform: String = "ios") async throws -> Account {
+        try await emailSession("v1/auth/password", ["email": email, "password": password], deviceName: deviceName, platform: platform)
+    }
+
+    /// Mails a reset code when `email` has a login (the same answer when it has none).
+    public func requestPasswordReset(_ email: String, locale: String? = nil) async throws {
+        var body: [String: Any] = ["email": email]
+        if let locale { body["locale"] = locale }
+        _ = try await call("POST", "v1/auth/password/reset", body: body, auth: false)
+    }
+
+    /// The reset code and the new password: the account's other sessions end, this device is signed in.
+    @discardableResult
+    public func resetPassword(_ email: String, code: String, password: String, deviceName: String, platform: String = "ios") async throws -> Account {
+        try await emailSession("v1/auth/password/reset/confirm", ["email": email, "code": code, "password": password], deviceName: deviceName, platform: platform)
+    }
+
+    private func emailSession(_ path: String, _ fields: [String: Any], deviceName: String, platform: String) async throws -> Account {
+        var body = fields
+        body["device"] = ["name": deviceName, "platform": platform]
+        let j = try await call("POST", path, body: body, auth: false)
+        guard let s = j["session"] as? String else { throw Failure(status: 0, code: "no_session", message: "The account server gave no session.") }
+        setSession(s)
+        return try await me()
+    }
+
     // MARK: The account
 
     public func me() async throws -> Account {
@@ -116,7 +201,7 @@ public final class AccountClient: @unchecked Sendable {
             ents[source] = Entitlement(active: e["active"] as? Bool ?? false, productId: e["productId"] as? String ?? "",
                                        expiresAt: e["expiresAt"] as? Double, sandbox: e["sandbox"] as? Bool ?? false)
         }
-        return Account(id: a?["id"] as? String ?? "", name: a?["name"] as? String, entitlements: ents)
+        return Account(id: a?["id"] as? String ?? "", name: a?["name"] as? String, entitlements: ents, issuer: a?["iss"] as? String)
     }
 
     public func computers() async throws -> [Computer] {
@@ -184,13 +269,89 @@ public final class AccountClient: @unchecked Sendable {
         return j["revoked"] as? Bool ?? false
     }
 
+    // MARK: Approving what another screen shows
+
+    /// The 8 letters of the codes (RFC 8628's consonants).
+    static let codeAlphabet = Set("BCDFGHJKLMNPQRSTVWXZ")
+
+    private static func letters(_ s: Substring) -> String? {
+        let c = s.uppercased().filter { $0.isLetter }
+        return c.count == 8 && c.allSatisfy { codeAlphabet.contains($0) } ? c : nil
+    }
+
+    /// A sign-in code as scanned or typed: its link (`…#BCDFGHJK`), `BCDF-GHJK`, lower case, spaces. nil: none.
+    public static func signInCode(_ raw: String) -> String? {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let hash = t.firstIndex(of: "#") { return letters(t[t.index(after: hash)...]) }
+        return letters(Substring(t))
+    }
+
+    /// A computer's join code as scanned or typed: the account server's QR text (`HTTPS://HOST/C/BCDFGHJK`), a link with
+    /// the code after `#`, `BCDF-GHJK`, lower case. nil: none.
+    public static func joinCode(_ raw: String) -> String? {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let r = t.range(of: "/C/", options: [.caseInsensitive, .backwards]) {
+            return letters(t[r.upperBound...].prefix { $0 != "/" })
+        }
+        if let hash = t.firstIndex(of: "#") { return letters(t[t.index(after: hash)...]) }
+        return letters(Substring(t))
+    }
+
+    /// What asks to be signed in with `code` (`GET /v1/auth/qr/lookup`). 404: wrong, used or run out.
+    public func lookupSignIn(code: String) async throws -> SignInRequest {
+        let c = Self.signInCode(code) ?? ""
+        let j = try await call("GET", "v1/auth/qr/lookup", query: ["code": c])
+        let d = j["device"] as? [String: Any] ?? [:]
+        return SignInRequest(code: c, deviceName: d["name"] as? String ?? "", platform: d["platform"] as? String ?? "web",
+                             requestedAt: Self.date(j["requestedAt"]), from: j["from"] as? String,
+                             expiresIn: (j["expiresIn"] as? NSNumber)?.intValue ?? 0, account: Self.accountName(j["account"]))
+    }
+
+    /// Signs the device of `code` in to this account (it gets its session, bound to its own key, at its next poll).
+    public func approveSignIn(code: String) async throws {
+        _ = try await call("POST", "v1/auth/qr/approve", body: ["code": Self.signInCode(code) ?? ""])
+    }
+
+    /// Refuses the sign-in of `code`.
+    public func declineSignIn(code: String) async throws {
+        _ = try await call("POST", "v1/auth/qr/decline", body: ["code": Self.signInCode(code) ?? ""])
+    }
+
+    /// What a computer's join code stands for (`GET /v1/computers/lookup`).
+    public func lookupJoin(code: String) async throws -> JoinRequest {
+        let c = Self.joinCode(code) ?? ""
+        let j = try await call("GET", "v1/computers/lookup", query: ["code": c])
+        let pc = j["computer"] as? [String: Any] ?? [:]
+        guard let linkId = pc["linkId"] as? String else { throw Failure(status: 0, code: "unreadable", message: "The account server's answer was not readable.") }
+        return JoinRequest(code: c, linkId: linkId, name: pc["name"] as? String ?? "", requestedAt: Self.date(j["requestedAt"]),
+                           from: j["from"] as? String, status: j["status"] as? String ?? "pending",
+                           matchesExpected: j["matchesExpected"] as? Bool, account: Self.accountName(j["account"]))
+    }
+
+    /// Puts the computer of a join code into this account; it then shows who approved and asks its own person.
+    public func approveJoin(code: String) async throws {
+        _ = try await call("POST", "v1/computers/approve", body: ["user_code": Self.joinCode(code) ?? ""])
+    }
+
+    private static func date(_ any: Any?) -> Date? {
+        (any as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1000) }
+    }
+
+    private static func accountName(_ any: Any?) -> String {
+        let a = any as? [String: Any] ?? [:]
+        if let n = a["name"] as? String, !n.isEmpty { return n }
+        return a["id"] as? String ?? ""
+    }
+
     /// Forgets the session here only (the server said it is no good).
     public func forget() { setSession(nil) }
 
     // MARK: HTTP
 
-    private func call(_ method: String, _ path: String, body: [String: Any]? = nil, auth: Bool = true) async throws -> [String: Any] {
-        var request = URLRequest(url: server.appending(path: path), timeoutInterval: 15)
+    private func call(_ method: String, _ path: String, query: [String: String] = [:], body: [String: Any]? = nil, auth: Bool = true) async throws -> [String: Any] {
+        var url = server.appending(path: path)
+        if !query.isEmpty { url.append(queryItems: query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }) }
+        var request = URLRequest(url: url, timeoutInterval: 15)
         request.httpMethod = method
         if auth {
             guard let s = lock.withLock({ _session }) else { throw Failure(status: 401, code: "invalid_token", message: "Sign in first.") }

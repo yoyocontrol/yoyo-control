@@ -5,6 +5,7 @@
 //   GET  <control>/ticket?computer=<linkId>&device=<name>   a ticket for that device of the account (signed in once)
 //   POST <control>/remove?device=<name>                     the device removed from the account
 //   GET  <control>/computers                                the account's computers as its phone sees them
+//   POST <control>/approve?code=<join code>                 the phone approves a computer's join code
 import { createServer } from "node:http";
 import { appleSignIn, bearer, get, harness, post, TestApple } from "../dist/testing/index.js";
 
@@ -32,6 +33,10 @@ const control = createServer(async (req, res) => {
     if (u.pathname === "/remove") {
       const d = await device(u.searchParams.get("device") ?? "iPad");
       const r = await fetch(`${h.url}/v1/devices/${d.device.id}`, { method: "DELETE", headers: bearer(phone.session) });
+      return send(r.status, await r.json());
+    }
+    if (u.pathname === "/approve") {
+      const r = await post(`${h.url}/v1/computers/approve`, { user_code: u.searchParams.get("code") }, bearer(phone.session));
       return send(r.status, await r.json());
     }
     if (u.pathname === "/computers") return send(200, await (await get(`${h.url}/v1/computers`, bearer(phone.session))).json());

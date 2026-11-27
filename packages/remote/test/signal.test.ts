@@ -104,3 +104,48 @@ test("signal: registers, sends the link binding, reconnects after a drop", async
     r.stop();
   }
 });
+
+test("signal: a browser's offer goes to the link's answerer; its answer or its refusal goes back on the same connection", async () => {
+  FakeWS.made = [];
+  const id = loadOrCreateIdentity(mkdtempSync(join(tmpdir(), "relay-")));
+  const r = new SignalClient({ identity: id, url: "wss://signal.test/", WebSocket: FakeWS as never });
+  try {
+    r.start();
+    const control = FakeWS.made[0]!;
+    control.open();
+    control.message(JSON.stringify({ type: "challenge", nonce: "abc=" }));
+    control.message(JSON.stringify({ type: "ready" }));
+    const sent = () => control.sent.slice(2).map((s) => JSON.parse(s as string));
+    const rid = "0123456789abcdef".repeat(2);
+    // no answerer (no WebRTC): 404
+    control.message(JSON.stringify({ type: "rtc", id: rid, offer: { sdp: "o" }, from: "203.0.113.5" }));
+    await sleep(10);
+    assert.deepEqual(sent()[0], { id: rid, message: "uu Link's WebRTC is not running", status: 404, type: "rtc-error" });
+    // the answerer: the offer and where it came from in, the answer out
+    const asked: unknown[] = [];
+    r.rtcAnswerer = async (offer, from) => {
+      asked.push([offer, from]);
+      if ((offer as { sdp?: string }).sdp === "busy") throw Object.assign(new Error("too many tries"), { status: 429 });
+      return { sdp: "a", sig: "s" };
+    };
+    control.message(JSON.stringify({ type: "rtc", id: rid, offer: { sdp: "o" }, from: "203.0.113.5" }));
+    await sleep(10);
+    assert.deepEqual(asked, [[{ sdp: "o" }, "203.0.113.5"]]);
+    assert.deepEqual(sent()[1], { answer: { sdp: "a", sig: "s" }, id: rid, type: "rtc-answer" });
+    // the guard's refusal, a bad offer, an unknown failure (503)
+    control.message(JSON.stringify({ type: "rtc", id: rid, offer: { sdp: "busy" } }));
+    control.message(JSON.stringify({ type: "rtc", id: rid, offer: "nope" }));
+    r.rtcAnswerer = async () => {
+      throw new Error("gone");
+    };
+    control.message(JSON.stringify({ type: "rtc", id: rid, offer: {} }));
+    await sleep(10);
+    assert.deepEqual(sent().slice(2).map((m) => m.status).sort(), [400, 429, 503]);
+    // an id that isn't one: no reply
+    control.message(JSON.stringify({ type: "rtc", id: "x", offer: {} }));
+    await sleep(10);
+    assert.equal(sent().length, 5);
+  } finally {
+    r.stop();
+  }
+});

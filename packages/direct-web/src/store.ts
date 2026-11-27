@@ -14,6 +14,9 @@ export interface PairedMac {
   pairedAt: number;
   /** What the Mac said it is last time (`welcome.server.platform`: "mac"…). */
   platform?: string | null;
+  /** Let in through an account (`DirectWeb.admit`): its Link id there. When its token stops working (the account's
+   *  sign-in ran out, it was renewed) a new ticket gets a new one (`DirectWebOptions.ticket`). */
+  account?: string;
 }
 
 /**

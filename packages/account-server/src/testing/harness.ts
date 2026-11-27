@@ -1,6 +1,7 @@
 // A running account server for tests (yours and this package's; `@yoyocontrol/account-server/testing`): a TestIdp, an in-memory (or file) store, a key ring, the service on
 // a loopback port, and the client steps — an app's sign-in through the IdP, a computer's join.
 import { createHash, generateKeyPairSync, randomBytes, sign, type KeyObject } from "node:crypto";
+import type { Mail, Mailer } from "../mail.js";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { configFromEnv, type AccountConfig } from "../config.js";
@@ -52,7 +53,23 @@ const running: Harness[] = [];
 
 /** `apple`: a stand-in for Apple (identity tokens, StoreKit) — give ACCOUNT_APPLE_AUDIENCES in `env` too;
  *  `appleFetch`: Apple's token endpoints, for revoking. `oidc: false`: no IdP (Apple only). */
-export async function harness(o: { env?: Record<string, string>; limits?: Partial<Limits>; dbFile?: string; idp?: (idp: TestIdp) => void; apple?: TestApple; appleFetch?: typeof fetch; oidc?: boolean } = {}): Promise<Harness> {
+/** A mailer that keeps what it was given (`password`: email and password sign-in on, its mails here). */
+export class TestMailer implements Mailer {
+  readonly sent: Mail[] = [];
+  /** The next sends fail (the provider refused). */
+  failing = false;
+  async send(mail: Mail) {
+    if (this.failing) throw new Error("refused");
+    this.sent.push(mail);
+  }
+  /** The code in the latest mail to `to` (null: none, or a mail without one). */
+  codeFor(to: string): string | null {
+    const m = [...this.sent].reverse().find((x) => x.to === to);
+    return m ? (/\b(\d{6})\b/.exec(m.text)?.[1] ?? null) : null;
+  }
+}
+
+export async function harness(o: { env?: Record<string, string>; limits?: Partial<Limits>; dbFile?: string; idp?: (idp: TestIdp) => void; apple?: TestApple; appleFetch?: typeof fetch; oidc?: boolean; password?: TestMailer } = {}): Promise<Harness> {
   const idp = await new TestIdp().start();
   o.idp?.(idp);
   const server: Server = createServer();
@@ -62,8 +79,10 @@ export async function harness(o: { env?: Record<string, string>; limits?: Partia
     ...(o.oidc === false ? {} : { ACCOUNT_OIDC_ISSUER: idp.issuer, ACCOUNT_OIDC_CLIENT_ID: idp.clientId, ACCOUNT_OIDC_CLIENT_SECRET: idp.clientSecret }),
     ACCOUNT_PUBLIC_URL: url,
     ACCOUNT_APP_REDIRECTS: "example://account",
+    ...(o.password && !o.env?.ACCOUNT_ALLOW ? { ACCOUNT_OPEN: "1" } : {}),
     ...o.env,
   });
+  if (o.password) cfg.password = { mailer: o.password };
   const store = new Store(o.dbFile ?? ":memory:", cfg.wire);
   const ring = KeyRing.load(null, cfg.wire);
   const logs: string[] = [];

@@ -175,7 +175,8 @@ node server.mjs account join --remote ~/.yoyo-remote --key <加入钥匙> https:
 - 浏览器（`docs/LINK.md`「WebRTC」）：同一个监听另开一个 WebRTC 的 UDP 端口（`--link-rtc-port`，缺省 Link 端口 + 1，`off` 关掉；
   `YOYO_LINK_RTC_PORT` 同），`--advertise` 的主机也在这个端口上给出，路由器同样映射它（外网端口记在 `rtcPublicPort`）；`--link-stun host:port`
   让答复多一个 STUN 问来的公网地址。offer 经令牌监听上的 `POST /link/rtc` 进来（`docs/LOCAL-API.md`「浏览器的 Link」），会话和手机的一样
-  （令牌绑定浏览器 DTLS 证书的 `dtls-sha256:…`）。`/status.link.rtc = { port, direct? }`。还没有经信令服务的 offer（Mac 有）。
+  （令牌绑定浏览器 DTLS 证书的 `dtls-sha256:…`）。`/status.link.rtc = { port, direct? }`。有信令服务时（`--signal`）offer 也经它的房间来（`docs/RELAY.md`「WebRTC」，和 Mac 一样）：
+  登录了账号的浏览器（Yoyo Control 的网页）凭入场券进来。还没有浏览器的配对链接。
 
 ### 不开远程访问：主人模式
 

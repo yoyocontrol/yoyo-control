@@ -42,6 +42,9 @@ enum Router {
         case ("POST", "/remote/devices/remove"): try remoteRemove(req, conn)
         case ("POST", "/remote/disconnect"): try remoteDisconnect(req, conn)
         case ("POST", "/remote/account/leave"): try remoteAccountLeave(req, conn)
+        case ("POST", "/remote/account/join"): try remoteAccountJoin(req, conn)
+        case ("POST", "/remote/account/confirm"): try remoteAccountConfirm(req, conn)
+        case ("POST", "/remote/account/cancel"): try remoteAccountCancel(req, conn)
         case ("GET", "/account"): try account(req, conn)
         case ("POST", "/account/join"): try accountJoin(req, conn)
         case ("POST", "/account/leave"): try accountLeave(req, conn)
@@ -60,6 +63,7 @@ enum Router {
             throw HTTPError(405, "method \(req.method) not allowed on \(req.path)")
         case (_, "/control"), (_, "/remote"), (_, "/remote/pairing"), (_, "/remote/pairing/stop"), (_, "/remote/enabled"),
              (_, "/remote/direct"), (_, "/remote/terminal"), (_, "/remote/terminal/end"), (_, "/remote/devices/remove"), (_, "/remote/disconnect"), (_, "/remote/account/leave"),
+             (_, "/remote/account/join"), (_, "/remote/account/confirm"), (_, "/remote/account/cancel"),
              (_, "/account"), (_, "/account/join"), (_, "/account/leave"):
             throw HTTPError(405, "method \(req.method) not allowed on \(req.path)")
         case (_, "/status"), (_, "/frame"), (_, "/stream"), (_, "/input"), (_, "/permissions/request"),

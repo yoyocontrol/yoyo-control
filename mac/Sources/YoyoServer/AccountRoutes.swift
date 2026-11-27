@@ -43,6 +43,30 @@ extension Router {
         conn.json(200, access.membership?.json ?? [:])
     }
 
+    /// `POST /remote/account/join { server }` (the menu's): a join code for this Mac → `GET /remote`'s answer (its
+    /// `account.pending`: the code, its QR text, then who approved). `POST /remote/account/confirm`: its person agrees
+    /// to who approved; `POST /remote/account/cancel`: gives the code up.
+    static func remoteAccountJoin(_ req: HTTPRequest, _ conn: Connection) throws {
+        guard req.remote == nil, let access = RemoteAccess.current else { throw HTTPError(404, "no such endpoint \(req.path)") }
+        let body = try jsonBody(req)
+        guard let server = body["server"] as? String else { throw HTTPError(400, "body must be { server }") }
+        try waitFor { try await access.startJoin(server: server) }
+        conn.json(200, access.json)
+    }
+
+    static func remoteAccountConfirm(_ req: HTTPRequest, _ conn: Connection) throws {
+        guard req.remote == nil, let access = RemoteAccess.current else { throw HTTPError(404, "no such endpoint \(req.path)") }
+        try waitFor { try await access.confirmJoin() }
+        log("remote: joined the account its person confirmed")
+        conn.json(200, access.json)
+    }
+
+    static func remoteAccountCancel(_ req: HTTPRequest, _ conn: Connection) throws {
+        guard req.remote == nil, let access = RemoteAccess.current else { throw HTTPError(404, "no such endpoint \(req.path)") }
+        try waitFor { await access.cancelJoin() }
+        conn.json(200, access.json)
+    }
+
     /// `POST /remote/account/leave` (the menu's) → `GET /remote`'s answer.
     static func remoteAccountLeave(_ req: HTTPRequest, _ conn: Connection) throws {
         guard req.remote == nil, let access = RemoteAccess.current else { throw HTTPError(404, "no such endpoint \(req.path)") }

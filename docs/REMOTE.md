@@ -116,7 +116,8 @@ Mac 菜单里「已配对的设备」可以逐个移除：令牌立刻失效，*
 - 没有菜单。`welcome.server` 多 `platform: "linux"`，`/status` 也说 `platform: "linux"`：iPhone 的列表按它显示平台。
 - 管理接口在 `<home>/admin.sock`（0600）上（同下表，没有 `/remote/enabled`：开关就是 `--remote`），命令行 `pair` / `devices` / `remove` /
   `disconnect` / `status` 经它说话。令牌监听（`--token-file`）的客户端就是这里的「本机 socket 的使用方」：手机拿着控制权时它们的 `/input` 409。
-- 浏览器的 offer 只经令牌监听的 `POST /link/rtc`（宿主转），还没有经信令服务的。
+- 浏览器的 offer 经信令服务的房间来（`{"type":"rtc"}`，和 Mac 一样，`@yoyocontrol/remote` 的 `SignalClient.rtcAnswerer`），
+  也可以经令牌监听的 `POST /link/rtc`（宿主转）。浏览器的配对链接（`pairing.webUrl`）还没有：浏览器经账号进来。
 - Windows（`windows/`，同一个服务）：`platform: "windows"`；管理接口是命名管道 `\\.\pipe\yoyo-remote-<状态目录的哈希>`（Windows 没有 socket 文件）；
   配对在托盘图标的 Pair iPhone…（浏览器里的二维码）或 `yoyo pair`（终端二维码，自带编码器）；端口映射的网关从 `route print` 读。
 - 在容器里（`linux/demo`）：`--advertise` 给出宿主的地址和发布的端口；路由器的 SSDP 回答从别的端口回来、过不了容器的 NAT，所以
@@ -137,6 +138,7 @@ Mac 菜单里「已配对的设备」可以逐个移除：令牌立刻失效，*
 | `POST /remote/devices/remove { id }` | 移除设备（404：没这台） |
 | `POST /remote/disconnect` | 放开控制权（设备仍然配对） |
 | `POST /remote/account/leave` | 退出账号（`ACCOUNT.md`；配对不受影响，凭账号进来的设备不再认），回答同 `GET /remote` |
+| `POST /remote/account/join { server }` | 向账号服务器要加入码（菜单「加入 Yoyo Control 账号…」）：`GET /remote` 的 `account.pending` 给出码、二维码文字、状态和谁同意的；`POST /remote/account/confirm` 坐在 Mac 前的人确认（加入），`POST /remote/account/cancel` 放弃 |
 
 `GET /remote` 还有 `account: { account: { id, name, server, joinedAt, disabled } | null, error? }`，`devices` 里凭账号进来的那些多一个
 `account: { acc, dev, tat, sx }`。手机经 Link 另有三个账号路由：`GET /account`（同上的 `account`），和只给**在这台电脑上配对过的**手机的

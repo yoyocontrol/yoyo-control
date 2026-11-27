@@ -25,6 +25,8 @@ export declare const INFO_MAX = 2048;
 /** After an approval the computer has this long to confirm it on its own screen. */
 export declare const JOIN_CONFIRM_MS: number;
 export declare const POLL_INTERVAL_S = 2;
+/** A sign-in by QR code: the code is good this long, once. */
+export declare const QR_SIGNIN_TTL_MS = 150000;
 export declare const BODY_MAX: number;
 /** RFC 8628's alphabet: 20 consonants (no vowels: no words; no 0/O, 1/I). 8 of them = 34.6 bits. */
 export declare const CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
@@ -45,6 +47,14 @@ export declare const LIMITS: {
     codeFailuresPerSession: number;
     codeFailuresPerAddress: number;
     codeFailuresPerAccountHour: number;
+    /** Sign-ins by QR code started per address: 6 at once, then 6 a minute; at most 5 open per address, 2000 in all. */
+    qrBurst: number;
+    qrEveryMs: number;
+    qrOpenPerAddress: number;
+    qrOpenMax: number;
+    /** Their polls per address: 30 at once, then one a second (several waiting behind one address). */
+    qrPollBurst: number;
+    qrPollEveryMs: number;
     /** Tickets per device: 30 at once, then 30 a minute. */
     ticketBurst: number;
     ticketEveryMs: number;
@@ -113,9 +123,13 @@ export declare class AccountService {
     private readonly callbacks;
     private readonly exchanges;
     private readonly enrolls;
+    private readonly qrStarts;
+    private readonly qrPolls;
     private readonly tickets;
     private readonly computerReqs;
     private readonly badTokens;
+    /** Wrong passwords per email: 10 in 15 minutes, then that email waits. */
+    private readonly passwordFails;
     private readonly codeFailSession;
     private readonly codeFailAddress;
     private readonly codeFailAccount;
@@ -158,6 +172,8 @@ export declare class AccountService {
             redirects: string[];
             oidc: boolean;
             apple: boolean;
+            password: boolean;
+            qr: boolean;
         };
         ticketTtl: number;
         sessionMaxAgeDays: number;
@@ -169,6 +185,8 @@ export declare class AccountService {
     /** A new session for the device a sign-in named (`device`: `{ name, platform, key }`, each optional): the account's
      *  device with that key, else a new one. What /v1/token and /v1/auth/apple answer. */
     private deviceSession;
+    /** How an account signs in, as shown: "Email", the OpenID provider's name, "Apple", or the issuer's host. */
+    private idpNameOf;
     /**
      * POST /v1/auth/apple `{ identityToken, nonce, name?, device }`: an app's native Sign in with Apple. The token is
      * checked here (Apple's key, one of the apps' bundle ids, not expired, SHA-256 of `nonce`); the account is Apple's
@@ -176,6 +194,36 @@ export declare class AccountService {
      * from Apple at the first sign-in (Apple says it only then), the shown name; else the email, if any.
      */
     private appleSignIn;
+    /** The accounts of email and password: their `iss` (the `sub` is random, the email is in `password_logins`). */
+    private get passwordIss();
+    /** A request from a hosted web client's page (its origin is one of ACCOUNT_WEB_REDIRECTS'): its session is the
+     *  key-bound one. */
+    private fromWebPage;
+    private emailOf;
+    /** A web page's request must name its device key (checked before anything is made or used up). */
+    private needKey;
+    private passwordOf;
+    /**
+     * Mails a code for `purpose` (a new one each time; at most one a minute and `CODE_SENDS_PER_HOUR` an hour per
+     * email). `pending`: what the code finishes (a sign-up's password hash). `existing`: a sign-up for an email that
+     * has its login already — the mail says so instead (the answer is the same: nobody learns whose email has an account).
+     */
+    private mailCode;
+    /** The code given for `email`'s `purpose`: right (the row, still there), or 400 (`invalid_code`, `code_expired`). A
+     *  wrong one counts; the fifth wrong one ends it. */
+    private checkCode;
+    /** POST /v1/auth/password/register `{ email, password, locale? }`: a code mailed (always `{ sent: true }`). */
+    private passwordRegister;
+    /** POST /v1/auth/password/verify `{ email, code, name?, device }`: the account made, and this device's session. */
+    private passwordVerify;
+    /** POST /v1/auth/password `{ email, password, device }`: this device's session. Wrong: 401 `invalid_credentials`
+     *  (one answer for no such email and a wrong password); ten wrong for one email in 15 minutes: 429. */
+    private passwordSignIn;
+    /** POST /v1/auth/password/reset `{ email, locale? }`: a code mailed when the email has a login (always `{ sent: true }`). */
+    private passwordReset;
+    /** POST /v1/auth/password/reset/confirm `{ email, code, password, device }`: the new password; the account's other
+     *  sessions end; this device's session. */
+    private passwordResetConfirm;
     /** The device session of a request's bearer token (an app's), or 401 / 429. */
     private bearer;
     /** A hosted web client's request: signed, just now, with the key its session was made for. */
@@ -213,6 +261,30 @@ export declare class AccountService {
     private removeComputer;
     private ticket;
     private removeDevice;
+    /**
+     * POST /v1/auth/qr `{ device: { name, platform?, key } }`: a new device (a browser, a desktop client) asks to be
+     * signed in by one that is. It gets a code to show (as a QR code and as text: what the signed-in device looks up and
+     * approves) and `request`, a secret only it holds, to poll with. Its session will be bound to `device.key` (raw
+     * Ed25519, base64url; each request signed, `<ns>-proof`), so the secret alone is worth nothing to anyone without the
+     * key. 150 seconds, once.
+     */
+    private qrStart;
+    /** The open QR sign-in of a code looked up or approved on a signed-in device: wrong codes count like a computer's
+     *  (the session, the address, the account); 404 for a wrong or used one, 429 once over. */
+    private qrTarget;
+    /** GET /v1/auth/qr/lookup?code=: what asks to be signed in, for the person to check before approving. */
+    private qrLookup;
+    /** POST /v1/auth/qr/approve `{ code }`: the new device signs in to this account (at its next poll). The first
+     *  approval wins. */
+    private qrApprove;
+    /** POST /v1/auth/qr/decline `{ code }`: refused; the new device's poll says `access_denied`. */
+    private qrDecline;
+    /**
+     * POST /v1/auth/qr/poll `{ request }`: the new device's wait, as RFC 8628's — 400 `authorization_pending` (ask again
+     * in `interval` s), `slow_down`, `access_denied` (declined), `expired_token`; 200 its session (once: the code is
+     * used up), key-bound like a web page's.
+     */
+    private qrPoll;
     private enroll;
     /** The open enrollment of a code typed or scanned on a phone, counting wrong ones against the session, the address
      *  and the account; 404 for a wrong code, 429 once over. */

@@ -1,4 +1,5 @@
 import { type KeyObject } from "node:crypto";
+import type { Mail, Mailer } from "../mail.js";
 import { type AccountConfig } from "../config.js";
 import { KeyRing } from "../keys.js";
 import { OidcClient } from "../oidc.js";
@@ -39,6 +40,15 @@ export interface Harness {
 }
 /** `apple`: a stand-in for Apple (identity tokens, StoreKit) — give ACCOUNT_APPLE_AUDIENCES in `env` too;
  *  `appleFetch`: Apple's token endpoints, for revoking. `oidc: false`: no IdP (Apple only). */
+/** A mailer that keeps what it was given (`password`: email and password sign-in on, its mails here). */
+export declare class TestMailer implements Mailer {
+    readonly sent: Mail[];
+    /** The next sends fail (the provider refused). */
+    failing: boolean;
+    send(mail: Mail): Promise<void>;
+    /** The code in the latest mail to `to` (null: none, or a mail without one). */
+    codeFor(to: string): string | null;
+}
 export declare function harness(o?: {
     env?: Record<string, string>;
     limits?: Partial<Limits>;
@@ -47,6 +57,7 @@ export declare function harness(o?: {
     apple?: TestApple;
     appleFetch?: typeof fetch;
     oidc?: boolean;
+    password?: TestMailer;
 }): Promise<Harness>;
 export declare function stopAll(): Promise<void>;
 export declare const b64url: (b: Buffer) => string;

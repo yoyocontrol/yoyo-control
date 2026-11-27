@@ -1,6 +1,6 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { type RevocationState, type Wire } from "@yoyocontrol/account";
-export declare const SCHEMA_VERSION = 4;
+export declare const SCHEMA_VERSION = 6;
 /** How long a device's revocation stays on the list (seconds): past the longest a computer's token of it can live. */
 export declare const REVOCATION_KEEP_S: number;
 export declare const sha256: (s: string) => string;
@@ -123,6 +123,46 @@ export interface OutboxRow {
     seq: number;
     payload: string;
 }
+/** An email's password: the account it signs in to, its scrypt hash. */
+export interface PasswordLogin {
+    email: string;
+    account_id: string;
+    hash: string;
+    created_at: number;
+    updated_at: number;
+}
+/** A sign-in by QR code (docs/ACCOUNT-LIB.md「扫码登录」): a new device asked with its key; a signed-in one approves
+ *  the code it shows; the new device polls with its secret (kept only as SHA-256) and gets its session, once. */
+export interface QrSignin {
+    id: string;
+    request_hash: string;
+    user_code: string;
+    device_name: string;
+    platform: string;
+    /** The new device's raw Ed25519 public key (base64url): its session is bound to it. */
+    key: string;
+    ip: string;
+    created_at: number;
+    expires_at: number;
+    last_poll_at: number | null;
+    status: "pending" | "approved" | "declined" | "done";
+    approved_account: string | null;
+    approved_device: string | null;
+    approved_at: number | null;
+}
+/** A one-time code mailed for a sign-up (`pending`: the password's hash, set once the code is given) or a reset. */
+export interface EmailCode {
+    email: string;
+    purpose: string;
+    code_hash: string;
+    pending: string | null;
+    expires_at: number;
+    attempts: number;
+    sent_at: number;
+    /** The hour `sends` counts in (its start). */
+    window_at: number;
+    sends: number;
+}
 export declare class Store {
     private readonly wire;
     readonly db: DatabaseSync;
@@ -143,6 +183,10 @@ export declare class Store {
         account_id: string;
         removed_at: number;
     } | undefined;
+    /** An email's password login (docs/ACCOUNT-LIB.md「邮箱和密码」). */
+    passwordLogin(email: string): PasswordLogin | undefined;
+    /** The code on its way for `email` and `purpose`. */
+    emailCode(email: string, purpose: string): EmailCode | undefined;
     /** The account of `iss` + `sub` (made now when there is none), or why there is none to be had. */
     signInAccount(iss: string, sub: string, name: string | null, now: number): {
         account: Account;
@@ -196,6 +240,10 @@ export declare class Store {
     /** The addresses the open join codes were asked from (one entry per code). */
     openEnrollmentAddresses(now: number): string[];
     countEnrollments(now: number, ip?: string): number;
+    qrSigninOfCode(userCode: string): QrSignin | undefined;
+    qrSigninOfRequest(request: string): QrSignin | undefined;
+    /** The addresses the open QR sign-ins were asked from (one entry per sign-in). */
+    openQrSigninAddresses(now: number): string[];
     /** A new join key of `account` (admin.ts join-key): a computer that has it joins that account without anyone's
      *  approval, `uses` times at most, until `expiresAt`. Only its SHA-256 is kept. */
     createJoinKey(account: string, uses: number, expiresAt: number, now: number): string;

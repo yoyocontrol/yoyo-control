@@ -26,6 +26,22 @@ export function linkKey() {
 const running = [];
 /** `apple`: a stand-in for Apple (identity tokens, StoreKit) — give ACCOUNT_APPLE_AUDIENCES in `env` too;
  *  `appleFetch`: Apple's token endpoints, for revoking. `oidc: false`: no IdP (Apple only). */
+/** A mailer that keeps what it was given (`password`: email and password sign-in on, its mails here). */
+export class TestMailer {
+    sent = [];
+    /** The next sends fail (the provider refused). */
+    failing = false;
+    async send(mail) {
+        if (this.failing)
+            throw new Error("refused");
+        this.sent.push(mail);
+    }
+    /** The code in the latest mail to `to` (null: none, or a mail without one). */
+    codeFor(to) {
+        const m = [...this.sent].reverse().find((x) => x.to === to);
+        return m ? (/\b(\d{6})\b/.exec(m.text)?.[1] ?? null) : null;
+    }
+}
 export async function harness(o = {}) {
     const idp = await new TestIdp().start();
     o.idp?.(idp);
@@ -36,8 +52,11 @@ export async function harness(o = {}) {
         ...(o.oidc === false ? {} : { ACCOUNT_OIDC_ISSUER: idp.issuer, ACCOUNT_OIDC_CLIENT_ID: idp.clientId, ACCOUNT_OIDC_CLIENT_SECRET: idp.clientSecret }),
         ACCOUNT_PUBLIC_URL: url,
         ACCOUNT_APP_REDIRECTS: "example://account",
+        ...(o.password && !o.env?.ACCOUNT_ALLOW ? { ACCOUNT_OPEN: "1" } : {}),
         ...o.env,
     });
+    if (o.password)
+        cfg.password = { mailer: o.password };
     const store = new Store(o.dbFile ?? ":memory:", cfg.wire);
     const ring = KeyRing.load(null, cfg.wire);
     const logs = [];

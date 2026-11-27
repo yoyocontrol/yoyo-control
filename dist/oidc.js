@@ -10,7 +10,11 @@
 //   and prompt=consent (it hands one out only on a consent). Others: the `offline_access` scope when the IdP lists it
 //   (Keycloak's plain refresh tokens die with its 30-minute-idle browser session).
 // - The RFC 9207 `iss` on the callback is checked when the IdP says it sends one.
+// - Apple (a web page's Sign in with Apple): only `openid` is asked for (Apple takes no `profile`, and its `name` /
+//   `email` scopes need a form_post callback), and the client secret is a JWT signed here for each request
+//   (`appleSecret`) when none was given.
 import { createRemoteJWKSet, customFetch, jwtVerify } from "jose";
+import { APPLE_ISSUER, clientSecret as appleClientSecret } from "./apple.js";
 import { GOOGLE_ISSUERS, isGoogle, normalizeIssuer } from "./config.js";
 export class IdpError extends Error {
     code;
@@ -63,6 +67,8 @@ export class OidcClient {
     }
     /** The scopes asked for: `openid profile`, `email` for an @domain allow-list, `offline_access` for the re-check. */
     scopes(d) {
+        if (this.cfg.issuer === APPLE_ISSUER)
+            return "openid";
         const s = ["openid", "profile"];
         if (this.cfg.allow?.domains.length)
             s.push("email");
@@ -105,14 +111,15 @@ export class OidcClient {
         const body = new URLSearchParams(params);
         const headers = { "content-type": "application/x-www-form-urlencoded", accept: "application/json" };
         const methods = d.token_endpoint_auth_methods_supported ?? ["client_secret_basic"];
+        const secret = this.cfg.appleSecret ? appleClientSecret(this.cfg.appleSecret) : this.cfg.clientSecret;
         if (methods.includes("client_secret_basic")) {
             // RFC 6749 2.3.1: each form-urlencoded, then joined
             const enc = (s) => encodeURIComponent(s).replace(/%20/g, "+");
-            headers.authorization = `Basic ${Buffer.from(`${enc(this.cfg.clientId)}:${enc(this.cfg.clientSecret)}`).toString("base64")}`;
+            headers.authorization = `Basic ${Buffer.from(`${enc(this.cfg.clientId)}:${enc(secret)}`).toString("base64")}`;
         }
         else {
             body.set("client_id", this.cfg.clientId);
-            body.set("client_secret", this.cfg.clientSecret);
+            body.set("client_secret", secret);
         }
         const r = await this.fetch(d.token_endpoint, { method: "POST", headers, body, signal: AbortSignal.timeout(TIMEOUT_MS), redirect: "error" });
         const text = await r.text();

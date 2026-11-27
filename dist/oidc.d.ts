@@ -65,7 +65,7 @@ export declare class OidcClient implements Idp {
     private readonly redirectUri;
     private readonly fetch;
     /** `fetch`: tests stand in for the network with it (e.g. a mock IdP answering as https://accounts.google.com). */
-    constructor(cfg: Pick<AccountConfig, "issuer" | "clientId" | "clientSecret" | "publicUrl" | "recheck" | "allow">, o?: {
+    constructor(cfg: Pick<AccountConfig, "issuer" | "clientId" | "clientSecret" | "publicUrl" | "recheck" | "allow"> & Partial<Pick<AccountConfig, "appleSecret">>, o?: {
         fetch?: typeof fetch;
     });
     /** The discovery document, fetched on first use and again a day later (and after a failure). */

@@ -5,6 +5,7 @@
 // A program that embeds the server builds an AccountConfig itself instead (its `services` are any it lends).
 import { Wire } from "@yoyocontrol/account";
 import { APPLE_ISSUER } from "./apple.js";
+import { sesMailer } from "./mail.js";
 export const GOOGLE_ISSUER = "https://accounts.google.com";
 /** The two ways Google writes `iss` in an id_token (its OpenID docs: both occur). */
 export const GOOGLE_ISSUERS = [GOOGLE_ISSUER, "accounts.google.com"];
@@ -124,6 +125,24 @@ function appleFromEnv(env, list, keyFromFile) {
         throw new ConfigError("ACCOUNT_APPLE_KEY is the .p8 (PEM, or its base64)");
     return { audiences, client: { teamId, keyId, clientId: audiences[0], privateKey: key } };
 }
+function passwordFromEnv(env, flag) {
+    if (!flag("ACCOUNT_PASSWORD"))
+        return null;
+    const from = env.ACCOUNT_MAIL_FROM?.trim() ?? "";
+    const region = env.ACCOUNT_SES_REGION?.trim() ?? "";
+    const accessKeyId = env.ACCOUNT_SES_ACCESS_KEY_ID?.trim() ?? "";
+    const secretAccessKey = env.ACCOUNT_SES_SECRET_ACCESS_KEY?.trim() ?? "";
+    if (!from || !/@/.test(from))
+        throw new ConfigError("ACCOUNT_PASSWORD=1 mails codes: ACCOUNT_MAIL_FROM (\"Name <no-reply@example.com>\") is needed");
+    if (!region || !accessKeyId || !secretAccessKey)
+        throw new ConfigError("ACCOUNT_PASSWORD=1 mails through Amazon SES: ACCOUNT_SES_REGION, ACCOUNT_SES_ACCESS_KEY_ID and ACCOUNT_SES_SECRET_ACCESS_KEY");
+    try {
+        return { mailer: sesMailer({ region, accessKeyId, secretAccessKey, from }) };
+    }
+    catch (e) {
+        throw new ConfigError(e.message);
+    }
+}
 const RELAY_TOKEN_RE = /^[A-Za-z0-9_-]{16,128}$/;
 /** `relayTokenFile` / `signalKeyFile`: read ACCOUNT_RELAY_TOKEN_FILE / ACCOUNT_SIGNAL_KEY_FILE as they are now (main.ts:
  *  again when the file changed). */
@@ -141,8 +160,14 @@ export function configFromEnv(env, secretFromFile, relayTokenFile, signalKeyFile
     const issuer = oidc ? normalizeIssuer(httpsUrl("ACCOUNT_OIDC_ISSUER", need("ACCOUNT_OIDC_ISSUER"), { path: true })) : APPLE_ISSUER;
     const clientId = oidc ? need("ACCOUNT_OIDC_CLIENT_ID") : "";
     const clientSecret = oidc ? ((env.ACCOUNT_OIDC_CLIENT_SECRET?.trim() || secretFromFile?.trim()) ?? "") : "";
-    if (oidc && !clientSecret)
-        throw new ConfigError("ACCOUNT_OIDC_CLIENT_SECRET (or ACCOUNT_OIDC_CLIENT_SECRET_FILE) is needed: the account server is a confidential client");
+    // Apple as the OpenID provider (a web page's Sign in with Apple): its client secret is a short JWT signed with the
+    // Sign in with Apple key, made for each request — none to give
+    const appleSecret = oidc && issuer === APPLE_ISSUER && !clientSecret && apple?.client ? { ...apple.client, clientId } : null;
+    if (oidc && !clientSecret && !appleSecret) {
+        throw new ConfigError(issuer === APPLE_ISSUER
+            ? "Sign in with Apple on the web signs its client secret with the Sign in with Apple key: give ACCOUNT_APPLE_TEAM_ID, ACCOUNT_APPLE_KEY_ID and ACCOUNT_APPLE_KEY (with ACCOUNT_APPLE_AUDIENCES), or ACCOUNT_OIDC_CLIENT_SECRET"
+            : "ACCOUNT_OIDC_CLIENT_SECRET (or ACCOUNT_OIDC_CLIENT_SECRET_FILE) is needed: the account server is a confidential client");
+    }
     const publicUrl = httpsUrl("ACCOUNT_PUBLIC_URL", need("ACCOUNT_PUBLIC_URL"));
     const appRedirects = list("ACCOUNT_APP_REDIRECTS");
     for (const r of appRedirects) {
@@ -248,6 +273,7 @@ export function configFromEnv(env, secretFromFile, relayTokenFile, signalKeyFile
         oidc,
         clientId,
         clientSecret,
+        appleSecret,
         publicUrl,
         allow: parseAllow(env.ACCOUNT_ALLOW),
         open: flag("ACCOUNT_OPEN"),
@@ -255,7 +281,7 @@ export function configFromEnv(env, secretFromFile, relayTokenFile, signalKeyFile
         appRedirects,
         webRedirects,
         appleAppIds,
-        idpName: env.ACCOUNT_IDP_NAME?.trim() || (oidc ? new URL(issuer).host : "Apple"),
+        idpName: env.ACCOUNT_IDP_NAME?.trim() || (oidc && issuer !== APPLE_ISSUER ? new URL(issuer).host : "Apple"),
         serverName: env.ACCOUNT_SERVER_NAME?.trim() || new URL(publicUrl).host,
         dataDir: env.ACCOUNT_DATA_DIR?.trim() || "/data",
         host: env.ACCOUNT_HOST?.trim() || "127.0.0.1",
@@ -265,9 +291,13 @@ export function configFromEnv(env, secretFromFile, relayTokenFile, signalKeyFile
         services,
         apple,
         appstore: appstoreBundle ? { bundleId: appstoreBundle, products: appstoreProducts } : null,
+        password: passwordFromEnv(env, flag),
     };
     const open = opennessProblem(cfg);
     if (open)
         throw new ConfigError(open);
+    // (anyone with an email address may sign up: on purpose, or for the allow-list's domains only)
+    if (cfg.password && !cfg.open && !cfg.allow?.domains.length)
+        throw new ConfigError("email and password let anyone with an email sign up: set ACCOUNT_ALLOW (@domains) or, on purpose, ACCOUNT_OPEN=1");
     return cfg;
 }

@@ -4,12 +4,13 @@
 // front of it, on loopback. Its data is in a folder you name (kept between runs) or a fresh temporary one.
 //
 //   yoyo-account-dev [--port 4490] [--data <dir>] [--join-keys 2] [--web <return URL>] [--namespace yoyo]
-//                    [--app-redirect myapp://account]
+//                    [--app-redirect myapp://account] [--password]
 //
 // It prints the server's address and, with --join-keys, that many join keys for Alice's account (one line each:
 // `join key: <ns>_jk_…`) — for a computer under test to join with. --web: a hosted web client's return address it
 // takes (ACCOUNT_WEB_REDIRECTS; http on loopback, e.g. http://127.0.0.1:18800/account/return). --namespace: the wire
 // names' (ACCOUNT_NAMESPACE). --app-redirect: where an app may be sent back (ACCOUNT_APP_REDIRECTS, comma-separated).
+// --password: email and password on, the mails (their codes) printed here instead of sent.
 // Never reachable from another machine; never use it for anything real.
 import { mkdtempSync } from "node:fs";
 import { createServer } from "node:http";
@@ -42,7 +43,10 @@ void (async () => {
         ...(arg("web") ? { ACCOUNT_WEB_REDIRECTS: arg("web") } : {}),
         ...(arg("namespace") ? { ACCOUNT_NAMESPACE: arg("namespace") } : {}),
         ...(arg("app-redirect") ? { ACCOUNT_APP_REDIRECTS: arg("app-redirect") } : {}),
+        ...(process.argv.includes("--password") ? { ACCOUNT_OPEN: "1" } : {}),
     });
+    if (process.argv.includes("--password"))
+        cfg.password = { mailer: { send: async (m) => console.log(`mail to ${m.to}: ${m.subject}`) } };
     const store = new Store(join(dir, "account.db"), cfg.wire);
     const ring = KeyRing.load(join(dir, "keys.json"), cfg.wire);
     const svc = new AccountService({ cfg, store, idp: new OidcClient(cfg), ring });

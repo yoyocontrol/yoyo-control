@@ -1,5 +1,6 @@
 import { Wire } from "@yoyocontrol/account";
 import { type AppleClient } from "./apple.js";
+import { type Mailer } from "./mail.js";
 /**
  * One thing this server lends the computers of its accounts (GET /v1/computer/services), under `name` there. `fixed`:
  * the same fields for every computer (`value()` now: an origin `url` and short strings — a relay's token, a key; null
@@ -54,6 +55,10 @@ export interface AccountConfig {
     oidc: boolean;
     clientId: string;
     clientSecret: string;
+    /** The OpenID Connect provider is Apple (a web page's Sign in with Apple, `clientId` its Services ID) and no secret
+     *  was given: the client secret is signed here with the Sign in with Apple key (ACCOUNT_APPLE_TEAM_ID / _KEY_ID /
+     *  _KEY), each time. */
+    appleSecret: AppleClient | null;
     /** The account server's public origin, https://account.example.com (no path). */
     publicUrl: string;
     allow: Allow | null;
@@ -89,6 +94,14 @@ export interface AccountConfig {
     apple: AppleSignIn | null;
     /** ACCOUNT_APPSTORE_BUNDLE_ID + ACCOUNT_APPSTORE_PRODUCTS: null = off. */
     appstore: AppStoreEntitlements | null;
+    /** Email and password (`POST /v1/auth/password…`, docs/ACCOUNT-LIB.md「邮箱和密码」): who mails the codes. null or
+     *  absent = off. From the environment: ACCOUNT_PASSWORD=1 with ACCOUNT_MAIL_FROM and Amazon SES's
+     *  ACCOUNT_SES_REGION + ACCOUNT_SES_ACCESS_KEY_ID + ACCOUNT_SES_SECRET_ACCESS_KEY. */
+    password?: PasswordSignIn | null;
+}
+/** Email and password sign-in: the codes of a sign-up and a reset go out through `mailer`. */
+export interface PasswordSignIn {
+    mailer: Mailer;
 }
 export declare class ConfigError extends Error {
 }

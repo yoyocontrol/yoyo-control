@@ -4,6 +4,7 @@
 // environment is its configuration) or build one: Store + KeyRing + OidcClient + AccountService.
 export * from "./config.js";
 export * from "./keys.js";
+export * from "./mail.js";
 export * from "./oidc.js";
 export * from "./recheck.js";
 export * from "./service.js";

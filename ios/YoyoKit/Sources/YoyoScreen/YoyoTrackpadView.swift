@@ -112,6 +112,23 @@ public final class YoyoTrackpadView: UIView, UIGestureRecognizerDelegate {
     /// Two fingers are scrolling now (their axis, once decided, is `twoFingerScroll.axis`).
     private var scrolling = false
 
+    /// The picture is on the screen (laid out, in a window, not hidden): the trackpad moves at its scale and draws on it.
+    /// Else the panel stands for the screen.
+    var showsPicture: Bool {
+        guard picture.window != nil, !picture.isHidden, picture.alpha > 0 else { return false }
+        let shown = picture.shownPicture
+        return shown.width > 0 && shown.height > 0
+    }
+
+    /// What the finger's moves are measured against: the picture as it shows (zoomed: at its scale), or, with none on
+    /// the screen, the display fitted into the panel.
+    var movePicture: CGSize {
+        if showsPicture { return picture.shownPicture }
+        let display = picture.trackpadDisplay
+        guard display.width > 0, display.height > 0 else { return bounds.size }
+        return YoyoScreenPictureView.fit(area: bounds, aspect: display.width / display.height).size
+    }
+
     /// How far (points) a trackpad finger may go past the panel's edge before it counts as off it.
     static let padSlop: CGFloat = 6
 
@@ -161,6 +178,16 @@ public final class YoyoTrackpadView: UIView, UIGestureRecognizerDelegate {
         sessionChanged()
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    /// A trackpad with no picture to look at: the computer's screen is in front of the user (a projector, a big screen,
+    /// the computer on the desk), and the phone is only what drives it. The panel stands for the screen (the pointer
+    /// moves across the display as a finger moves across the display fitted into the panel). Give the session
+    /// `streamMode = .pointer`: it then streams only what the pointer needs. No loupe, no pointer badge (they are drawn
+    /// on a picture). The session's picture view is this trackpad's own, never shown; with another picture view of the
+    /// session on the screen, use `init(session:picture:)`.
+    public convenience init(session: YoyoScreenSession) {
+        self.init(session: session, picture: YoyoScreenPictureView(session: session))
+    }
 
     private func sessionChanged() {
         controlling = session.isControlling
@@ -306,7 +333,7 @@ public final class YoyoTrackpadView: UIView, UIGestureRecognizerDelegate {
     /// Shows the loupe at the pointer while a finger is down (moves it when it shows already).
     func updateLoupe() {
         let pic = picture.imageView.frame
-        guard controlling, pic.width > 0, pic.height > 0 else { picture.hideLoupe(animated: false); return }
+        guard controlling, showsPicture, pic.width > 0, pic.height > 0 else { picture.hideLoupe(animated: false); return }
         #if DEBUG
         // `-<namespace>Loupe YES` (screenshots): the loupe shows while controlling, fingers or not; `-<namespace>Loupe
         // 0.3,0.2`: with the pointer there
@@ -373,7 +400,7 @@ public final class YoyoTrackpadView: UIView, UIGestureRecognizerDelegate {
         default: break
         }
         #endif
-        guard controlling, b.width > 0, b.height > 0, let kind else { picture.pointerBadge.show(nil); return }
+        guard controlling, showsPicture, b.width > 0, b.height > 0, let kind else { picture.pointerBadge.show(nil); return }
         // a fixed step below and right of where the pointer points (where a Mac puts the badges on its own): not from
         // the drawn shape, which changes under a scroll (arrow, I-beam, hand) and would make the badge jump
         let p = loupePoint
@@ -563,7 +590,7 @@ public final class YoyoTrackpadView: UIView, UIGestureRecognizerDelegate {
     /// the picture as it is drawn now.
     private func movePointer(by step: CGPoint, speed: CGFloat) -> CGPoint {
         let size = picture.trackpadDisplay
-        let gain = ScreenTrackpad.gain(speed: speed, display: size, picture: picture.shownPicture, scale: Preferences.screenTrackpadGain)
+        let gain = ScreenTrackpad.gain(speed: speed, display: size, picture: movePicture, scale: Preferences.screenTrackpadGain)
         let p = ScreenTrackpad.moved(picture.pointer, by: CGVector(dx: step.x, dy: step.y), display: size, gain: gain)
         picture.moveCursor(to: p)
         return p
@@ -733,7 +760,7 @@ public final class YoyoTrackpadView: UIView, UIGestureRecognizerDelegate {
     /// frame by frame, until the fingers leave the band, lift, or the pointer reaches the display's edge.
     private func updateEdgeMove() {
         guard edgeLink == nil, drag.isDragging, fingersDown, let finger = dragFingerLocation,
-              ScreenEdgeMove.velocity(finger: finger, bounds: bounds, pictureWidth: picture.shownPicture.width) != .zero
+              ScreenEdgeMove.velocity(finger: finger, bounds: bounds, pictureWidth: movePicture.width) != .zero
         else { return }
         let link = CADisplayLink(target: self, selector: #selector(edgeTick(_:)))
         link.add(to: .main, forMode: .common)
@@ -752,13 +779,13 @@ public final class YoyoTrackpadView: UIView, UIGestureRecognizerDelegate {
             stopEdgeMove()
             return
         }
-        let v = ScreenEdgeMove.velocity(finger: finger, bounds: bounds, pictureWidth: picture.shownPicture.width)
+        let v = ScreenEdgeMove.velocity(finger: finger, bounds: bounds, pictureWidth: movePicture.width)
         guard v != .zero else { stopEdgeMove(); return }
         // one frame's worth (a stall doesn't make it jump)
         let dt = min(max(link.targetTimestamp - (edgeLast ?? link.timestamp), 0), 1.0 / 30)
         edgeLast = link.targetTimestamp
         let size = picture.trackpadDisplay
-        let factor = ScreenTrackpad.pictureFactor(display: size, picture: picture.shownPicture)
+        let factor = ScreenTrackpad.pictureFactor(display: size, picture: movePicture)
         let p = ScreenTrackpad.moved(picture.pointer, by: CGVector(dx: v.dx * dt, dy: v.dy * dt), display: size, gain: factor)
         // at the display's edge on every axis it pushes: nothing more to do
         guard p != picture.pointer else { stopEdgeMove(); return }
@@ -768,8 +795,8 @@ public final class YoyoTrackpadView: UIView, UIGestureRecognizerDelegate {
     }
 
     @objc private func twoFingerPanned(_ g: UIPanGestureRecognizer) {
-        // at the picture's scale: the content moves with the fingers
-        let size = picture.imageView.bounds.size
+        // at the picture's scale (none shown: the display fitted into the panel): the content moves with the fingers
+        let size = showsPicture ? picture.imageView.bounds.size : movePicture
         let step: ScreenScrollStep?
         switch g.state {
         case .began:

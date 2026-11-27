@@ -96,13 +96,13 @@ enum ScreenClipboardKey: String, Sendable, Equatable, CaseIterable {
 }
 
 /// The bar above the keyboard: sticky modifiers (⌘ ⇧ ⌥ ⌃, lit while armed; they apply to the next key or click),
-/// the keys a phone keyboard lacks (Esc, Tab, arrows), the clipboard moves (Paste on Mac — a long press offers Photos… /
-/// Files… —, Copy from Mac; with their names, hidden on a server without the clipboard), then a button that hides the
-/// keyboard.
+/// the keys a phone keyboard lacks (the host's, `YoyoScreenKeyboard.keys`; by default Esc, Tab, arrows), the clipboard
+/// moves (Paste on Mac — a long press offers Photos… / Files… —, Copy from Mac; with their names, hidden on a server
+/// without the clipboard), then a button that hides the keyboard.
 final class ScreenKeyBar: UIInputView {
     var onModifier: ((ScreenModifier) -> Void)?
-    /// A key name of `POST /screen/input` ("escape", "tab", "left"…).
-    var onKey: ((String) -> Void)?
+    /// One of the keys (`setKeys`).
+    var onKey: ((YoyoScreenKey) -> Void)?
     var onClipboard: ((ScreenClipboardKey) -> Void)?
     /// Paste on Mac's long press: Photos… / Files….
     var onClipboardPick: ((ClipboardPicker.Source) -> Void)?
@@ -117,6 +117,9 @@ final class ScreenKeyBar: UIInputView {
     private var clipboardKeys: [ScreenClipboardKey] = []
     private let scroll = UIScrollView()
     private let stack = UIStackView()
+    /// The keys between the modifiers and the clipboard's (`setKeys`).
+    private let keyStack = UIStackView()
+    private(set) var keys: [YoyoScreenKey] = []
 
     init() {
         super.init(frame: CGRect(x: 0, y: 0, width: 320, height: 52), inputViewStyle: .keyboard)
@@ -146,19 +149,17 @@ final class ScreenKeyBar: UIInputView {
             (.cmd, "⌘", L("Command key")), (.shift, "⇧", L("Shift key")), (.alt, "⌥", L("Option key")), (.ctrl, "⌃", L("Control key")),
         ]
         for (m, glyph, name) in modifiers {
-            let b = key(glyph, name: name, id: "screen.mod.\(m.rawValue)") { [weak self] in self?.onModifier?(m) }
+            let b = Self.key(glyph, name: name, id: "screen.mod.\(m.rawValue)") { [weak self] in self?.onModifier?(m) }
             modifierButtons[m] = b
             stack.addArrangedSubview(b)
         }
         stack.setCustomSpacing(14, after: stack.arrangedSubviews.last!)
-        let keys: [(String, String, String)] = [
-            ("esc", "escape", L("Escape")), ("tab", "tab", L("Tab")),
-            ("←", "left", L("Left arrow")), ("↑", "up", L("Up arrow")), ("↓", "down", L("Down arrow")), ("→", "right", L("Right arrow")),
-        ]
-        for (glyph, name, label) in keys {
-            stack.addArrangedSubview(key(glyph, name: label, id: "screen.key.\(name)") { [weak self] in self?.onKey?(name) })
-        }
-        stack.setCustomSpacing(14, after: stack.arrangedSubviews.last!)
+        keyStack.axis = .horizontal
+        keyStack.spacing = 6
+        keyStack.alignment = .center
+        stack.addArrangedSubview(keyStack)
+        setKeys(YoyoScreenKey.standard)
+        stack.setCustomSpacing(14, after: keyStack)
         for k in ScreenClipboardKey.allCases {
             var c = Self.style(selected: false)
             c.image = UIImage(systemName: k.symbol)
@@ -204,7 +205,7 @@ final class ScreenKeyBar: UIInputView {
         return c
     }
 
-    private func key(_ glyph: String, name: String, id: String, action: @escaping () -> Void) -> UIButton {
+    private static func key(_ glyph: String, name: String, id: String, action: @escaping () -> Void) -> UIButton {
         var c = Self.style(selected: false)
         var title = AttributedString(glyph)
         title.font = UIFont.systemFont(ofSize: glyph.count > 1 ? 15 : 18, weight: .medium)
@@ -216,6 +217,26 @@ final class ScreenKeyBar: UIInputView {
         b.accessibilityLabel = name
         b.accessibilityIdentifier = id
         b.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        return b
+    }
+
+    /// The keys between the modifiers and the clipboard's (none: that part goes).
+    func setKeys(_ keys: [YoyoScreenKey]) {
+        guard keys != self.keys else { return }
+        self.keys = keys
+        for v in keyStack.arrangedSubviews { v.removeFromSuperview() }
+        for k in keys { keyStack.addArrangedSubview(Self.button(for: k) { [weak self] in self?.onKey?(k) }) }
+        keyStack.isHidden = keys.isEmpty
+    }
+
+    /// A key's button, in the bar's style.
+    static func button(for k: YoyoScreenKey, action: @escaping () -> Void) -> UIButton {
+        let b = key(k.title, name: k.label, id: k.identifier, action: action)
+        if let symbol = k.symbol {
+            b.configuration?.attributedTitle = nil
+            b.configuration?.image = UIImage(systemName: symbol)
+            b.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+        }
         return b
     }
 

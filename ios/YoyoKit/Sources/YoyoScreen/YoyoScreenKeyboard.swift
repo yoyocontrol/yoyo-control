@@ -4,8 +4,9 @@ import YoyoCore
 
 /// The system keyboard for typing on a session's computer (`YoyoScreenSession`), any input method (what it composes
 /// stays here; committed text goes), with a bar above it: sticky ⌘ ⇧ ⌥ ⌃ (lit while armed: they apply to the next key
-/// or click), the keys a phone keyboard lacks (Esc, Tab, arrows), the clipboard's moves (Paste on Mac — a long press
-/// offers Photos… / Files… —, Copy from Mac: while the computer has a clipboard), and a button that puts it away.
+/// or click), the keys a phone keyboard lacks (`keys`: Esc, Tab, arrows unless the host picks others), the clipboard's
+/// moves (Paste on Mac — a long press offers Photos… / Files… —, Copy from Mac: while the computer has a clipboard), and
+/// a button that puts it away.
 ///
 /// A small invisible view: add it to the view hierarchy where it should belong (its first responder is its own hidden
 /// text view; the keyboard covers whatever is under it). `show()` brings it up (an input: under `.takeOnInput` it
@@ -18,6 +19,12 @@ public final class YoyoScreenKeyboard: UIView {
     public var isEnabled = true { didSet { if !isEnabled { hide() } } }
     /// It comes up by itself when a click focuses something that takes typing.
     public var showsForFocus = true
+    /// The keys on its bar between the modifiers and the clipboard's (`YoyoScreenKey.standard` by default: Esc, Tab,
+    /// the arrows; empty: none).
+    public var keys: [YoyoScreenKey] {
+        get { keyBar.keys }
+        set { keyBar.setKeys(newValue) }
+    }
     /// It came up (true) / went (false).
     public var onShownChange: ((Bool) -> Void)?
 
@@ -37,7 +44,7 @@ public final class YoyoScreenKeyboard: UIView {
         keyInput.onText = { [weak session] text in session?.type(text) }
         keyInput.onDelete = { [weak session] in session?.pressKey("delete") }
         keyBar.onModifier = { [weak session] m in session?.toggleModifier(m) }
-        keyBar.onKey = { [weak session] name in session?.pressKey(name) }
+        keyBar.onKey = { [weak session] key in session?.press(key) }
         keyBar.onDismiss = { [weak self] in self?.hide() }
         keyBar.onClipboard = { [weak session] k in session?.clipboardKey(k) }
         keyBar.onClipboardPick = { [weak session] source in session?.pickForComputer(source) }

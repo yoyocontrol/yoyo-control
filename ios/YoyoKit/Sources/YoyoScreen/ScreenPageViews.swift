@@ -355,3 +355,82 @@ public struct YoyoScreenPage {
         self.make = make
     }
 }
+
+/// The Screen page's keys in trackpad mode (`YoyoScreenKey`), under the trackpad: one row of glass keys, scrolling
+/// sideways when they don't fit. A key is an input like the key bar's.
+final class ScreenKeyRow: UIView {
+    static let height: CGFloat = 44
+    var onKey: ((YoyoScreenKey) -> Void)?
+    private(set) var keys: [YoyoScreenKey] = []
+    private let scroll = UIScrollView()
+    private let stack = UIStackView()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        accessibilityIdentifier = "screen.keyRow"
+        scroll.showsHorizontalScrollIndicator = false
+        scroll.alwaysBounceHorizontal = false
+        scroll.clipsToBounds = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(scroll)
+        stack.axis = .horizontal
+        stack.spacing = 6
+        stack.alignment = .center
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(stack)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
+            stack.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setKeys(_ keys: [YoyoScreenKey]) {
+        guard keys != self.keys else { return }
+        self.keys = keys
+        for v in stack.arrangedSubviews { v.removeFromSuperview() }
+        for k in keys { stack.addArrangedSubview(button(k)) }
+        setNeedsLayout()
+    }
+
+    /// Centered while they fit; from the leading edge, scrolling, once they don't.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let width = stack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width
+        let inset = max(floor((bounds.width - width) / 2), 0)
+        guard scroll.contentInset.left != inset else { return }
+        scroll.contentInset = UIEdgeInsets(top: 0, left: inset, bottom: 0, right: inset)
+        scroll.contentOffset = CGPoint(x: -inset, y: 0)
+    }
+
+    private func button(_ k: YoyoScreenKey) -> UIButton {
+        var c = UIButton.Configuration.glass()
+        c.cornerStyle = .capsule
+        if let symbol = k.symbol {
+            c.image = UIImage(systemName: symbol)
+            c.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(textStyle: .body)
+        } else {
+            var title = AttributedString(k.title)
+            title.font = UIFont.systemFont(ofSize: k.title.count > 1 ? 15 : 19, weight: .medium)
+            c.attributedTitle = title
+        }
+        c.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10)
+        let b = UIButton(configuration: c, primaryAction: UIAction { [weak self] _ in
+            guard let self else { return }
+            UIImpactFeedbackGenerator(style: .light, view: self).impactOccurred(intensity: 0.6)
+            self.onKey?(k)
+        })
+        b.accessibilityLabel = k.label
+        b.accessibilityIdentifier = k.identifier
+        b.heightAnchor.constraint(equalToConstant: Self.height).isActive = true
+        b.widthAnchor.constraint(greaterThanOrEqualToConstant: 50).isActive = true
+        return b
+    }
+}

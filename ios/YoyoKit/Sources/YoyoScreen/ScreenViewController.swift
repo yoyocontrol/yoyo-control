@@ -17,8 +17,16 @@ public enum YoyoScreen {
     /// The same, with more pages of the same computer (its terminal, its files): each a button in the page's row that
     /// pushes it (made once, kept while the page lives, so it keeps its state), and back is the Screen page.
     @MainActor public static func makePage(backend: any YoyoBackend, host: YoyoHost? = nil, pages: [YoyoScreenPage]) -> UINavigationController {
+        makePage(backend: backend, host: host, pages: pages, keys: YoyoScreenKey.standard)
+    }
+
+    /// The same, with the host's `keys` (`YoyoScreenKey`): on the bar above the keyboard, and in trackpad mode in a row
+    /// under the trackpad (`YoyoScreenKey.standard` otherwise: Esc, Tab, the arrows; slides want Page Up / Page Down,
+    /// F5…).
+    @MainActor public static func makePage(backend: any YoyoBackend, host: YoyoHost? = nil, pages: [YoyoScreenPage] = [],
+                                           keys: [YoyoScreenKey]) -> UINavigationController {
         if let host { YoyoHost.current = host }
-        let nav = ScreenNavigationController(rootViewController: ScreenViewController(backend: backend, pages: pages))
+        let nav = ScreenNavigationController(rootViewController: ScreenViewController(backend: backend, pages: pages, keys: keys))
         nav.isNavigationBarHidden = true
         nav.isToolbarHidden = true
         switch YoyoHost.current.presentation {
@@ -45,7 +53,11 @@ public enum YoyoScreen {
 /// buttons' row), takes the page off (a host transition that honours `YoyoPageSwipeGate`). The full-screen button on
 /// the picture's corner turns the page to landscape with the picture alone, view only like a video player
 /// (`viewOnly`): control is given back, the buttons go (a tap on the picture brings the button back for a moment).
-/// Otherwise a phone keeps the page in portrait. In control: taps click, touch-and-hold right-clicks or (moved on from)
+/// Otherwise a phone keeps the page in portrait. The button on the picture's other corner turns on trackpad mode (kept
+/// in `<namespace>TrackpadOnly`): for when the computer's screen is in front of the user (a projector, a big screen in a
+/// meeting room), the picture goes, the trackpad takes its room, the session streams only the pointer
+/// (`YoyoScreenStreamMode.pointer`: no sound), and the host's keys (`makePage(…keys:)`) sit in a row under the
+/// trackpad; the same corner of the trackpad turns it off. In control: taps click, touch-and-hold right-clicks or (moved on from)
 /// drags, two fingers scroll, the keyboard types in portrait (it comes up by itself when a click focuses something that
 /// takes typing; it covers the page rather than pushing it up, a touch on the trackpad puts it away, and landscape has
 /// none); its «?» shows the gestures (a card that also opens by itself the first time the page takes control). A badge
@@ -95,6 +107,13 @@ final class ScreenViewController: UIViewController {
     /// The hint over the picture ("iPhone clipboard: text — Paste on Mac", "Copied on Mac: … — Copy to iPhone").
     private let hintPill = ScreenHintPill()
     private var hint: ScreenClipboardHint?
+    /// On the picture's bottom leading corner: trackpad mode (no picture); in it, on the trackpad's, back to the picture.
+    private let padModeButton = ScreenGlassButton(symbol: "hand.point.up.left")
+    /// Trackpad mode: the trackpad in the picture's place, the keys under it, only the pointer streamed.
+    private(set) var trackpadOnly = false
+    /// The host's keys (the key bar's, and the row's in trackpad mode).
+    private let keys: [YoyoScreenKey]
+    private let keyRow = ScreenKeyRow()
     /// On the picture's bottom trailing corner: full screen (landscape, view only) and back.
     private let fullScreenButton = ScreenGlassButton(symbol: "arrow.up.left.and.arrow.down.right")
     /// What the picture does, said when it is tapped ("Pinch to zoom", zoomed: "Double-tap to fit").
@@ -127,14 +146,19 @@ final class ScreenViewController: UIViewController {
     private var pageButtons: [ScreenGlassButton] = []
     private var madePages: [Int: UIViewController] = [:]
 
-    init(backend: any YoyoBackend, pages: [YoyoScreenPage] = []) {
+    init(backend: any YoyoBackend, pages: [YoyoScreenPage] = [], keys: [YoyoScreenKey] = YoyoScreenKey.standard) {
         self.pages = pages
+        self.keys = keys
         session = YoyoScreenSession(backend: backend, controlPolicy: .takeOnInput)
         picture = YoyoScreenPictureView(session: session)
         trackpad = YoyoTrackpadView(session: session, picture: picture)
         keyboard = YoyoScreenKeyboard(session: session)
+        keyboard.keys = keys
         super.init(nibName: nil, bundle: nil)
         session.presenter = self
+        // the way the page was left last (before anything streams)
+        trackpadOnly = Preferences.screenTrackpadOnly
+        session.streamMode = trackpadOnly ? .pointer : .picture
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -185,6 +209,16 @@ final class ScreenViewController: UIViewController {
             self.setFullScreen(!self.fullScreen)
         }, for: .primaryActionTriggered)
         updateFullScreenButton()
+        padModeButton.accessibilityIdentifier = "screen.trackpadMode"
+        padModeButton.translatesAutoresizingMaskIntoConstraints = false
+        padModeButton.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.setTrackpadOnly(!self.trackpadOnly)
+        }, for: .primaryActionTriggered)
+        updatePadModeButton()
+        keyRow.setKeys(keys)
+        keyRow.isHidden = true
+        keyRow.onKey = { [weak self] key in self?.session.press(key) }
         zoomHint.isUserInteractionEnabled = false
         zoomHint.accessibilityIdentifier = "screen.zoomHint"
         zoomHint.translatesAutoresizingMaskIntoConstraints = false
@@ -234,6 +268,8 @@ final class ScreenViewController: UIViewController {
         view.addSubview(hintPill)
         view.addSubview(zoomHint)
         view.addSubview(fullScreenButton)
+        view.addSubview(padModeButton)
+        view.addSubview(keyRow)
         view.addSubview(leadingButtons)
         view.addSubview(trailingButtons)
         floatLayer.translatesAutoresizingMaskIntoConstraints = false
@@ -281,6 +317,8 @@ final class ScreenViewController: UIViewController {
             zoomHint.widthAnchor.constraint(lessThanOrEqualTo: pictureGuide.widthAnchor, constant: -120),
             fullScreenButton.trailingAnchor.constraint(equalTo: pictureGuide.trailingAnchor, constant: -8),
             fullScreenButton.bottomAnchor.constraint(equalTo: pictureGuide.bottomAnchor, constant: -8),
+            padModeButton.leadingAnchor.constraint(equalTo: pictureGuide.leadingAnchor, constant: 8),
+            padModeButton.bottomAnchor.constraint(equalTo: pictureGuide.bottomAnchor, constant: -8),
         ])
         // the toast's layer: pinned to the page, the toast inside it over the buttons (`toastClearance`) and the keyboard,
         // as low as those let it
@@ -396,16 +434,28 @@ final class ScreenViewController: UIViewController {
         }
         let badgeHeight = badges.isHidden ? 0 : badges.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).height
         let padTopInset = badgeHeight > 0 ? badgeHeight + 16 : 0
-        let (place, pad) = ScreenPageLayout.layout(area: area, aspect: picture.pictureAspect, padTopInset: padTopInset,
-                                                   pad: !fullScreen)
-        if picture.frame != bounds { picture.frame = bounds }
-        let insets = UIEdgeInsets(top: place.minY, left: place.minX, bottom: bounds.maxY - place.maxY, right: bounds.maxX - place.maxX)
-        if picture.contentInsets != insets { picture.contentInsets = insets }
-        picture.layoutIfNeeded()
+        let pad: CGRect?
+        let shown: CGRect
+        if trackpadOnly, !fullScreen {
+            // trackpad mode: the trackpad in the picture's place, the keys in a row under it
+            let row = ScreenPageLayout.padModeLayout(area: area, keyRow: !keys.isEmpty)
+            pad = row.pad
+            if let r = row.keys, keyRow.frame != r { keyRow.frame = r }
+            shown = row.pad
+        } else {
+            let (place, p) = ScreenPageLayout.layout(area: area, aspect: picture.pictureAspect, padTopInset: padTopInset,
+                                                     pad: !fullScreen)
+            pad = p
+            if picture.frame != bounds { picture.frame = bounds }
+            let insets = UIEdgeInsets(top: place.minY, left: place.minX, bottom: bounds.maxY - place.maxY, right: bounds.maxX - place.maxX)
+            if picture.contentInsets != insets { picture.contentInsets = insets }
+            picture.layoutIfNeeded()
+            shown = picture.convert(picture.pictureFrame, to: view)
+        }
+        keyRow.isHidden = !(trackpadOnly && !fullScreen && !keys.isEmpty && session.canShow)
         if let pad, trackpad.frame != pad { trackpad.frame = pad }
         trackpad.topInset = padTopInset
         trackpad.isHidden = pad == nil || !session.canShow
-        let shown = picture.convert(picture.pictureFrame, to: view)
         let values = [shown.minX, shown.minY, shown.width, shown.height]
         for (c, v) in zip(pictureGuideConstraints, values) where c.constant != v { c.constant = v }
         // the badges at the top of the trackpad (portrait), else at the top of the picture
@@ -481,7 +531,7 @@ final class ScreenViewController: UIViewController {
 
     private func render() {
         let showing = session.canShow
-        picture.isHidden = !showing
+        picture.isHidden = !showing || trackpadOnly
         if !showing { trackpad.isHidden = true } else if trackpad.isHidden, !fullScreen { view.setNeedsLayout() }
         let state = ScreenControlPolicy.pill(controlling: controlling, canControl: session.canControl, role: session.controlModel.role)
         if let state { pill.set(state) }
@@ -489,6 +539,7 @@ final class ScreenViewController: UIViewController {
         badge.isHidden = !showing || state != nil
         badge.set(session.controlModel.isViewer ? .none : status?.controller ?? .none)
         fullScreenButton.isEnabled = showing || fullScreen
+        fullScreenButton.isHidden = trackpadOnly
         // watching (the page opens so): what takes the screen
         if controlling || !session.canTakeControl { trackpad.hint = nil }
         else if status?.controller == .agent { trackpad.hint = L("The agent is using the screen. Touch to take over.") }
@@ -607,6 +658,27 @@ final class ScreenViewController: UIViewController {
         showChrome()
     }
 
+    // MARK: Trackpad mode
+
+    /// Trackpad mode on: the picture goes (the session streams only the pointer, without the sound), the trackpad takes
+    /// its room and the keys sit under it. Off: the picture is back. Kept for the next visit.
+    func setTrackpadOnly(_ on: Bool) {
+        guard on != trackpadOnly, !fullScreen else { return }
+        trackpadOnly = on
+        Preferences.screenTrackpadOnly = on
+        session.streamMode = on ? .pointer : .picture
+        if on { zoomHint.hide() }
+        updatePadModeButton()
+        render()
+        view.setNeedsLayout()
+        UIImpactFeedbackGenerator(style: .light, view: view).impactOccurred()
+    }
+
+    private func updatePadModeButton() {
+        padModeButton.symbol = trackpadOnly ? "display" : "hand.point.up.left"
+        padModeButton.accessibilityLabel = trackpadOnly ? L("Show the picture") : L("Trackpad only")
+    }
+
     private func updateFullScreenButton() {
         fullScreenButton.symbol = fullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right"
         fullScreenButton.accessibilityLabel = fullScreen ? L("Exit full screen") : L("Full screen (view only)")
@@ -619,7 +691,8 @@ final class ScreenViewController: UIViewController {
         keyboardButton.isHidden = fullScreen || landscape == true
         clipboardButton.isHidden = fullScreen || !clipboardShown
         if fullScreen { hideHint() }
-        audioButton.isHidden = fullScreen || !session.hasAudio
+        audioButton.isHidden = fullScreen || trackpadOnly || !session.hasAudio
+        padModeButton.isHidden = !session.canShow || fullScreen
     }
 
     /// The full-screen button (and the badges) show; in full screen they fade after a moment (a tap on the picture
@@ -833,7 +906,9 @@ extension ScreenViewController: YoyoPageSwipeGate {
     public func pageSwipeShouldReceive(_ touch: UITouch) -> Bool {
         let p = touch.location(in: view)
         let onPad = !trackpad.isHidden && trackpad.frame.contains(p)
-        return !fullScreen && !trackpad.isTouched && !onPad && !picture.convert(picture.pictureFrame, to: view).contains(p)
+        let onKeys = !keyRow.isHidden && keyRow.frame.contains(p)
+        let onPicture = !picture.isHidden && picture.convert(picture.pictureFrame, to: view).contains(p)
+        return !fullScreen && !trackpad.isTouched && !onPad && !onKeys && !onPicture
     }
 
     /// One finger swipes the page off (two on the picture pinch).
@@ -850,6 +925,15 @@ enum ScreenPageLayout {
     static let minPictureHeight: CGFloat = 120
     /// Between the picture and the trackpad.
     static let padGap: CGFloat = 12
+
+    /// Trackpad mode: the trackpad fills `area` (inset at the sides as under a picture), the key row (`keyRow`) under it.
+    static func padModeLayout(area: CGRect, keyRow: Bool) -> (pad: CGRect, keys: CGRect?) {
+        let inner = area.insetBy(dx: padGap, dy: 0)
+        guard keyRow else { return (inner, nil) }
+        let rowHeight = ScreenKeyRow.height
+        let pad = CGRect(x: inner.minX, y: inner.minY, width: inner.width, height: max(inner.height - rowHeight - padGap, 0))
+        return (pad, CGRect(x: inner.minX, y: pad.maxY + padGap, width: inner.width, height: rowHeight))
+    }
 
     /// The picture's frame and the trackpad's (nil: none) for a picture of `aspect` (width / height) in `area`. With
     /// the trackpad (`pad`) the picture is full width at the top when that leaves the trackpad `minPadHeight` (past the

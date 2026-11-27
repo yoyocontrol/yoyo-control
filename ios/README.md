@@ -28,7 +28,7 @@ ios/App/testflight.sh                                              # Release 归
 |---|---|---|
 | `YoyoCore` | 契约：线上模型（`ScreenStatus`、`ScreenInput`、`ScreenStreamOptions`、`ScreenStreamAck`、剪贴板的 `ClipboardStatus`…，宽松解码）、`YoyoError`、`YoyoEvent`（+ `YoyoEventHub`）、`ScreenWire`；`YoyoBackend`（页面向一台电脑要什么）、`YoyoRouting`（有不止一条路时）、`YoyoTrust`；`YoyoScreenLink`（一条自己带媒体的路：uu Link）；`YoyoHost`（外面的 App 决定什么）；`YoyoComputer`（是谁的电脑：Mac / 别的平台，跟着它的文案） | Foundation、UIKit |
 | `YoyoClipboard` | 剪贴板的共享状态 `YoyoClipboardState`（每台电脑一个，跟着事件更新）、动作（`ClipboardActions`：粘到电脑 / 从电脑拷、提示与小红点）、剪贴板页 `YoyoClipboard.makePage(backend:computer:)` | Core |
-| `YoyoScreen` | 屏幕页 `YoyoScreen.makePage(backend:host:)`，以及拼它的三层（`YoyoScreenSession`、`YoyoScreenPictureView`、`YoyoTrackpadView` + `YoyoScreenKeyboard`，见下「自己拼屏幕页」）、预览行的模型 `YoyoScreenPreview`、进程内的流 `YoyoStreamSource`（演示用的电脑、UI 测试） | Core、Clipboard |
+| `YoyoScreen` | 屏幕页 `YoyoScreen.makePage(backend:host:)`（`makePage(…keys:)` 给键栏的键；画面左下角的按钮切「触控板模式」：画面让给触控板、只取指针、键排在触控板下面，记在 `<namespace>TrackpadOnly`），以及拼它的三层（`YoyoScreenSession`、`YoyoScreenPictureView`、`YoyoTrackpadView` + `YoyoScreenKeyboard`，见下「自己拼屏幕页」）、预览行的模型 `YoyoScreenPreview`、进程内的流 `YoyoStreamSource`（演示用的电脑、UI 测试） | Core、Clipboard |
 | `YoyoConnect` | 不止一条路时的选路（见下「YoyoConnect」）：候选（`ConnectCandidate`：lan / direct / relay / tunnel，钉公钥 / 钉整张证书 / 系统校验）、happy-eyeballs 竞速（`ConnectRace`）、`YoyoConnector`（一个 `YoyoRouting`：网络变化重选、差路上每 30 s 再试、捷径失败立刻回落、401 换凭证、续期）、`ConnectWays`（后端按路取链接） | Core |
 | `YoyoDirect` | Yoyo Control 自己的 `YoyoBackend`：在 Link 上配对和连接、记录里缺绑定时问信令服务（`SignalLookup`）、Link 候选（`DirectConnect`，跑在 YoyoConnect 上）、`RemoteAccess` | Core、Connect、Screen、YoyoLinkClient |
 | `YoyoPro` | StoreKit 付费墙（`ProStore`、`ProPaywall`） | Core |
@@ -83,7 +83,9 @@ ios/App/testflight.sh                                              # Release 归
   照样在进后台时放开（拖拽抬起、排队的输入丢掉、路上的接管拿到就还），后台里画面一到就显示（平滑播放的 display link 在后台不跑）。
   音频会话还是声音自己设的 `.playback`；让 App 在后台活着（「音频、AirPlay 和画中画」后台模式、画中画真的开着）是宿主的事。
   在后台把它关掉，就当场按缺省那样停下。`viewOnly`：只看（全屏播放那样），不输入、
-  放开控制权。观察：`observe { update in … }` 返回 `YoyoScreenObservation`（可以有多个，释放或 `cancel()` 就停），`update` 是
+  放开控制权。`streamMode`：`.picture`（缺省：画面和声音）或 `.pointer`（只要触控板用的东西：流用最窄的画面、每秒至多一张，
+  指针照样随动随发；没有声音）——电脑的屏幕就在用户眼前（投影、会议室大屏、桌上的电脑），手机只当触控板时用；运行中改了，流当场换。
+  `press(_ key: YoyoScreenKey)`：按一个键（自带的修饰键加上粘滞的）。观察：`observe { update in … }` 返回 `YoyoScreenObservation`（可以有多个，释放或 `cancel()` 就停），`update` 是
   `.changed(Changes)`（`status` / `control` / `connection` / `audio` / `computer` / `clipboard` / `modifiers` / `activity`）或
   `.notice(Notice)`（`message`：要给用户看的一句话；`tookControl`；`lostControl(.takenOver(by:) / .refused / .ended)`；
   `nudge`：来了不能拿控制权的输入，宿主的「接管」按钮可以提示一下）。`addVideoSink` 再挂一个画面的接收端（画中画之类）。
@@ -98,12 +100,15 @@ ios/App/testflight.sh                                              # Release 归
   （`AVPictureInPictureController.ContentSource(sampleBufferDisplayLayer:playbackDelegate:)`）；kit 在别的线程往里 enqueue
   （每张立即显示，没有 timebase），宿主只把它交给画中画，不 enqueue / flush / 设 timebase。第一张视频画面之前是空的；
   断线变成静止画面时它的 view 隐藏但层里留着最后一张；只有换显示器才清空。
-- **输入**：`YoyoTrackpadView(session:picture:)`：触控板面板和它全部的手势（移动、点击、双击、右键、滚动、拖拽、贴边继续、
+- **输入**：`YoyoTrackpadView(session:picture:)`（不显示画面时用 `YoyoTrackpadView(session:)`：面板就当屏幕，手指按「把显示器
+  缩进面板」的比例移动指针，没有放大镜和指针徽章；session 配 `streamMode = .pointer`）：触控板面板和它全部的手势（移动、点击、双击、右键、滚动、拖拽、贴边继续、
   三指点击 `onThreeFingerTap`），手指滑出面板时震一下、亮边（`onLeftPad`），放大镜和指针旁的徽章画在画面上；只有 session 在控制时
   手势才变成输入，否则第一下触摸按策略请求输入（`.explicit` 下只 `nudge`）。`hint` / `topInset` 是面板上的字和顶上留的空。
   手势说明卡：`YoyoTrackpadView.makeGestureCard(computer:showsClipboard:)`、`showGestureCardOnce(from:)`（记在
   `<namespace>GestureCard2Shown`）。`YoyoScreenKeyboard(session:)`：一个看不见的小 view，放进哪个视图层级由宿主定，`show()` /
-  `hide()` / `toggle()`，键栏是粘滞修饰键、Esc / Tab / 方向键、剪贴板键；点到能输入的地方时自己弹出（`showsForFocus`），
+  `hide()` / `toggle()`，键栏是粘滞修饰键、`keys`（宿主给的键 `YoyoScreenKey`：显示的字或 SF Symbol、键名、自带的修饰键；
+  缺省 `YoyoScreenKey.standard` = Esc / Tab / 方向键；另有 `.pageUp` / `.pageDown` / `.home` / `.end` / `.space` / `.enter` /
+  `.function(n)`）、剪贴板键；点到能输入的地方时自己弹出（`showsForFocus`），
   `isEnabled = false` 时不弹（比如横屏）。
 
 ```swift

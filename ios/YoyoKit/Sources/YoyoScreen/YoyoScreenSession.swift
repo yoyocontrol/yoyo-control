@@ -14,6 +14,17 @@ public enum YoyoControlPolicy: Sendable, Equatable {
     case explicit
 }
 
+/// What a `YoyoScreenSession`'s stream carries (`streamMode`).
+public enum YoyoScreenStreamMode: Sendable, Equatable {
+    /// The picture, as sharp and smooth as the computer gives it, with the sound (the default).
+    case picture
+    /// What a trackpad alone needs: where the pointer is and the display's state, from the stream at its smallest (the
+    /// narrowest picture, at most one a second; the pointer still comes as it moves). No sound. For a host that shows
+    /// no picture (`YoyoTrackpadView(session:)`) because the screen is in front of the user anyway: a projector, a big
+    /// screen in a meeting room, the computer on the desk. A picture view of the session shows that small picture.
+    case pointer
+}
+
 /// Why this session no longer controls the screen (`YoyoScreenSession.Notice.lostControl`).
 public enum YoyoScreenControlLoss: Sendable, Equatable {
     /// Another phone took control (its name as shown: "Mia's iPhone", "Another iPhone"…).
@@ -115,6 +126,16 @@ public final class YoyoScreenSession {
                 releaseControl()
             }
             changed(.control)
+        }
+    }
+
+    /// What the stream carries: the picture (the default) or only the pointer (`.pointer`: a trackpad with no picture;
+    /// much less to send, no sound). Changed while running, the stream is replaced at once.
+    public var streamMode = YoyoScreenStreamMode.picture {
+        didSet {
+            guard streamMode != oldValue else { return }
+            inner.setPointerOnly(streamMode == .pointer)
+            changed([.audio, .connection])
         }
     }
 
@@ -784,6 +805,16 @@ public final class YoyoScreenSession {
         guard isControlling else { requestInput { [weak self] in self?.pressKey(name) }; return }
         keySent()
         enqueue(ScreenInput(.key, key: name, modifiers: takeModifiers()))
+    }
+
+    /// A key of a key bar or row (`YoyoScreenKey`): its own modifiers with the armed ones. Watching: as `requestInput`
+    /// says.
+    public func press(_ key: YoyoScreenKey) {
+        guard isControlling else { requestInput { [weak self] in self?.press(key) }; return }
+        keySent()
+        var m = takeModifiers()
+        for extra in key.modifiers where !m.contains(extra) { m.append(extra) }
+        enqueue(ScreenInput(.key, key: key.key, modifiers: m))
     }
 
     /// Arms a modifier for the next key or click, or disarms it.

@@ -24,4 +24,11 @@ enum Preferences {
         let v = UserDefaults.standard.double(forKey: YoyoHost.key("TrackpadGain"))
         return v >= 0.3 && v <= 3 ? CGFloat(v) : 1
     }
+
+    /// The Screen page is in trackpad mode (no picture: the computer's screen is in front of the user), kept in
+    /// `<namespace>TrackpadOnly`.
+    static var screenTrackpadOnly: Bool {
+        get { UserDefaults.standard.bool(forKey: YoyoHost.key("TrackpadOnly")) }
+        set { UserDefaults.standard.set(newValue, forKey: YoyoHost.key("TrackpadOnly")) }
+    }
 }

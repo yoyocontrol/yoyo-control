@@ -264,6 +264,11 @@ final class ScreenSession {
     /// are sent, so asking for 60 is cheap; the Mac's screen sharing, its encoder and the ack window cap the real
     /// rate.
     static let fps = 60
+    /// The pointer-only stream (`setPointerOnly`): the smallest picture the computer makes, at most one a second. What
+    /// it carries is the cursor parts (sent as the pointer moves, whatever the picture's rate) and the status parts; a
+    /// still screen sends a tiny picture every 5 s.
+    static let pointerOnlyWidth = 160
+    static let pointerOnlyFps = 1
     /// The jitter buffer's depth before it has measured anything, on the local network (elsewhere the default 25 ms).
     static let lanDefaultDepth = 0.010
     /// The smooth playback's cap off the local network (the local network keeps `ScreenPlayout.Config`'s 100 ms): on 5G
@@ -316,6 +321,27 @@ final class ScreenSession {
         routeWaitTask?.cancel()
         openCheck?.cancel()
         pathMonitor?.cancel()
+    }
+
+    // MARK: Pointer only
+
+    /// The stream carries the pointer, not a picture to look at (`YoyoScreenSession.streamMode`): the smallest picture
+    /// at the lowest rate, no sound.
+    private(set) var pointerOnly = false
+
+    /// Switches between the picture's stream and the pointer's: a stream open now is replaced at once (its last picture
+    /// kept as a still), the sound stops or comes back.
+    func setPointerOnly(_ on: Bool) {
+        guard on != pointerOnly else { return }
+        pointerOnly = on
+        if on { stopAudio(releasingOutput: true) }
+        if active, canShow, stream != nil || pendingOpen || waitingToRetry {
+            stopFrames()
+            updateFrames()
+        }
+        updateConnection()
+        syncAudio()
+        host?.sessionAudioChanged()
     }
 
     // MARK: Lifecycle
@@ -531,10 +557,11 @@ final class ScreenSession {
         streamLink = link
         var options = ScreenStreamOptions.live()
         if link != nil { options.ack = false }
-        let width = ScreenStreamOptions.videoMaxWidth
+        let width = pointerOnly ? Self.pointerOnlyWidth : ScreenStreamOptions.videoMaxWidth
+        let fps = pointerOnly ? Self.pointerOnlyFps : Self.fps
         let request: URLRequest
         do {
-            request = try backend.streamRequest(display: displayId, maxWidth: width, quality: Self.quality, fps: Self.fps,
+            request = try backend.streamRequest(display: displayId, maxWidth: width, quality: Self.quality, fps: fps,
                                                 options: options, route: route)
         } catch { streamFailed(token, error); return }
         streamResponded = false
@@ -833,7 +860,7 @@ final class ScreenSession {
     /// stream between two (a reopen after a pause, a retry) leave it playing, and a sound stream that ended reopens
     /// without waiting for the pictures. Only a display that can't be shown stops it (`waitingOnUnavailable`).
     private func syncAudio() {
-        guard active, canShow, audioOn, !audioUnsupported, !waitingOnUnavailable, audioRetryTask == nil,
+        guard active, canShow, audioOn, !pointerOnly, !audioUnsupported, !waitingOnUnavailable, audioRetryTask == nil,
               stream != nil || audio != nil || audioReopening else { return }
         if audio != nil, audioRoute == streamRoute { return }
         startAudio()

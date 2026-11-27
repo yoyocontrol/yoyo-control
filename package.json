@@ -1,0 +1,21 @@
+{
+  "name": "@yoyocontrol/account-web",
+  "version": "0.3.0",
+  "description": "A browser's side of an account server (@yoyocontrol/account-server): sign in, a session bound to a device key the page cannot read out, the account's computers, tickets into them",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "gitHead": "df0238ab5b2398066855664c931cb2979949d4cc"
+}

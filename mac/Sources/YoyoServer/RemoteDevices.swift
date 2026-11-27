@@ -251,11 +251,15 @@ public final class RemoteDevices: @unchecked Sendable {
     }
 
     /// A device of this Mac's account, its ticket taken (`grant`: what for): its token (shown once), bound to the link
-    /// key it came with. Replaces whatever `id` had here.
+    /// key it came with — an app's (64 hex) or a browser's WebRTC certificate (`dtls-sha256:` + 64 hex). Replaces
+    /// whatever `id` had here.
     public func admit(id: String, name: String, linkKey: String, grant: AccountGrant) throws -> String {
         guard Self.validId(id) else { throw PairError.badDevice("device.id must be 8–64 of A–Z a–z 0–9 _ -") }
         let key = linkKey.lowercased()
-        guard key.utf8.count == 64, key.allSatisfy(\.isHexDigit) else { throw PairError.badDevice("the link key must be 64 hex digits") }
+        let hex = key.hasPrefix("dtls-sha256:") ? String(key.dropFirst(12)) : key
+        guard hex.utf8.count == 64, hex.allSatisfy(\.isHexDigit) else {
+            throw PairError.badDevice("the link key must be 64 hex digits, or a browser's dtls-sha256: and 64 hex digits")
+        }
         lock.lock()
         devices.removeAll { $0.id == id }
         guard devices.count < Self.maxDevices else {

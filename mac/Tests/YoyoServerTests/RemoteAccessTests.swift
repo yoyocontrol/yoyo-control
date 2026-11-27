@@ -35,6 +35,13 @@ final class RemoteDevicesTests: XCTestCase {
         XCTAssertEqual(d.prune { _ in true }, 0)
         XCTAssertEqual(d.prune { $0.dev != grant.dev }, 1)
         XCTAssertEqual(d.list.map(\.id), ["phone-paired-1"])
+        // a browser (over WebRTC its key is its certificate's): let in the same way, bound to that
+        let dtls = "dtls-sha256:" + String(repeating: "ef", count: 32)
+        let tb = try d.admit(id: "browser-0001", name: "Chrome", linkKey: dtls.uppercased(), grant: grant)
+        XCTAssertEqual(d.authenticateLink(token: tb, key: dtls), .accepted(d.list.first { $0.id == "browser-0001" }!))
+        XCTAssertThrowsError(try d.admit(id: "browser-0002", name: "x", linkKey: "dtls-sha256:abc", grant: grant))
+        XCTAssertThrowsError(try d.admit(id: "browser-0003", name: "x", linkKey: "nothex", grant: grant))
+        _ = d.remove(id: "browser-0001")
         let t2 = try d.admit(id: "phone-ipad-01", name: "iPad", linkKey: key, grant: grant)
         clock = clock.addingTimeInterval(3601)
         XCTAssertNil(d.authenticate(token: t2), "the sign-in's end is the token's")

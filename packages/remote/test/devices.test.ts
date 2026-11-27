@@ -131,6 +131,12 @@ test("an account's device: admitted with its grant, its token bound to its link 
   assert.equal(store.prune(() => true), 0);
   assert.equal(store.prune((g) => g.dev !== grant.dev), 1);
   assert.deepEqual(store.list.map((d) => d.id), ["phone-paired-01"]);
+  // a browser: its WebRTC certificate is its key
+  const dtls = `dtls-sha256:${"ef".repeat(32)}`;
+  const tb = store.admit("browser-00001", "Chrome", dtls.toUpperCase(), grant);
+  assert.equal(store.authenticateLink(tb, dtls).kind, "accepted");
+  assert.throws(() => store.admit("browser-00002", "x", "dtls-sha256:abc", grant), /link key/);
+  store.remove("browser-00001");
   // the sign-in's end is the token's
   const t2 = store.admit("phone-ipad-0001", "iPad", key, grant);
   t += 3601_000;

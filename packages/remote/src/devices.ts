@@ -200,13 +200,14 @@ export class DeviceStore {
 
   /**
    * A device of this computer's account, its ticket taken (`grant`: what it was for): its token (shown once), bound to
-   * the link key `linkKey` it came with. Replaces whatever `id` had here — a pairing too: the device chose to come in
+   * the link key `linkKey` it came with (an app's, 64 hex; a browser's, `dtls-sha256:` + 64 hex). Replaces whatever `id` had here — a pairing too: the device chose to come in
    * by its account.
    */
   admit(id: string, name: string, linkKey: string, grant: AccountGrant): string {
     if (!validDeviceId(id)) throw new PairError("bad-device", "device.id must be 8–64 of A–Z a–z 0–9 _ -");
     const key = linkKey.toLowerCase();
-    if (!/^[0-9a-f]{64}$/.test(key)) throw new PairError("bad-device", "the link key must be 64 hex digits");
+    // (an app's Link key, or a browser's WebRTC certificate: what its link session's client key is)
+    if (!/^(?:dtls-sha256:)?[0-9a-f]{64}$/.test(key)) throw new PairError("bad-device", "the link key must be 64 hex digits, or a browser's dtls-sha256: and 64 hex digits");
     if (typeof grant?.acc !== "string" || typeof grant.dev !== "string" || !Number.isInteger(grant.tat) || !Number.isInteger(grant.sx)) throw new PairError("bad-device", "grant is { acc, dev, tat, sx }");
     this.devices = this.devices.filter((d) => d.id !== id);
     if (this.devices.length >= MAX_DEVICES) throw new PairError("full", "too many devices");

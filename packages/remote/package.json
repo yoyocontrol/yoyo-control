@@ -1,6 +1,6 @@
 {
   "name": "@yoyocontrol/remote",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "What a screen server needs beside its uu Link listener: the identity key phones pin, its addresses, router port mapping; a signaling client and the standard pairing store",
   "type": "module",
   "license": "Apache-2.0",

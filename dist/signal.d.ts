@@ -30,8 +30,17 @@ export interface SignalLink {
 export declare function linkMessage(link: SignalLink): string;
 /** `{"id","type":"account"}` (`"id":null`: none). */
 export declare function accountMessage(id: string | null): string;
+/**
+ * Answers a browser's WebRTC offer (`from`: the browser's address, for the link's guard): the signed answer, or throws
+ * an error whose `status` (400 a bad offer, 429 / 503 the guard…) and message go back to the browser.
+ */
+export type RtcAnswerer = (offer: Record<string, unknown>, from: string | null) => Promise<unknown>;
+/** The reply to an `rtc` message: `rtc-answer`, or `rtc-error` with the failure's status (default 503). */
+export declare function rtcReply(id: string, offer: unknown, from: string | null, answerer: RtcAnswerer | null): Promise<string>;
 /** Events: `change` (registered or not: `registered`); `unlinked` (the room says it isn't in its account any more). */
 export declare class SignalClient extends EventEmitter {
+    /** Who answers browsers' WebRTC offers (the link listener's `acceptRtcOffer`); null: none (they get a 404). */
+    rtcAnswerer: RtcAnswerer | null;
     readonly base: string;
     readonly room: string;
     private readonly opts;

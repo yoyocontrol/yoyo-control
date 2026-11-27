@@ -82,7 +82,7 @@ export declare class DeviceStore {
     pair(code: string, id: string, name: string, linkKey?: string): string;
     /**
      * A device of this computer's account, its ticket taken (`grant`: what it was for): its token (shown once), bound to
-     * the link key `linkKey` it came with. Replaces whatever `id` had here — a pairing too: the device chose to come in
+     * the link key `linkKey` it came with (an app's, 64 hex; a browser's, `dtls-sha256:` + 64 hex). Replaces whatever `id` had here — a pairing too: the device chose to come in
      * by its account.
      */
     admit(id: string, name: string, linkKey: string, grant: AccountGrant): string;

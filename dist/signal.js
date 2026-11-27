@@ -1,7 +1,9 @@
 // The signaling client (docs/RELAY.md, protocol v1): keeps this server registered in its room at the signaling server
 // (`relay/signal` is one; none is built in) — a WebSocket signed in with the identity key, so only the holder of that
 // key can hold the room. Phones and browsers ask the room for the uu Link binding (`setLink`: `{"type":"link", …}`,
-// docs/LINK.md「身份与信任」, sent after `ready` and whenever it changes).
+// docs/LINK.md「身份与信任」, sent after `ready` and whenever it changes). A browser's WebRTC offer comes as
+// `{"type":"rtc","id","offer","from"}` (docs/RELAY.md「WebRTC」): `rtcAnswerer` (the link listener's) answers it, and the
+// answer goes back as `{"type":"rtc-answer","id","answer"}` or `{"type":"rtc-error","id","status","message"}`.
 //
 // Reconnects after a drop (1 s, doubling to 60 s); a `ping` every 30 s, and no `pong` for 45 s more counts as a drop.
 // Node 22's global WebSocket.
@@ -32,8 +34,26 @@ export function linkMessage(link) {
 export function accountMessage(id) {
     return JSON.stringify({ id, type: "account" });
 }
+/** The reply to an `rtc` message: `rtc-answer`, or `rtc-error` with the failure's status (default 503). */
+export async function rtcReply(id, offer, from, answerer) {
+    try {
+        if (!offer || typeof offer !== "object" || Array.isArray(offer))
+            throw Object.assign(new Error("offer must be a JSON object"), { status: 400 });
+        if (!answerer)
+            throw Object.assign(new Error("uu Link's WebRTC is not running"), { status: 404 });
+        const answer = await answerer(offer, from);
+        return JSON.stringify({ answer, id, type: "rtc-answer" });
+    }
+    catch (e) {
+        const status = e.status;
+        const message = e instanceof Error ? e.message : String(e);
+        return JSON.stringify({ id, message, status: typeof status === "number" && status >= 400 && status < 600 ? status : 503, type: "rtc-error" });
+    }
+}
 /** Events: `change` (registered or not: `registered`); `unlinked` (the room says it isn't in its account any more). */
 export class SignalClient extends EventEmitter {
+    /** Who answers browsers' WebRTC offers (the link listener's `acceptRtcOffer`); null: none (they get a 404). */
+    rtcAnswerer = null;
     base;
     room;
     opts;
@@ -165,6 +185,17 @@ export class SignalClient extends EventEmitter {
                     this.emit("unlinked");
                 }
                 return;
+            case "rtc": {
+                const m = msg;
+                if (typeof m.id !== "string" || !/^[0-9a-f]{32}$/i.test(m.id))
+                    return;
+                void rtcReply(m.id, m.offer, typeof m.from === "string" ? m.from : null, this.rtcAnswerer).then((reply) => {
+                    // (the connection it came on, only: a new one's room knows nothing of this offer)
+                    if (this.control === ws)
+                        this.send(ws, reply);
+                });
+                return;
+            }
         }
     }
     send(ws, text) {

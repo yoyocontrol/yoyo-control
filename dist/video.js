@@ -1,3 +1,4 @@
+import { DecodeWatch } from "./decodeload.js";
 import { AckSender, ACK_TIMEOUT_MS, ackOutcome } from "./acks.js";
 import { parseCursorPart } from "./cursor.js";
 import { avcC, codecString, lengthPrefixed, sameBytes, splitAccessUnit } from "./h264.js";
@@ -8,6 +9,9 @@ import { parseStatusPart } from "./status.js";
 import { linkStreamQuery } from "./link.js";
 import { PlayoutMeter, roundReport } from "./meter.js";
 import { parseNetQuality } from "./net.js";
+/** This page's decoder runs short of output buffers when the A/V sync holds pictures back (`DecodeWatch`'s "floor"):
+ *  the video stops waiting for the sound for the rest of the page's life (a device property). */
+let framesScarce = false;
 /** The HEVC the Mac sends (Main, up to level 5.1) as WebCodecs names it, for the support check. */
 const HEVC_PROBE = "hvc1.1.6.L153.B0";
 let hevcCheck = null;
@@ -126,6 +130,7 @@ export class VideoStream {
     statsPictures = 0;
     statsBytes = 0;
     statsDecode = [];
+    decodeWatch = new DecodeWatch();
     constructor(opts, cb) {
         this.opts = opts;
         this.cb = cb;
@@ -180,6 +185,10 @@ export class VideoStream {
     /** The playout responds at once (the user interacts). */
     get interactive() {
         return this.playout.interactive;
+    }
+    /** Pictures held back for the sound starve this page's decoder: the A/V sync leaves the video alone. */
+    get holdsFewFrames() {
+        return framesScarce;
     }
     /** The A/V sync's extra wait for smooth pictures (ms; `AVSyncDriver` sets it). */
     get syncFloor() {
@@ -629,6 +638,13 @@ export class VideoStream {
         if (at !== undefined) {
             decodeMs = now - at;
             this.statsDecode.push(decodeMs);
+            const verdict = this.decodeWatch.add(decodeMs, now, this.playout.syncFloor);
+            if (verdict === "floor") {
+                framesScarce = true;
+                this.playout.syncFloor = 0;
+            }
+            else if (verdict)
+                this.cb.onDecodeLoad?.(verdict);
             this.enqueued.delete(frame.timestamp);
         }
         const meta = this.meta.get(frame.timestamp);

@@ -17,6 +17,12 @@ export declare const hasAudioDecoder: () => boolean;
 export type AudioState = "off" | "starting" | "playing" | "waiting" | "none";
 /** The buffer's start depth on a remote path (ms; the LAN starts at `AUDIO_LAN_FLOOR_MS`). */
 export declare const TARGET_MS = 120;
+/** Opus packets here are 20 ms (960 frames at 48 kHz); gaps up to this many packets are concealed by libopus. */
+export declare const AUDIO_PACKET_FRAMES = 960;
+export declare const AUDIO_PLC_MAX_PACKETS = 5;
+/** The decoder counts as stuck with this many packets in it and nothing out for this long (ms). */
+export declare const AUDIO_DECODER_STUCK_PACKETS = 5;
+export declare const AUDIO_DECODER_STUCK_MS = 150;
 /** `X-Audio-Video-Offset` when the server doesn't say (ms). */
 export declare const DEFAULT_VIDEO_OFFSET_MS = 31;
 /** `X-Audio-Cookie` as an Opus description: only an OpusHead (else the decoder's defaults for 48 kHz stereo). */
@@ -47,11 +53,19 @@ export declare class ScreenAudio implements AVSyncAudio {
     private ts;
     private generation;
     private readonly pending;
+    private decoderConfig;
+    /** The wasm decoder once it is ready (packets go there instead of `decoder`). */
+    private wasm;
+    /** When the decoder last gave a packet out (its watchdog). */
+    private outputAt;
     private jitter;
     private lan;
     private offset;
     private worklet;
     private lastUnderruns;
+    private diag;
+    /** The last packet's seq (the wasm decoder conceals the ones missing before the next). */
+    private lastSeq;
     private soundAt;
     private bytes;
     private syncReport;
@@ -82,6 +96,8 @@ export declare class ScreenAudio implements AVSyncAudio {
     private closeStream;
     /** A new stream: the buffer's estimate starts over on another route (the same route keeps what it learned). */
     private begin;
+    /** The wasm decoder for this stream: packets go to it from when it is ready (WebCodecs until then). */
+    private startWasm;
     private decoderFailed;
     private open;
     private openLink;
@@ -90,6 +106,11 @@ export declare class ScreenAudio implements AVSyncAudio {
     /** One Opus packet: its delay into the estimate, then the decoder (its slot is set when it comes out). */
     private packet;
     private play;
+    /** `n` packets lost right before `next`: one decode without data (libopus' PLC gives up to 120 ms), cut into
+     *  packets of the stream's size with their seqs and times. */
+    private conceal;
+    /** A decoded packet (planar; `r` null for mono) to the player, at its slot. */
+    private deliver;
     private fromWorklet;
     private depthNow;
     /** The output's latency: what a sample takes from the worklet to the speaker (ms). */

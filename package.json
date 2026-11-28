@@ -1,6 +1,6 @@
 {
   "name": "@yoyocontrol/screen-web",
-  "version": "0.3.1",
+  "version": "0.3.6",
   "description": "Transport-free web client of a Yoyo Control screen: stream parts, H.264 on WebCodecs, acks, cursor, timed sound, input, status model, media over a uu Link, stats line, A/V sync",
   "keywords": [
     "yoyo-control",
@@ -30,5 +30,8 @@
     "README.md"
   ],
   "sideEffects": false,
-  "gitHead": "c2d67ea863f2bc0b41a187a2efe17718650b3be5"
+  "dependencies": {
+    "opus-decoder": "^0.7.12"
+  },
+  "gitHead": "f60f4ec8e3116a2e3486cc7a12f0a10e9c57d28a"
 }

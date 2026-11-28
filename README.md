@@ -22,6 +22,7 @@ The web client of a Yoyo Control screen, without UI and without a transport of i
 | `net` | `NetSampler` (the report's `net`), `browserNetPath`, `withNetSampler`, `isNetworkFailure`, `parseNetQuality`, `netQualityLine` |
 | `stats` | the stats line: `StreamStatsSnapshot`, `statsLines`, `streamLine`, `playoutReportLine`, `latencyEstimate`, `audioStatsLine` |
 | `avsync` | `AVSync` (pictures wait for late sound, sound for a slower smooth picture), `AVSyncDriver` |
+| `decodeload` | `DecodeWatch` (the decoder keeps up?), `StreamLevels` (the stream's size and rate for it) |
 | `audiobuffer` | the sound's timed jitter buffer: `AudioJitter` (depth), `AudioScheduler` (the AudioWorklet's player) |
 
 ## Quick start
@@ -140,13 +141,32 @@ share it with the input: `withNetSampler(send, net, () => route)`, and set `net.
 `navigator.connection`'s `change` where the browser has it) and `audio` (`VideoOptions.audioReport: () =>
 audio.report()`).
 
+## Sound decoding
+
+Opus packets are decoded by libopus in wasm ([`opus-decoder`](https://github.com/eshaz/wasm-audio-decoders), MIT,
+loaded on first use, ~90 KB): one packet in, its samples out at once, the iOS kit's way (AVAudioConverter). WebCodecs'
+`AudioDecoder` plays until it is ready and when it doesn't load; that one is asynchronous and on some devices stops giving
+packets out for seconds (a watchdog resets it after 150 ms). A few packets lost (up to 5) are filled by libopus' loss concealment instead of silence
+(`plcPackets`). The report's `decoder` says which played.
+
 ## A/V sync
 
 `ScreenAudio` plays each packet at its slot (`X-Audio-Time` + the measured base delay + a depth that follows the path's
-jitter: 80 ms floor on the LAN, 120 ms elsewhere, raised after an underrun), so its delay is known; `VideoStream`'s
+jitter: 80 ms floor on the LAN, 120 ms elsewhere, raised after an underrun; a delay 0.5 s off the base — 1.5 s away from
+the LAN, where the network stalls that long — starts the estimate over); playback that drifts off its slots by 20 ms for a second drops 10 ms (behind) or plays 10 ms again (ahead), so
+the buffer follows its depth both ways instead of running dry, so its delay is known; `VideoStream`'s
 smooth playout knows its own. `AVSyncDriver` lines them up a few times a second (the iOS kit's `ScreenAVSync`): while
 watching, pictures wait for a later sound (`syncFloor`, at most 300 ms, ramped), and the sound waits for a slower smooth
-picture; never while the user interacts.
+picture; never while the user interacts. A decoder with few output buffers (some Android ones) stalls while pictures
+wait for the sound: once `DecodeWatch` sees that ("floor"), `VideoStream.holdsFewFrames` turns the video's wait off
+for the rest of the page.
+
+## Decode load
+
+`decodeload`: `DecodeWatch` follows each picture's decode time (queued → out, median of 1.5 s); `VideoStream` tells
+`onDecodeLoad("slow")` when it stays above 80 ms for 3 s (the decoder can't keep up), `"easy"` after a minute under
+30 ms. `StreamLevels` turns that into the stream request's `maxWidth` / `fps` (3840 @60 → 1920 @60 → 1600 @30 → 1280 @30;
+back up after 3 min, never again after a step up that turned slow within a minute): pass `level` in `extra` and reopen.
 
 ```ts
 import { AVSyncDriver } from "@yoyocontrol/screen-web";

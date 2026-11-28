@@ -15,7 +15,9 @@
  *   `maxConcealed`: playback starts over from the slots). Running dry is an underrun: it starts over at the next packet's
  *   slot. Sound fades in at a start and out as it runs dry. When playback runs `excessFrames` behind the slots for
  *   `excessHoldFrames` (the depth shrank, the computer's clock runs fast), `cutFrames` of a packet are dropped with a
- *   crossfade, at most every `cutEveryFrames`. More than `maxQueuedFrames` waiting drops the oldest and starts over.
+ *   crossfade, at most every `cutEveryFrames`; when it runs `excessFrames` ahead of them for as long (the depth grew,
+ *   the computer's clock runs slow, the base rose after a fast spell of the network), the last `cutFrames` play again
+ *   with a crossfade (a pad) as often — else the buffer would stay short of its depth until it ran dry. More than `maxQueuedFrames` waiting drops the oldest and starts over.
  *
  * Times: the page's clock in ms (`performance.now()`) for `AudioJitter`; frames of the AudioContext for `AudioScheduler`.
  */
@@ -112,6 +114,9 @@ export interface AudioSchedulerStats {
     concealed: number;
     cuts: number;
     cutFrames: number;
+    /** Pads (stretches): `cutFrames` played again. */
+    pads: number;
+    padFrames: number;
 }
 /**
  * The audio thread's half (see above). Self-contained on purpose — no imports, no module constants: its source is put
@@ -128,6 +133,9 @@ export declare class AudioScheduler {
     /** The head packet's boundary was handled (its gap concealed, the cut decided). */
     entered: boolean;
     lagFrom: number | null;
+    aheadFrom: number | null;
+    /** A pad waits for the playhead to be far enough into a packet. */
+    padPending: boolean;
     lastCut: number;
     cut: {
         left: number;

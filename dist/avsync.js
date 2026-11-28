@@ -89,6 +89,7 @@ export class AVSyncDriver {
             shownDelay: d?.shown ?? null,
             interactive: v?.interactive ?? false,
             soundRecent: a?.soundRecent ?? false,
+            videoFloorEnabled: !v?.holdsFewFrames,
         });
         if (v)
             v.syncFloor = out.videoFloor;

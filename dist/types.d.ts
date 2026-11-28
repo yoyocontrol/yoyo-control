@@ -131,9 +131,26 @@ export interface AudioReport {
     late: number;
     concealed: number;
     cuts: number;
-    /** Net time-stretch (cuts make it negative). */
+    /** Net time-stretch (cuts make it negative, pads positive). */
     stretchMs?: number;
     kbps?: number;
+    /** Diagnostics since the previous report: the longest wait between two packets arriving, between two decoded
+     *  packets reaching the player; per underrun how long before it
+     *  the last packet had arrived / been handed to the player; the player's overflows. */
+    arrivalGapMaxMs?: number;
+    decodedGapMaxMs?: number;
+    underrunsAt?: {
+        sincePacketMs: number;
+        sincePlayedMs: number;
+    }[];
+    overflow?: number;
+    /** Decoded packets whose timestamp matched none waiting (taken in order); decoder restarts after it stopped. */
+    unmatchedOutputs?: number;
+    /** Which Opus decoder plays: libopus in wasm or the browser's WebCodecs. */
+    decoder?: "wasm" | "webcodecs";
+    /** Lost packets filled by libopus' loss concealment instead of silence. */
+    plcPackets?: number;
+    decoderResets?: number;
 }
 /** An ack of a stream's pictures (cumulative `seq`). */
 export interface StreamAck {

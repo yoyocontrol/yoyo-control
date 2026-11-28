@@ -72,6 +72,8 @@ export interface AVSyncVideo {
     readonly interactive: boolean;
     /** The playout's sync floor (ms). */
     syncFloor: number;
+    /** Holding pictures back starves the decoder here: no video floor (`VideoStream.holdsFewFrames`). */
+    readonly holdsFewFrames?: boolean;
 }
 /**
  * Runs `AVSync` every `everyMs` between the page's sound and its current video stream (the video changes with each

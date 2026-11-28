@@ -39,6 +39,9 @@ export interface VideoCallbacks {
     onNet?: (net: NonNullable<StreamAckResponse["net"]>) => void;
     /** A link stream was opened (`video.opened`): what `/stream`'s response headers would have said (`X-Display`…). */
     onOpened?: (headers: Record<string, string>) => void;
+    /** The decoder can't keep up with the stream ("slow": ask for a smaller / slower one, `StreamLevels`) or has had
+     *  room for a long while ("easy"). Once each per stream (`DecodeWatch`). */
+    onDecodeLoad?: (verdict: "slow" | "easy") => void;
 }
 export interface VideoOptions {
     /** How the stream, its acks and its reports reach the server (not needed with `link`). */
@@ -146,6 +149,7 @@ export declare class VideoStream implements AVSyncVideo {
     private statsPictures;
     private statsBytes;
     private statsDecode;
+    private readonly decodeWatch;
     constructor(opts: VideoOptions, cb: VideoCallbacks);
     /** Responsive (on) or smooth (off) playout; the page's `interactivity` calls it, or the page itself. */
     setInteractive(on: boolean): void;
@@ -153,6 +157,8 @@ export declare class VideoStream implements AVSyncVideo {
     playoutState(): PlayoutState;
     /** The playout responds at once (the user interacts). */
     get interactive(): boolean;
+    /** Pictures held back for the sound starve this page's decoder: the A/V sync leaves the video alone. */
+    get holdsFewFrames(): boolean;
     /** The A/V sync's extra wait for smooth pictures (ms; `AVSyncDriver` sets it). */
     get syncFloor(): number;
     set syncFloor(ms: number);

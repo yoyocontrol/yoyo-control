@@ -18,7 +18,8 @@ export function audioJitterConfig(lan, over = {}) {
         bumpDecayEveryMs: 15_000,
         leadMs: 10,
         syncRateMsPerSec: 20,
-        clockStepMs: 500,
+        // (away from the LAN a stall of the network holds packets back half a second and more: not a clock step)
+        clockStepMs: lan ? 500 : 1500,
         clockStepHoldMs: 1000,
         ...over,
     };
@@ -159,9 +160,12 @@ export class AudioScheduler {
     /** The head packet's boundary was handled (its gap concealed, the cut decided). */
     entered = false;
     lagFrom = null;
+    aheadFrom = null;
+    /** A pad waits for the playhead to be far enough into a packet. */
+    padPending = false;
     lastCut = -Infinity;
     cut = null;
-    stats = { playing: false, playingMacTime: null, bufferedFrames: 0, underruns: 0, late: 0, overflow: 0, concealed: 0, cuts: 0, cutFrames: 0 };
+    stats = { playing: false, playingMacTime: null, bufferedFrames: 0, underruns: 0, late: 0, overflow: 0, concealed: 0, cuts: 0, cutFrames: 0, pads: 0, padFrames: 0 };
     constructor(config) {
         this.config = config;
     }
@@ -216,6 +220,13 @@ export class AudioScheduler {
                 l[i] = 0;
                 r[i] = 0;
                 continue;
+            }
+            if (this.padPending && !this.cut && this.pos >= c.cutFrames && this.pos + c.crossfadeFrames < head.l.length) {
+                // play the last cutFrames again, crossfading into them
+                this.cut = { left: c.crossfadeFrames, skip: -c.cutFrames };
+                this.padPending = false;
+                this.stats.pads++;
+                this.stats.padFrames += c.cutFrames;
             }
             let a = head.l[this.pos], b = head.r[this.pos];
             const x = this.cut;
@@ -273,6 +284,8 @@ export class AudioScheduler {
         this.concealLeft = 0;
         this.fadeIn = this.config.fadeFrames;
         this.lagFrom = null;
+        this.aheadFrom = null;
+        this.padPending = false;
         this.entered = true;
         return true;
     }
@@ -307,6 +320,17 @@ export class AudioScheduler {
         }
         else {
             this.lagFrom = null;
+        }
+        if (lag < -c.excessFrames) {
+            this.aheadFrom ??= f;
+            if (f - this.aheadFrom >= c.excessHoldFrames && f - this.lastCut >= c.cutEveryFrames && !this.padPending) {
+                this.padPending = true;
+                this.lastCut = f;
+            }
+        }
+        else {
+            this.aheadFrom = null;
+            this.padPending = false;
         }
     }
 }

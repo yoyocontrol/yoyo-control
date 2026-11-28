@@ -1,6 +1,6 @@
 {
   "name": "@yoyocontrol/link-web",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "uu Link in the browser: a WebRTC session (control, RPC, datagram channels) with the media layer as WebAssembly, and the screen's media route for @yoyocontrol/screen-web",
   "keywords": [
     "yoyo-control",
@@ -38,5 +38,5 @@
       "optional": true
     }
   },
-  "gitHead": "7819bea5e10499f1b9bb2850b3f7eb9e71e7972f"
+  "gitHead": "f60f4ec8e3116a2e3486cc7a12f0a10e9c57d28a"
 }

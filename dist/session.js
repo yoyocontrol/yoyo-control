@@ -1,4 +1,4 @@
-import { AVSyncDriver, browserNetPath, ConnectionModel, Interactivity, isUnreachableStatus, linkInputSender, linkSetControl, NetSampler, ReopenPolicy, RequestError, retryDelay, ScreenAudio, sendInput, setControl as httpSetControl, statsLines, VideoStream, withNetSampler, } from "@yoyocontrol/screen-web";
+import { AVSyncDriver, browserNetPath, ConnectionModel, Interactivity, isUnreachableStatus, linkInputSender, linkSetControl, NetSampler, ReopenPolicy, RequestError, retryDelay, ScreenAudio, sendInput, setControl as httpSetControl, statsLines, VideoStream, withNetSampler, StreamLevels, } from "@yoyocontrol/screen-web";
 import { DIRECT_ROUTE } from "./contracts.js";
 /** The stream request's maximum width (docs/PROTOCOL.md: 3840). */
 export const VIDEO_MAX_WIDTH = 3840;
@@ -21,6 +21,8 @@ export class ScreenSession {
     canShow = false;
     hasFrame = false;
     video = null;
+    /** The stream's size and rate for this page: lower while the decoder here can't keep up (`StreamLevels`). */
+    levels = new StreamLevels();
     /** The link the open stream is on (null: HTTP). */
     streamLink = null;
     streamRoute;
@@ -188,6 +190,13 @@ export class ScreenSession {
         if (!this.video && !this.waitingToRetry && !this.pendingOpen)
             this.openStream();
     }
+    /** The stream's size or rate changed: a new stream at it, the picture staying until the first one of it. */
+    changeLevel() {
+        if (!this.video)
+            return;
+        this.dropStream();
+        this.updateFrames();
+    }
     /** Another display: the picture goes, and what was known of the last one's connection. */
     restartFrames() {
         this.stopFrames();
@@ -246,6 +255,7 @@ export class ScreenSession {
             interactivity: this.interactivity,
             net: this.net,
             audioReport: () => (this.audioState === "playing" || this.audioState === "waiting" ? this.audio.report() : null),
+            ...(this.levels.index > 0 ? { extra: { ...this.levels.level } } : {}),
         };
         // over a link the stream opens on it (video.open; its route from the link's path); else POST /stream on the route
         const video = new VideoStream(link ? { ...common, link } : { ...common, transport: this.observed(route, token), route: route.isLocalNetwork ? "lan" : route.report }, {
@@ -268,6 +278,13 @@ export class ScreenSession {
             onOpened: () => {
                 if (token === this.streamToken)
                     this.responded();
+            },
+            onDecodeLoad: (verdict) => {
+                if (token !== this.streamToken)
+                    return;
+                const now = performance.now();
+                if (verdict === "slow" ? this.levels.slow(now) : this.levels.easy(now))
+                    this.changeLevel();
             },
         });
         this.video = video;

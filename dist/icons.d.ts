@@ -1,5 +1,6 @@
 /** The pages' icons: 24 × 24 line drawings in `currentColor` (SF Symbols' shapes, drawn for the web). */
 export declare const ICONS: {
+    readonly more: string;
     readonly close: string;
     readonly question: string;
     readonly display: string;

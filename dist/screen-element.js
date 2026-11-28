@@ -14,7 +14,11 @@ const STATUS_EVERY_MS = 10_000;
 const FOCUS_LOOKS_MS = [250, 650, 1500];
 const CHROME_FADE_MS = 3000;
 const KEY_HOLD_MS = 500;
+/** The drawn pointer fades once it has stood still this long, and shows again as soon as it moves. */
+const POINTER_IDLE_MS = 3000;
 const coarse = () => typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+/** A touch screen too (an iPad with a trackpad, a touch laptop): focusing a text field may bring up its soft keyboard. */
+const touchCapable = () => (typeof navigator !== "undefined" && navigator.maxTouchPoints > 0) || (typeof matchMedia === "function" && matchMedia("(any-pointer: coarse)").matches);
 const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 const reducedTransparency = () => typeof matchMedia === "function" && (matchMedia("(prefers-reduced-transparency: reduce)").matches || matchMedia("(prefers-contrast: more)").matches);
 function el(tag, cls, html) {
@@ -120,6 +124,8 @@ export class YoyoScreenElement extends HTMLElement {
     dragHeld = null;
     composing = false;
     focusLook = null;
+    pointerAt = "";
+    pointerIdle = null;
     focusUnsupported = false;
     statusTimer = null;
     statsTimer = null;
@@ -298,7 +304,9 @@ export class YoyoScreenElement extends HTMLElement {
         this.empty = el("div", "empty");
         this.empty.hidden = true;
         this.stage.append(this.pad, this.clip, this.fsButton, this.badges, this.hintPill, this.zoomHint, this.stats, this.conn, this.spinner, this.note, this.empty);
-        this.bar = el("div", "bar");
+        // the dock: one glass capsule, close | mode, keyboard, more (gestures, display, clipboard, sound, full screen are
+        // in the More menu: the picture stays the page)
+        this.bar = el("div", "bar dock glass");
         this.lead = el("div", "group");
         this.trail = el("div", "group");
         this.buttons = {
@@ -309,12 +317,12 @@ export class YoyoScreenElement extends HTMLElement {
             clipboard: this.roundButton("clipboard", (b) => this.openClipboardMenu(b)),
             sound: this.roundButton("speaker", () => this.toggleSound()),
             keyboard: this.roundButton("keyboard", () => this.toggleKeyboard()),
+            more: this.roundButton("more", (b) => this.openMoreMenu(b)),
         };
-        for (const b of Object.values(this.buttons))
-            b.classList.add("glass");
-        this.lead.append(this.buttons.close, this.buttons.help, this.buttons.mode, this.buttons.display);
-        this.trail.append(this.buttons.clipboard, this.buttons.sound, this.buttons.keyboard);
-        this.bar.append(this.lead, this.trail);
+        this.lead.append(this.buttons.close);
+        this.trail.append(this.buttons.mode, this.buttons.keyboard, this.buttons.more);
+        this.bar.append(this.lead, el("span", "divider"), this.trail);
+        this.bar.addEventListener("pointerdown", (e) => e.stopPropagation());
         this.toastEl = el("div", "toast glass");
         this.toastEl.setAttribute("role", "status");
         this.keys = el("textarea", "keys");
@@ -374,6 +382,7 @@ export class YoyoScreenElement extends HTMLElement {
         label(this.buttons.display, "display");
         label(this.buttons.clipboard, "clipboard");
         label(this.buttons.keyboard, "keyboard");
+        label(this.buttons.more, "more");
         this.canvas.setAttribute("aria-label", w.c("pictureLabel"));
         this.updateModeButton();
         this.updateSoundButton();
@@ -475,7 +484,9 @@ export class YoyoScreenElement extends HTMLElement {
         st.addEventListener("click", (e) => this.mouseClick(e));
         st.addEventListener("contextmenu", (e) => this.contextMenu(e));
         st.addEventListener("wheel", (e) => this.wheel(e), { passive: false });
-        st.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+        // (a touch on a button over the picture — full screen, a hint, Retry — is the button's: no default cancelled, so it
+        // gets its click, and the picture / trackpad never sees it)
+        st.addEventListener("touchstart", (e) => !this.onButton(e) && e.preventDefault(), { passive: false });
         const k = this.keys;
         k.addEventListener("keydown", (e) => this.keyDown(e));
         k.addEventListener("input", (e) => this.typedInput(e));
@@ -586,6 +597,11 @@ export class YoyoScreenElement extends HTMLElement {
     }
     get viewOnly() {
         return this.fullScreen || this.layoutBox.phoneLandscape;
+    }
+    /** A finger on the picture clicks where it lands: touch mode, and mouse mode on a device with a touch screen too (an
+     *  iPad, a touch laptop: the mouse clicks, drags and scrolls as always, a finger taps, drags and scrolls with two). */
+    get directTouch() {
+        return this.mode !== "trackpad";
     }
     /** Taps and keys go to the computer. */
     get controlling() {
@@ -918,14 +934,17 @@ export class YoyoScreenElement extends HTMLElement {
     }
     updateChrome() {
         const full = this.viewOnly;
-        this.bar.hidden = full;
+        this.bar.hidden = full || this.desktopFull;
         const touchDevice = this.mode !== "mouse";
         this.buttons.close.hidden = !this._host.onClose && !this.hasAttribute("closable");
+        this.bar.querySelector(".divider").hidden = this.buttons.close.hidden;
         this.buttons.mode.hidden = !touchDevice;
-        this.buttons.keyboard.hidden = !touchDevice || this.layoutBox.wide;
+        this.buttons.keyboard.hidden = !touchDevice && !touchCapable();
         this.buttons.clipboard.hidden = !this.clipboardOn;
         this.buttons.sound.hidden = !this.session?.audioShown || !this.canShow;
-        this.fsButton.hidden = !this.canShow || this.layoutBox.phoneLandscape;
+        // (a phone turned to landscape is view only by itself: turning it back leaves; full screen locked it there, so its
+        // button stays)
+        this.fsButton.hidden = !this.canShow || (this.layoutBox.phoneLandscape && !this.fullScreen);
         // a mouse over the picture: the computer's pointer is the one that shows
         this.clip.style.cursor = this.mode === "mouse" && this.controlling && this.cursor.drawn ? "none" : "";
         if (full)
@@ -949,7 +968,7 @@ export class YoyoScreenElement extends HTMLElement {
         });
     }
     /** Portrait: the picture at the top, the trackpad surface under it (the badges at its top), the buttons in a row at
-     *  the bottom. Wide: the buttons in a column on each side. Full screen: the picture alone. */
+     *  the bottom (the dock), also when wide. Full screen: the picture alone. */
     layout() {
         if (!this.built)
             return;
@@ -968,26 +987,14 @@ export class YoyoScreenElement extends HTMLElement {
             this.viewOnlyChanged();
         const full = this.viewOnly;
         const area = { x: safe.left, y: safe.top, width: W - safe.left - safe.right, height: H - safe.top - safe.bottom };
-        this.bar.classList.toggle("column", wide);
-        // a row of up to seven buttons: on a narrow phone they close up
-        const shown = [...this.lead.children, ...this.trail.children].filter((b) => !b.hidden).length;
-        const narrow = !wide && shown * 44 + (shown - 2) * 10 + 42 > area.width;
-        this.bar.classList.toggle("narrow", narrow);
-        const size = narrow ? 40 : 44;
-        if (!full) {
-            if (!wide) {
-                const top = H - safe.bottom - 8 - size;
-                Object.assign(this.bar.style, { left: `${safe.left + 16}px`, right: `${safe.right + 16}px`, top: `${top}px`, bottom: "auto", width: "auto", height: `${size}px`, justifyContent: "space-between", flexDirection: "row" });
-                area.height = top - 8 - safe.top;
-            }
-            else {
-                Object.assign(this.bar.style, { left: `${safe.left + 12}px`, right: `${safe.right + 12}px`, top: `${safe.top}px`, bottom: `${safe.bottom}px`, width: "auto", height: "auto", justifyContent: "space-between", flexDirection: "row" });
-                this.lead.style.flexDirection = this.trail.style.flexDirection = "column";
-                area.x += 12 + size + 8;
-                area.width -= 2 * (12 + size + 8);
-            }
-            if (!wide)
-                this.lead.style.flexDirection = this.trail.style.flexDirection = "row";
+        // the dock: at the bottom, in the middle, under the picture / the trackpad (never over the computer's own dock);
+        // full screen on a desktop: the picture alone
+        const size = 52;
+        this.bar.hidden = full || this.desktopFull;
+        if (!this.bar.hidden) {
+            const top = H - safe.bottom - 10 - size;
+            Object.assign(this.bar.style, { left: `${safe.left + (W - safe.left - safe.right) / 2}px`, top: `${top}px` });
+            area.height = top - 10 - safe.top;
         }
         const aspect = this.imageSize.width > 0 && this.imageSize.height > 0 ? this.imageSize.width / this.imageSize.height : this.displayAspect();
         const badgeH = this.badges.offsetHeight || 34;
@@ -1016,10 +1023,11 @@ export class YoyoScreenElement extends HTMLElement {
         this.zoomHint.style.top = `${picture.y + picture.height - 12 - 36}px`;
         this.stats.style.left = `${picture.x + 8}px`;
         this.stats.style.top = `${picture.y + 8}px`;
-        this.fsButton.style.left = `${picture.x + picture.width - 8 - 36}px`;
+        const fsW = this.fsButton.offsetWidth || 36;
+        this.fsButton.style.left = `${Math.max(picture.x + 8, picture.x + picture.width - 8 - fsW)}px`;
         this.fsButton.style.top = `${picture.y + picture.height - 8 - 36}px`;
-        Object.assign(this.note.style, { left: `${safe.left + 12}px`, right: `${safe.right + 12}px`, top: "auto", bottom: `${H - (wide || full ? H - safe.bottom : parseFloat(this.bar.style.top || "0")) + 12}px` });
-        this.toastEl.style.bottom = `${(wide || full ? safe.bottom : H - parseFloat(this.bar.style.top || `${H}`)) + 16}px`;
+        Object.assign(this.note.style, { left: `${safe.left + 12}px`, right: `${safe.right + 12}px`, top: "auto", bottom: `${H - (this.bar.hidden ? H - safe.bottom : parseFloat(this.bar.style.top || "0")) + 12}px` });
+        this.toastEl.style.bottom = `${(this.bar.hidden ? safe.bottom : H - parseFloat(this.bar.style.top || `${H}`)) + 16}px`;
         this.layoutCursor();
         this.placeKeyBar();
     }
@@ -1118,6 +1126,11 @@ export class YoyoScreenElement extends HTMLElement {
         }
         else {
             const at = this.localCursor?.p ?? { x: part.x, y: part.y };
+            const key = `${at.x},${at.y}`;
+            if (key !== this.pointerAt) {
+                this.pointerAt = key;
+                this.pointerMoved();
+            }
             const known = v.url !== null && v.width > 0 && v.height > 0;
             const w0 = known ? v.width : (FALLBACK_POINTER_SIZE.width / FALLBACK_POINTER_SIZE.height) * (20 / f.height) * (f.height / f.width);
             const h0 = known ? v.height : 20 / f.height;
@@ -1138,6 +1151,20 @@ export class YoyoScreenElement extends HTMLElement {
         }
         this.updateLoupe();
         this.updatePointerBadge();
+    }
+    /** The pointer moved (or a finger came down): it shows, and fades again once it has rested for a moment. */
+    pointerMoved() {
+        this.cursorImg.classList.remove("idle");
+        if (this.pointerIdle)
+            clearTimeout(this.pointerIdle);
+        this.pointerIdle = setTimeout(() => {
+            this.pointerIdle = null;
+            // (held down for a drag: it stays)
+            if (!this.trackpad.drag.isPressed && !this.mouse)
+                this.cursorImg.classList.add("idle");
+            else
+                this.pointerMoved();
+        }, POINTER_IDLE_MS);
     }
     displaySize() {
         const d = this.currentDisplay;
@@ -1293,6 +1320,7 @@ export class YoyoScreenElement extends HTMLElement {
             return;
         if (down) {
             s.gesture();
+            this.pointerMoved();
             this.dropFocusLook();
             this.hideHint();
             if (this.isKeyboardUp && this.mode !== "mouse") {
@@ -1336,8 +1364,18 @@ export class YoyoScreenElement extends HTMLElement {
         const f = this.shown;
         return d.width > 0 && f.width > 0 ? d.width / f.width : 1;
     }
+    /** The event started on a button in the stage (not the picture's). */
+    onButton(e) {
+        for (const n of e.composedPath()) {
+            if (n === this.stage)
+                return false;
+            if (n instanceof HTMLButtonElement)
+                return true;
+        }
+        return false;
+    }
     pointerDown(e) {
-        if (!this.session)
+        if (!this.session || this.onButton(e))
             return;
         this.hostRect = this.getBoundingClientRect();
         const p = this.local(e);
@@ -1373,12 +1411,14 @@ export class YoyoScreenElement extends HTMLElement {
         this.session.touchBegan();
         if (e.button !== 0)
             return;
-        this.refocusKeys(true);
+        this.refocusKeys(true, true);
         const n = this.pictureNormalized(p);
         this.mouse = { p: n, cx: e.clientX, cy: e.clientY, dragging: false, mods: this.withSticky(modifiersOf(e)) };
         this.stage.setPointerCapture(e.pointerId);
     }
     pointerMove(e) {
+        if (e.pointerType === "mouse" && this.desktopFull)
+            this.showChrome();
         if (this.padPointers.has(e.pointerId)) {
             const samples = (e.getCoalescedEvents?.() ?? []).map((c) => ({ p: this.local(c), t: c.timeStamp / 1000 }));
             this.trackpad.move(e.pointerId, this.local(e), samples, e.timeStamp / 1000);
@@ -1519,9 +1559,9 @@ export class YoyoScreenElement extends HTMLElement {
     pictureTouchDown(id, p, t) {
         const first = this.pictureTouches.size === 0;
         this.pictureTouches.set(id, { start: p, pos: p, t });
-        if (first && this.mode === "touch")
+        if (first && this.directTouch)
             this.touches(true, true);
-        if (first && this.viewOnly)
+        if (first && (this.viewOnly || this.desktopFull))
             this.showChrome();
         if (this.pictureTouches.size === 2) {
             this.touch.cancel();
@@ -1531,7 +1571,7 @@ export class YoyoScreenElement extends HTMLElement {
             this.pinch = { scale: this.zoom.scale, anchor: this.zoom.point(mid, r), dist: Math.max(1, Math.hypot(a.pos.x - b.pos.x, a.pos.y - b.pos.y)) };
             return;
         }
-        if (first && this.mode === "touch" && this.controlling)
+        if (first && this.directTouch && this.controlling)
             this.runTouch(this.touch.down(p.x, p.y, t));
     }
     pictureTouchMove(id, p, t) {
@@ -1550,7 +1590,7 @@ export class YoyoScreenElement extends HTMLElement {
             this.setZoom(z, false);
             return;
         }
-        if (this.mode === "touch" && this.pictureTouches.size === 1) {
+        if (this.directTouch && this.pictureTouches.size === 1) {
             if (this.controlling)
                 this.runTouch(this.touch.move(p.x, p.y, t));
             // watching: a drag on the picture is input (a pinch isn't): it takes the screen
@@ -1577,13 +1617,13 @@ export class YoyoScreenElement extends HTMLElement {
                 this.followed = this.drawnPointer();
                 // the finger left on the glass does nothing more this touch
                 this.pictureTouches.clear();
-                if (this.mode === "touch")
+                if (this.directTouch)
                     this.touches(false);
             }
             return;
         }
         const quick = t - f.t < 350 && Math.hypot(p.x - f.start.x, p.y - f.start.y) < 10 && !cancelled;
-        if (this.mode === "touch" && this.controlling) {
+        if (this.directTouch && this.controlling) {
             if (cancelled)
                 this.touch.cancel();
             else
@@ -1591,7 +1631,7 @@ export class YoyoScreenElement extends HTMLElement {
             if (quick)
                 this.showClick(this.pictureNormalized(p));
         }
-        else if (this.mode === "touch" && quick && this.canTake) {
+        else if (this.directTouch && quick && this.canTake) {
             // watching: a tap on the picture is input: it takes the screen (this tap clicks nothing)
             this.userInput();
         }
@@ -1611,7 +1651,7 @@ export class YoyoScreenElement extends HTMLElement {
                 this.zoomHintTimer = setTimeout(() => this.pictureTapped(), 360);
             }
         }
-        if (this.pictureTouches.size === 0 && this.mode === "touch")
+        if (this.pictureTouches.size === 0 && this.directTouch)
             this.touches(false);
     }
     runTouch(actions) {
@@ -1785,13 +1825,20 @@ export class YoyoScreenElement extends HTMLElement {
     get isKeyboardUp() {
         return this.root.activeElement === this.keys;
     }
-    refocusKeys(now = false) {
+    /** With a mouse and keyboard, typing goes to the hidden field: it keeps the focus. On a device with a touch screen
+     *  too, only a mouse press focuses it (else its soft keyboard would come back each time it is put away). */
+    refocusKeys(now = false, mousePress = false) {
         if (this.mode !== "mouse" || !(this.controlling || this.canTake) || !this.activeFlag)
+            return;
+        if (!mousePress && touchCapable())
             return;
         const go = () => {
             const a = document.activeElement;
-            if (this.sheet.hidden && this.menu.hidden && (!a || a === document.body || a === this))
+            if (this.sheet.hidden && this.menu.hidden && (!a || a === document.body || a === this)) {
+                // (where typing goes with a mouse and keyboard: a touch screen's soft keyboard stays away)
+                this.keys.setAttribute("inputmode", "none");
                 this.keys.focus({ preventScroll: true });
+            }
         };
         if (now)
             go();
@@ -1859,7 +1906,7 @@ export class YoyoScreenElement extends HTMLElement {
     /** The keyboard button: up (taking the screen when watching: typing is input; the keyboard comes up at once, as the
      *  tap allows, and what is typed meanwhile waits for the take) or away. */
     toggleKeyboard() {
-        if (this.isKeyboardUp)
+        if (this.isKeyboardUp && !this.keys.hasAttribute("inputmode"))
             this.keys.blur();
         else if (this.controlling || this.canTake) {
             this.userInput();
@@ -1868,6 +1915,10 @@ export class YoyoScreenElement extends HTMLElement {
     }
     showKeyboard() {
         resetField(this.keys);
+        // (focused for a hardware keyboard: focused again without inputmode none, so the soft keyboard comes)
+        if (this.isKeyboardUp)
+            this.keys.blur();
+        this.keys.removeAttribute("inputmode");
         this.keys.focus({ preventScroll: true });
         // (a window without focus sends no focus event)
         this.keyboardShown(this.isKeyboardUp);
@@ -1876,8 +1927,10 @@ export class YoyoScreenElement extends HTMLElement {
             this.showHintText(this.words.t("tapToType"), "keyboard", () => this.keys.focus({ preventScroll: true }));
     }
     keyboardShown(on) {
-        this.keybar.hidden = !on || this.mode === "mouse";
-        this.buttons.keyboard.classList.toggle("on", on && this.mode !== "mouse");
+        // (the hidden field focused for a hardware keyboard, inputmode none: no soft keyboard, so neither key bar nor "on")
+        const soft = on && !this.keys.hasAttribute("inputmode");
+        this.keybar.hidden = !soft;
+        this.buttons.keyboard.classList.toggle("on", soft);
         this.placeKeyBar();
     }
     /** The key bar sits on top of the soft keyboard (the visual viewport's bottom). */
@@ -1891,7 +1944,7 @@ export class YoyoScreenElement extends HTMLElement {
     /** After a click: whether the focused element takes typing (then the keyboard comes up), looked at a few times. */
     lookAtFocus() {
         this.dropFocusLook();
-        if (this.focusUnsupported || !this.controlling || this.mode === "mouse" || this.layoutBox.wide || this.isKeyboardUp || !this._backend?.focus)
+        if (this._host.autoKeyboard === false || this.focusUnsupported || !this.controlling || this.mode === "mouse" || this.layoutBox.wide || this.isKeyboardUp || !this._backend?.focus)
             return;
         const look = { cancelled: false };
         this.focusLook = look;
@@ -2139,8 +2192,16 @@ export class YoyoScreenElement extends HTMLElement {
         if (this.mode === "mouse") {
             if (document.fullscreenElement === this)
                 void document.exitFullscreen?.().catch(() => { });
-            else
-                void this.requestFullscreen?.({ navigationUI: "hide" }).catch(() => { });
+            else if (this.desktopFull)
+                this.setDesktopFull(false);
+            else {
+                // a browser without element full screen (or refusing it): the element fills the page instead
+                const asked = this.requestFullscreen?.({ navigationUI: "hide" });
+                if (!asked)
+                    this.setDesktopFull(true);
+                else
+                    asked.catch(() => this.setDesktopFull(true));
+            }
             return;
         }
         this.setFullScreen(!this.fullScreen);
@@ -2156,19 +2217,27 @@ export class YoyoScreenElement extends HTMLElement {
                 .then(() => screen.orientation.lock?.("landscape"))
                 .catch(() => { });
         }
-        else if (document.fullscreenElement === this)
-            void document.exitFullscreen().catch(() => { });
+        else {
+            screen.orientation?.unlock?.();
+            if (document.fullscreenElement === this)
+                void document.exitFullscreen().catch(() => { });
+        }
         this.vibrate(8);
         this.viewOnlyChanged();
         this.layout();
     }
+    /** Full screen with a mouse: the picture alone, still in control. */
+    setDesktopFull(on) {
+        this.desktopFull = on;
+        this.toggleAttribute("fullscreen", on);
+        this.updateFsButton();
+        this.layout();
+        this.showChrome();
+    }
     fullscreenChanged() {
         const inFull = document.fullscreenElement === this;
         if (this.mode === "mouse") {
-            this.desktopFull = inFull;
-            this.toggleAttribute("fullscreen", inFull);
-            this.updateFsButton();
-            this.layout();
+            this.setDesktopFull(inFull);
             return;
         }
         if (!inFull && this.fullScreen)
@@ -2193,11 +2262,20 @@ export class YoyoScreenElement extends HTMLElement {
         if (!this.built)
             return;
         const on = this.mode === "mouse" ? this.desktopFull : this.fullScreen;
-        this.setIcon(this.fsButton, on ? "exitFull" : "enterFull");
         const label = this.words.t(on ? "exitFullScreen" : this.mode === "mouse" ? "fullScreenDesktop" : "fullScreen");
+        // in full screen the way out says so
+        this.setIcon(this.fsButton, on ? "exitFull" : "enterFull");
+        this.fsButton.classList.toggle("labeled", on);
+        if (on) {
+            const t = el("span");
+            t.textContent = label;
+            this.fsButton.append(t);
+        }
         this.fsButton.setAttribute("aria-label", label);
         this.fsButton.title = label;
-        this.fsButton.hidden = !this.canShow || this.layoutBox.phoneLandscape;
+        // (a phone turned to landscape is view only by itself: turning it back leaves; full screen locked it there, so its
+        // button stays)
+        this.fsButton.hidden = !this.canShow || (this.layoutBox.phoneLandscape && !this.fullScreen);
     }
     /** The full-screen button and the badges show; in view-only full screen they fade after a moment. */
     showChrome() {
@@ -2206,7 +2284,7 @@ export class YoyoScreenElement extends HTMLElement {
         this.chromeFade = null;
         this.fsButton.classList.remove("faded");
         this.badges.classList.remove("faded");
-        if (!this.viewOnly)
+        if (!this.viewOnly && !this.desktopFull)
             return;
         this.chromeFade = setTimeout(() => {
             this.fsButton.classList.add("faded");
@@ -2304,6 +2382,28 @@ export class YoyoScreenElement extends HTMLElement {
             this.refocusKeys();
         };
         setTimeout(done, reducedMotion() ? 0 : 280);
+    }
+    /** The More menu: what the dock doesn't show (gestures, display, clipboard, sound, full screen). */
+    openMoreMenu(anchor) {
+        const w = this.words;
+        const s = this.session;
+        const items = [];
+        if (this.canShow && !this.fsButton.hidden) {
+            const on = this.mode === "mouse" ? this.desktopFull : this.fullScreen;
+            items.push({ label: w.t(on ? "exitFullScreen" : this.mode === "mouse" ? "fullScreenDesktop" : "fullScreen"), icon: on ? "exitFull" : "enterFull", run: () => this.toggleFullScreen() });
+        }
+        if (s?.audioShown && this.canShow) {
+            items.push({ label: w.c(s.audioOn ? "soundMute" : "soundPlay"), icon: s.audioOn ? "speakerOff" : "speaker", run: () => this.toggleSound() });
+        }
+        if (this.canShow && (this.status?.displays.length ?? 0) > 1)
+            items.push({ label: w.t("display"), sub: this.currentDisplay ? displayTitle(this.currentDisplay, this.status.displays.indexOf(this.currentDisplay), w) : null, icon: "display", run: () => this.openDisplayMenu(anchor) });
+        if (this.clipboardOn)
+            items.push({ label: w.t("clipboard"), sub: this.buttons.clipboard.querySelector(".dot") ? w.t("newDot") : null, icon: "clipboard", run: () => this.openClipboardMenu(anchor) });
+        if (this.mode !== "mouse")
+            items.push({ label: w.t("gestures"), icon: "question", run: () => this.openCard() });
+        if (!items.length)
+            items.push({ label: w.t("nothingMore"), disabled: true, run: () => { } });
+        this.openMenu(anchor, [{ items }]);
     }
     openDisplayMenu(anchor) {
         const s = this.status;
@@ -2410,16 +2510,17 @@ export class YoyoScreenElement extends HTMLElement {
     phoneCount = null;
     phoneKind = null;
     updateClipboardDot() {
-        const b = this.buttons?.clipboard;
-        if (!b)
+        if (!this.buttons)
             return;
         const on = this.clipboardOn && this.marks.dot(this.phoneCount, this.phoneKind, this.clipboard?.status?.item ?? null, this.words);
-        const dot = b.querySelector(".dot");
-        if (on && !dot)
-            b.append(el("span", "dot"));
-        else if (!on)
-            dot?.remove();
-        b.setAttribute("aria-description", on ? this.words.t("newDot") : "");
+        for (const b of [this.buttons.clipboard, this.buttons.more]) {
+            const dot = b.querySelector(".dot");
+            if (on && !dot)
+                b.append(el("span", "dot"));
+            else if (!on)
+                dot?.remove();
+            b.setAttribute("aria-description", on ? this.words.t("newDot") : "");
+        }
     }
     showHint(h) {
         const w = this.words;

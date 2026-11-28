@@ -24,14 +24,22 @@ What the page does:
   with its gestures card that opens by itself the first time; the **liquid-drop loupe** over the pointer (WebGL2;
   a plain magnifier without it or with Reduce Transparency; no wobble with Reduce Motion); a three-finger tap shows
   the stats line;
-- mouse and keyboard devices: click, double-click, right-click, drag, wheel and type on the picture itself;
+- the client-drawn pointer fades once it has stood still for 3 s and shows again as soon as it moves or a finger
+  comes down;
+- mouse and keyboard devices: click, double-click, right-click, drag, wheel and type on the picture itself; on a
+  device with a touch screen too (an iPad with a trackpad, a touch laptop) a finger works as in touch mode (tap
+  where you click, drag, two-finger scroll, pinch to zoom);
 - the soft keyboard with a key bar (sticky ⌘ ⇧ ⌥ ⌃, Esc, Tab, arrows, Paste on Mac / Copy from Mac — a long press on
-  Paste offers Photos… / Files… —, hide); it comes up by itself when a click focuses a text field (`focus`); IME
+  Paste offers Photos… / Files… —, hide); it comes up by itself when a click focuses a text field (`focus`; `host.autoKeyboard: false`: only from its
+  button); with a mouse and keyboard typing goes to the computer (on a device with a touch screen too: after a
+  mouse press, and the keyboard button shows, so its soft keyboard never comes back by itself and can be put away); IME
   composition sends committed text only;
 - the clipboard: a menu (Paste on Mac, Photos…, Files…, Copy from Mac, Open clipboard) with a dot for news, a hint
   capsule when the computer copies something, the Clipboard sheet;
-- the sound toggle (remembered), the display menu, full screen (a phone: view only like a video, also when turned
-  to landscape; a desktop: keeps control); hidden pages / the back-forward cache give control back and close the stream.
+- the dock: one capsule at the bottom (close | trackpad / touch, keyboard, More); More holds full screen, the sound
+  toggle (remembered), the display menu, the clipboard menu and the gestures card (the dot for clipboard news shows on
+  More too); full screen (a phone: view only like a video, also when turned
+  to landscape; a desktop: keeps control, the picture alone with the dock away); hidden pages / the back-forward cache give control back and close the stream.
 
 ## Quick start
 
@@ -134,7 +142,8 @@ gaps, hitches, stalls, buffer, jitter, cap, drops) with a latency estimate; the 
 server's network grade; the sound (depth, buffer, underruns, drops, kbps). The playout report the computer gets
 carries a `NetSampler`'s `net` (route, `navigator.connection` where the browser has it, input round trips over HTTP,
 failures, bytes) and the sound's report; A/V sync (`AVSyncDriver`) runs while the sound plays (not for a display
-whose `kind` is `virtual`).
+whose `kind` is `virtual`). When the decoder here can't keep up, the page asks for a smaller, slower stream
+(screen-web's `StreamLevels`: 1920 @60, 1600 @30, 1280 @30) and tries the full one again after 3 minutes.
 
 ## The host
 
@@ -151,6 +160,7 @@ screen.host = {
   deviceId: undefined,                 // default: a random id kept in <ns>DeviceId
   deviceName: undefined,               // default: "Chrome on Mac"
   onClose: () => history.back(),       // shows the close button (or set the `closable` attribute)
+  autoKeyboard: true,                  // false: the soft keyboard only from its button, never by itself
 };
 ```
 

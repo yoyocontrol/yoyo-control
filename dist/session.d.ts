@@ -51,6 +51,8 @@ export declare class ScreenSession {
     canShow: boolean;
     hasFrame: boolean;
     private video;
+    /** The stream's size and rate for this page: lower while the decoder here can't keep up (`StreamLevels`). */
+    private readonly levels;
     /** The link the open stream is on (null: HTTP). */
     private streamLink;
     private streamRoute;
@@ -102,6 +104,8 @@ export declare class ScreenSession {
     phase(): Phase;
     updateConnection(): void;
     updateFrames(): void;
+    /** The stream's size or rate changed: a new stream at it, the picture staying until the first one of it. */
+    private changeLevel;
     /** Another display: the picture goes, and what was known of the last one's connection. */
     restartFrames(): void;
     stopFrames(): void;

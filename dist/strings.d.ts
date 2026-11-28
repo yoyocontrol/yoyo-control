@@ -39,6 +39,14 @@ export declare const STRINGS: {
         readonly en: "Keyboard";
         readonly zh: "键盘";
     };
+    readonly more: {
+        readonly en: "More";
+        readonly zh: "更多";
+    };
+    readonly nothingMore: {
+        readonly en: "Nothing else here yet";
+        readonly zh: "暂时没有别的";
+    };
     readonly clipboard: {
         readonly en: "Clipboard";
         readonly zh: "剪贴板";

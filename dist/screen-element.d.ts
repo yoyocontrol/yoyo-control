@@ -81,6 +81,8 @@ export declare class YoyoScreenElement extends HTMLElement {
     private dragHeld;
     private composing;
     private focusLook;
+    private pointerAt;
+    private pointerIdle;
     private focusUnsupported;
     private statusTimer;
     private statsTimer;
@@ -141,6 +143,9 @@ export declare class YoyoScreenElement extends HTMLElement {
     private get canShow();
     private get canControl();
     private get viewOnly();
+    /** A finger on the picture clicks where it lands: touch mode, and mouse mode on a device with a touch screen too (an
+     *  iPad, a touch laptop: the mouse clicks, drags and scrolls as always, a finger taps, drags and scrolls with two). */
+    private get directTouch();
     /** Taps and keys go to the computer. */
     private get controlling();
     /** A real input would take the screen now (not view only, not watching another device's control). */
@@ -170,7 +175,7 @@ export declare class YoyoScreenElement extends HTMLElement {
     private updateDisplayButton;
     private queueLayout;
     /** Portrait: the picture at the top, the trackpad surface under it (the badges at its top), the buttons in a row at
-     *  the bottom. Wide: the buttons in a column on each side. Full screen: the picture alone. */
+     *  the bottom (the dock), also when wide. Full screen: the picture alone. */
     private layout;
     private displayAspect;
     /** The picture at the zoom, in its clip. */
@@ -186,6 +191,8 @@ export declare class YoyoScreenElement extends HTMLElement {
     /** The pointer goes to `p` at once: this page sent it there. */
     private moveCursor;
     private layoutCursor;
+    /** The pointer moved (or a finger came down): it shows, and fades again once it has rested for a moment. */
+    private pointerMoved;
     private displaySize;
     /** A click shows at once where it lands: a ring spreads (Reduce Motion: it only fades). */
     private showClick;
@@ -208,6 +215,8 @@ export declare class YoyoScreenElement extends HTMLElement {
     /** A page point as the display's 0…1, through the zoom. */
     private pictureNormalized;
     private displayPointsPerPx;
+    /** The event started on a button in the stage (not the picture's). */
+    private onButton;
     private pointerDown;
     private pointerMove;
     private pointerUp;
@@ -239,6 +248,8 @@ export declare class YoyoScreenElement extends HTMLElement {
     private inputFailed;
     private handleError;
     private get isKeyboardUp();
+    /** With a mouse and keyboard, typing goes to the hidden field: it keeps the focus. On a device with a touch screen
+     *  too, only a mouse press focuses it (else its soft keyboard would come back each time it is put away). */
     private refocusKeys;
     private keyDown;
     private sendShortcut;
@@ -266,6 +277,8 @@ export declare class YoyoScreenElement extends HTMLElement {
     private toggleFullScreen;
     /** Full screen on a touch device: the picture alone, view only (control given back), landscape where it can lock. */
     private setFullScreen;
+    /** Full screen with a mouse: the picture alone, still in control. */
+    private setDesktopFull;
     private fullscreenChanged;
     /** Into view only: the keyboard and any drag go, control goes back. Out: watching (the next real input takes the
      *  screen again). */
@@ -278,6 +291,8 @@ export declare class YoyoScreenElement extends HTMLElement {
     private openMenu;
     private openSheet;
     private closeOverlays;
+    /** The More menu: what the dock doesn't show (gestures, display, clipboard, sound, full screen). */
+    private openMoreMenu;
     private openDisplayMenu;
     private selectDisplay;
     /** The computer has a clipboard (`features.clipboard`, else the Mac only), and the backend can reach it. */

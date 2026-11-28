@@ -178,6 +178,7 @@ video, canvas.video { display: block; width: 100%; height: 100%; }
 .loupe { position: absolute; left: 0; top: 0; pointer-events: none; will-change: transform; z-index: 2; }
 .overlay { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
 .cursor { position: absolute; left: 0; top: 0; transform-origin: var(--hx, 0) var(--hy, 0); will-change: transform; image-rendering: auto; }
+.cursor.idle { opacity: 0; transition: opacity 0.4s; }
 .cursor.press { transition: scale 0.12s; scale: 0.9; }
 .ring { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; border-radius: 50%; border: 1.5px solid #fff;
   background: rgba(255,255,255,.25); box-shadow: 0 0 2px rgba(0,0,0,.6); animation: ring 0.24s ease-out forwards; }
@@ -190,6 +191,7 @@ video, canvas.video { display: block; width: 100%; height: 100%; }
 .fs { position: absolute; z-index: 5; width: 36px; height: 36px; min-width: 36px; padding: 0; border-radius: 18px; transition: opacity 0.4s; }
 .fs svg { width: 17px; height: 17px; }
 .fs.faded { opacity: 0; }
+.fs.labeled { width: auto; padding: 0 14px 0 10px; gap: 6px; font-size: 14px; font-weight: 500; white-space: nowrap; }
 .badges { position: absolute; z-index: 6; display: flex; flex-direction: column; align-items: center; gap: 6px; transform: translateX(-50%);
   max-width: calc(100% - 32px); transition: opacity 0.4s; pointer-events: none; }
 .badges.faded { opacity: 0; }
@@ -232,12 +234,13 @@ video, canvas.video { display: block; width: 100%; height: 100%; }
 .empty .title { font-size: 20px; font-weight: 600; }
 .empty .detail { font-size: 15px; color: var(--yoyo-text-secondary); max-width: 420px; }
 .empty .prominent { margin-top: 8px; }
-.bar { position: absolute; z-index: 10; display: flex; gap: 10px; align-items: center; pointer-events: none; }
-.bar .group { display: flex; gap: inherit; align-items: center; pointer-events: auto; }
-.bar.column { flex-direction: column; }
-.bar.column .group { flex-direction: column; }
-.bar.narrow { gap: 4px; }
-.bar.narrow .round { min-width: 40px; height: 40px; padding: 0 10px; }
+.bar { position: absolute; z-index: 10; display: flex; gap: 2px; align-items: center; padding: 4px; height: 52px; border-radius: 999px;
+  transform: translateX(-50%); transition: opacity 0.35s, transform 0.35s cubic-bezier(.2,.9,.25,1); }
+.bar .group { display: flex; gap: 2px; align-items: center; }
+.bar .round { background: transparent; border: 0; box-shadow: none; color: var(--yoyo-text); }
+.bar .round:not(:disabled):hover { background: rgba(127,127,127,.16); }
+.bar .round.on { background: var(--yoyo-accent); color: var(--yoyo-on-accent); }
+.bar .divider { width: 1px; height: 22px; margin: 0 4px; background: var(--yoyo-separator); flex: none; }
 .keys { position: absolute; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; margin: 0; resize: none;
   font-size: 16px; color: transparent; background: transparent; caret-color: transparent; pointer-events: none; }
 .keybar { position: fixed; left: 0; right: 0; z-index: 30; display: flex; gap: 6px; align-items: center; padding: 7px 8px; overflow-x: auto;

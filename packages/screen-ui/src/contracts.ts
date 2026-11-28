@@ -243,6 +243,9 @@ export interface ScreenHost {
   deviceId?: string | null;
   /** This device's name for the other devices (default: "Chrome on Mac", "Safari on iPhone"). */
   deviceName?: string | null;
+  /** Whether the soft keyboard comes up by itself when a click focuses a text field on the computer (default true;
+   *  false: only the keyboard button brings it up). */
+  autoKeyboard?: boolean;
   /** The close button's action (default: none shown). */
   onClose?: (() => void) | null;
 }

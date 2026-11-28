@@ -136,3 +136,21 @@ test("AudioScheduler: playing late behind the slots for a second cuts 10 ms; the
   f.push(packet(1, 0));
   assert.equal(render(f, 0, 512)[300], 0.5);
 });
+
+test("AudioScheduler: playing ahead of the slots for a second plays 10 ms again (a pad), without a gap", () => {
+  const c = audioSchedulerConfig();
+  const s = new AudioScheduler(c);
+  // after the first, slots 30 ms later than where playback is: the buffer is short of its depth
+  s.push(packet(1, 0));
+  let zeros = 0;
+  for (let i = 2; i < 100; i++) {
+    s.push(packet(i, (i - 1) * 960 + 1440));
+    const out = render(s, (i - 2) * 960, 960);
+    if (i > 3) zeros += out.filter((x) => x === 0).length;
+  }
+  assert.ok(s.stats.pads >= 1, String(s.stats.pads));
+  assert.equal(s.stats.padFrames, s.stats.pads * c.cutFrames);
+  assert.equal(s.stats.cuts, 0);
+  assert.equal(s.stats.underruns, 0);
+  assert.equal(zeros, 0, "no silence while padding");
+});

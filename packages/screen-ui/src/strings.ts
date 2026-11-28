@@ -17,6 +17,8 @@ export const STRINGS = {
   gestures: { en: "Gestures", zh: "手势" },
   display: { en: "Display", zh: "显示器" },
   keyboard: { en: "Keyboard", zh: "键盘" },
+  more: { en: "More", zh: "更多" },
+  nothingMore: { en: "Nothing else here yet", zh: "暂时没有别的" },
   clipboard: { en: "Clipboard", zh: "剪贴板" },
   fullScreen: { en: "Full screen (view only)", zh: "全屏（仅查看）" },
   fullScreenDesktop: { en: "Full screen", zh: "全屏" },

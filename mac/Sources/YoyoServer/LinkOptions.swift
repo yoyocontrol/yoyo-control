@@ -61,7 +61,10 @@ public struct LinkOptions: Sendable, Equatable {
     /// `off` or unset = none) and the test switches `YOYO_LINK_PORT` (another UDP port, beside a
     /// running app), `YOYO_LINK_BIND` (a comma list of addresses to bind instead of every interface, e.g. behind an
     /// impairment proxy), and `YOYO_LINK_TRACE` (a directory for per-frame session traces; the app sets it to its log directory's
-    /// `link-trace`, `off` = none); `YOYO_LINK_RTC_PORT` (the WebRTC socket's port, `off` = none).
+    /// `link-trace`, `off` = none); `YOYO_LINK_RTC_PORT` (the WebRTC socket's port, `off` = none); `YOYO_LINK_STUN` (a comma
+    /// list of STUN servers, `host:port`, for the public address in rtc answers; `off` or unset = none). Without one (and
+    /// without a router mapping) an answer names only private addresses: a browser on another network can't reach them,
+    /// not even through TURN (a relay won't send to a private peer).
     static func fromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> LinkOptions {
         var o = LinkOptions()
         if let p = env["YOYO_LINK_PORT"].flatMap(UInt16.init) { o.port = p }
@@ -74,6 +77,9 @@ public struct LinkOptions: Sendable, Equatable {
         if let t = env["YOYO_LINK_TRACE"], !t.isEmpty, t != "off" { o.traceDirectory = t }
         if let r = env["YOYO_LINK_RTC_PORT"] {
             if r == "off" { o.rtc = false } else if let p = UInt16(r) { o.rtcPort = p }
+        }
+        if let s = env["YOYO_LINK_STUN"] {
+            o.stunServers = s == "off" ? [] : s.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         }
         return o
     }

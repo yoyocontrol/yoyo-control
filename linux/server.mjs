@@ -971,14 +971,16 @@ async function command(cmd, argv) {
 const COMMANDS = ["pair", "devices", "remove", "disconnect", "status", "account"];
 
 /**
- * `--link-rtc-port <port|off>` (default the link port + 1; `YOYO_LINK_RTC_PORT` too) and `--link-stun host:port,…`: the
- * link's WebRTC socket for browsers (link.mjs).
+ * `--link-rtc-port <port|off>` (default the link port + 1; `YOYO_LINK_RTC_PORT` too) and `--link-stun host:port,…|off`
+ * (`YOYO_LINK_STUN` too): the link's WebRTC socket for browsers (link.mjs) and the STUN servers for its public address
+ * (without one or a router mapping an answer names only private addresses, which a browser elsewhere can't reach).
  */
 export function rtcOptions(argv, linkPort, env = process.env) {
   const v = arg(argv, "--link-rtc-port") ?? env.YOYO_LINK_RTC_PORT;
   const rtcPort = v === undefined ? (linkPort === 0 ? 0 : linkPort + 1) : v === "off" ? null : Number(v);
   if (rtcPort !== null && !(Number.isInteger(rtcPort) && rtcPort >= 0 && rtcPort < 65536)) throw new Error(`--link-rtc-port ${v}: a port or off`);
-  return { rtcPort, stun: list(arg(argv, "--link-stun")) };
+  const stun = arg(argv, "--link-stun") ?? env.YOYO_LINK_STUN;
+  return { rtcPort, stun: stun === "off" ? [] : list(stun) };
 }
 
 /**

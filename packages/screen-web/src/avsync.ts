@@ -84,6 +84,8 @@ export interface AVSyncVideo {
   readonly interactive: boolean;
   /** The playout's sync floor (ms). */
   syncFloor: number;
+  /** Holding pictures back starves the decoder here: no video floor (`VideoStream.holdsFewFrames`). */
+  readonly holdsFewFrames?: boolean;
 }
 
 /**
@@ -130,6 +132,7 @@ export class AVSyncDriver {
       shownDelay: d?.shown ?? null,
       interactive: v?.interactive ?? false,
       soundRecent: a?.soundRecent ?? false,
+      videoFloorEnabled: !v?.holdsFewFrames,
     });
     if (v) v.syncFloor = out.videoFloor;
     this.audio.setSyncDelayGoal(out.audioDelayGoal);

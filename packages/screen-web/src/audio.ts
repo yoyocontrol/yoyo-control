@@ -25,6 +25,26 @@ export type AudioState = "off" | "starting" | "playing" | "waiting" | "none";
 
 /** The buffer's start depth on a remote path (ms; the LAN starts at `AUDIO_LAN_FLOOR_MS`). */
 export const TARGET_MS = 120;
+/** libopus in wasm (`opus-decoder`), loaded once per page on first use: decodes a packet at once, the iOS kit's way
+ *  (AVAudioConverter), where WebCodecs' AudioDecoder is asynchronous and on some devices stops giving packets out for
+ *  seconds. null: it didn't load (WebCodecs then). */
+type WasmOpus = { decodeFrame(frame: Uint8Array): { channelData: Float32Array[]; samplesDecoded: number }; ready: Promise<void>; free(): void };
+type WasmOpusCtor = new (o: { channels?: number; sampleRate?: 48000; preSkip?: number; forceStereo?: boolean }) => WasmOpus;
+let wasmOpus: Promise<WasmOpusCtor | null> | null = null;
+function loadWasmOpus(): Promise<WasmOpusCtor | null> {
+  wasmOpus ??= import("opus-decoder").then(
+    (m) => (m as unknown as { OpusDecoder: WasmOpusCtor }).OpusDecoder,
+    () => null,
+  );
+  return wasmOpus;
+}
+
+/** Opus packets here are 20 ms (960 frames at 48 kHz); gaps up to this many packets are concealed by libopus. */
+export const AUDIO_PACKET_FRAMES = 960;
+export const AUDIO_PLC_MAX_PACKETS = 5;
+/** The decoder counts as stuck with this many packets in it and nothing out for this long (ms). */
+export const AUDIO_DECODER_STUCK_PACKETS = 5;
+export const AUDIO_DECODER_STUCK_MS = 150;
 /** `X-Audio-Video-Offset` when the server doesn't say (ms). */
 export const DEFAULT_VIDEO_OFFSET_MS = 31;
 const RATE = 48_000;
@@ -111,15 +131,24 @@ export class ScreenAudio implements AVSyncAudio {
   private ts = 0;
   private generation = 0;
   private readonly pending = new Map<number, Pending>();
+  private decoderConfig: AudioDecoderConfig | null = null;
+  /** The wasm decoder once it is ready (packets go there instead of `decoder`). */
+  private wasm: WasmOpus | null = null;
+  /** When the decoder last gave a packet out (its watchdog). */
+  private outputAt = 0;
   private jitter = new AudioJitter(audioJitterConfig(false));
   private lan = false;
   private offset = DEFAULT_VIDEO_OFFSET_MS;
   private worklet: { frame: number; stats: AudioSchedulerStats; at: number } | null = null;
   private lastUnderruns = 0;
+  // diagnostics for the report (`AudioReport.arrivalGapMaxMs`…), reset by each report
+  private diag = { lastArrival: null as number | null, lastPlayed: null as number | null, arrivalGapMax: 0, decodedGapMax: 0, concealed: 0, underrunsAt: [] as { sincePacketMs: number; sincePlayedMs: number }[], overflow: 0, metaMissing: 0, decoderResets: 0 };
+  /** The last packet's seq (the wasm decoder conceals the ones missing before the next). */
+  private lastSeq: number | null = null;
   private soundAt = -Infinity;
   private bytes: { at: number; n: number }[] = [];
   private syncReport: { skewMs: number | null; floorMs: number | null } = { skewMs: null, floorMs: null };
-  private reported: { underruns: number; late: number; concealed: number; cuts: number; cutFrames: number } | null = null;
+  private reported: { underruns: number; late: number; concealed: number; cuts: number; cutFrames: number; padFrames: number } | null = null;
   private seq = 0;
 
   /** `options` (additive): a link to open the sound on, the route's floor. */
@@ -196,10 +225,10 @@ export class ScreenAudio implements AVSyncAudio {
     const w = this.worklet;
     if (!w || !this.on) return null;
     const s = w.stats;
-    const from = this.reported ?? { underruns: 0, late: 0, concealed: 0, cuts: 0, cutFrames: 0 };
+    const from = this.reported ?? { underruns: 0, late: 0, concealed: 0, cuts: 0, cutFrames: 0, padFrames: 0 };
     const fresh = s.underruns < from.underruns || s.late < from.late || s.concealed < from.concealed || s.cuts < from.cuts;
-    const base = fresh ? { underruns: 0, late: 0, concealed: 0, cuts: 0, cutFrames: 0 } : from;
-    this.reported = { underruns: s.underruns, late: s.late, concealed: s.concealed, cuts: s.cuts, cutFrames: s.cutFrames };
+    const base = fresh ? { underruns: 0, late: 0, concealed: 0, cuts: 0, cutFrames: 0, padFrames: 0 } : from;
+    this.reported = { underruns: s.underruns, late: s.late, concealed: s.concealed, cuts: s.cuts, cutFrames: s.cutFrames, padFrames: s.padFrames ?? 0 };
     const rate = this.ctx?.sampleRate ?? RATE;
     const out = this.outputLatencyMs();
     const delay = this.playingDelay();
@@ -215,8 +244,19 @@ export class ScreenAudio implements AVSyncAudio {
       cuts: s.cuts - base.cuts,
       kbps: this.kbps(now),
     };
-    const cutMs = ((s.cutFrames - base.cutFrames) / rate) * 1000;
-    if (cutMs > 0) r.stretchMs = -cutMs;
+    const d = this.diag;
+    r.arrivalGapMaxMs = Math.round(d.arrivalGapMax);
+    r.decodedGapMaxMs = Math.round(d.decodedGapMax);
+    if (d.concealed) r.plcPackets = d.concealed;
+    if (d.underrunsAt.length) r.underrunsAt = d.underrunsAt;
+    if (d.overflow) r.overflow = d.overflow;
+    r.decoder = this.wasm ? "wasm" : "webcodecs";
+    if (d.metaMissing) r.unmatchedOutputs = d.metaMissing;
+    if (d.decoderResets) r.decoderResets = d.decoderResets;
+    d.arrivalGapMax = d.decodedGapMax = d.concealed = d.overflow = d.metaMissing = d.decoderResets = 0;
+    d.underrunsAt = [];
+    const stretchMs = (((s.padFrames ?? 0) - base.padFrames - (s.cutFrames - base.cutFrames)) / rate) * 1000;
+    if (stretchMs !== 0) r.stretchMs = stretchMs;
     if (this.syncReport.skewMs !== null) r.skewMs = this.syncReport.skewMs;
     if (this.syncReport.floorMs !== null) r.floorMs = this.syncReport.floorMs;
     return r;
@@ -269,7 +309,11 @@ export class ScreenAudio implements AVSyncAudio {
       }
     }
     this.decoder = null;
+    this.wasm?.free();
+    this.wasm = null;
     this.pending.clear();
+    this.lastSeq = null;
+    this.diag.lastArrival = this.diag.lastPlayed = null;
   }
 
   /** A new stream: the buffer's estimate starts over on another route (the same route keeps what it learned). */
@@ -279,6 +323,9 @@ export class ScreenAudio implements AVSyncAudio {
     this.offset = format.offsetMs;
     this.node?.port.postMessage({ t: "flush" });
     const config: AudioDecoderConfig = { codec: "opus", sampleRate: format.sampleRate, numberOfChannels: format.channels, ...(format.description ? { description: format.description } : {}) };
+    this.decoderConfig = config;
+    this.outputAt = performance.now();
+    this.startWasm(format);
     try {
       this.decoder = new AudioDecoder({ output: (d) => this.play(d), error: () => this.decoderFailed() });
       this.decoder.configure(config);
@@ -287,6 +334,26 @@ export class ScreenAudio implements AVSyncAudio {
     }
     this.onState("playing");
     return true;
+  }
+
+  /** The wasm decoder for this stream: packets go to it from when it is ready (WebCodecs until then). */
+  private startWasm(format: Format): void {
+    const gen = this.generation;
+    if (format.sampleRate !== 48_000 || format.channels < 1 || format.channels > 2) return;
+    void loadWasmOpus().then(async (Ctor) => {
+      if (!Ctor || gen !== this.generation) return;
+      let dec: WasmOpus;
+      try {
+        // no pre-skip: every packet keeps its length and its place in time (as on iOS)
+        dec = new Ctor({ channels: format.channels, sampleRate: 48_000, preSkip: 0 });
+        await dec.ready;
+      } catch {
+        return;
+      }
+      if (gen !== this.generation) return dec.free();
+      this.wasm = dec;
+      this.pending.clear();
+    });
   }
 
   private decoderFailed(): void {
@@ -392,11 +459,46 @@ export class ScreenAudio implements AVSyncAudio {
   /** One Opus packet: its delay into the estimate, then the decoder (its slot is set when it comes out). */
   private packet(seq: number, macTime: number | null, data: Uint8Array): void {
     const d = this.decoder;
-    if (!d || d.state !== "configured") return;
+    if (!this.wasm && (!d || d.state !== "configured")) return;
     const arrival = performance.now();
+    if (this.diag.lastArrival !== null) this.diag.arrivalGapMax = Math.max(this.diag.arrivalGapMax, arrival - this.diag.lastArrival);
+    this.diag.lastArrival = arrival;
     this.bytes.push({ at: arrival, n: data.length });
     while (this.bytes.length && arrival - this.bytes[0]!.at > 3000) this.bytes.shift();
     if (macTime !== null && Number.isFinite(macTime)) this.jitter.observe(arrival - macTime, arrival);
+    if (this.wasm) {
+      const meta = { seq, macTime: macTime !== null && Number.isFinite(macTime) ? macTime : null, arrival };
+      // a few packets missing before this one: libopus' loss concealment fills them (sound like what came before,
+      // fading), where the player would otherwise play silence
+      const missing = this.lastSeq === null ? 0 : seq - this.lastSeq - 1;
+      if (missing > 0 && missing <= AUDIO_PLC_MAX_PACKETS) this.conceal(missing, meta);
+      if (this.lastSeq === null || seq > this.lastSeq) this.lastSeq = seq;
+      try {
+        const out = this.wasm.decodeFrame(data);
+        const l = out.channelData[0];
+        if (!l || out.samplesDecoded <= 0) return;
+        const r = out.channelData[1];
+        // own copies: they go to the worklet
+        this.deliver(l.slice(0, out.samplesDecoded), r ? r.slice(0, out.samplesDecoded) : null, meta);
+      } catch {
+        /* a packet that doesn't decode: concealed as missing */
+      }
+      return;
+    }
+    if (!d) return;
+    // a decoder that stops giving packets out while they go in (seen on Android: 0.2…3 s, every so often) starts over:
+    // a few packets of silence instead of the sound stopping until it wakes
+    if (this.pending.size >= AUDIO_DECODER_STUCK_PACKETS && arrival - this.outputAt > AUDIO_DECODER_STUCK_MS && this.decoderConfig) {
+      try {
+        d.reset();
+        d.configure(this.decoderConfig);
+      } catch {
+        return this.decoderFailed();
+      }
+      this.pending.clear();
+      this.outputAt = arrival;
+      this.diag.decoderResets++;
+    }
     const timestamp = (this.ts += 20_000);
     this.pending.set(timestamp, { seq, macTime: macTime !== null && Number.isFinite(macTime) ? macTime : null, arrival });
     try {
@@ -408,24 +510,29 @@ export class ScreenAudio implements AVSyncAudio {
 
   private play(d: AudioData): void {
     try {
-      const meta = this.pending.get(d.timestamp);
-      this.pending.delete(d.timestamp);
-      const ctx = this.ctx;
-      if (!meta || !ctx || !this.node) return;
+      this.outputAt = performance.now();
+      // its packet by timestamp; a decoder that stamps its output its own way: the oldest one waiting (output comes
+      // in order). Older ones still waiting were swallowed: they go.
+      let key = this.pending.has(d.timestamp) ? d.timestamp : null;
+      if (key === null) {
+        this.diag.metaMissing++;
+        for (const k of this.pending.keys()) {
+          key = k;
+          break;
+        }
+      }
+      const meta = key === null ? undefined : this.pending.get(key);
+      if (key !== null) for (const k of [...this.pending.keys()]) if (k <= key) this.pending.delete(k);
+      if (!meta || !this.ctx || !this.node) return;
       const n = d.numberOfFrames;
       const l = new Float32Array(n);
       d.copyTo(l, { planeIndex: 0, format: "f32-planar" });
-      let r = l;
+      let r: Float32Array | null = null;
       if (d.numberOfChannels > 1) {
         r = new Float32Array(n);
         d.copyTo(r, { planeIndex: 1, format: "f32-planar" });
       }
-      if (hasSound(l)) this.soundAt = meta.arrival;
-      const now = performance.now();
-      const base = this.jitter.base;
-      const slot = meta.macTime !== null && base !== null ? meta.macTime + base + this.depthNow(now) : meta.arrival + this.depthNow(now);
-      const at = Math.round(this.frameAt(slot));
-      this.node.port.postMessage({ t: "packet", p: { l, r, at, seq: meta.seq, macTime: meta.macTime } }, r === l ? [l.buffer] : [l.buffer, r.buffer]);
+      this.deliver(l, r, meta);
     } catch {
       /* a format this browser won't convert: silence */
     } finally {
@@ -433,9 +540,53 @@ export class ScreenAudio implements AVSyncAudio {
     }
   }
 
+  /** `n` packets lost right before `next`: one decode without data (libopus' PLC gives up to 120 ms), cut into
+   *  packets of the stream's size with their seqs and times. */
+  private conceal(n: number, next: Pending): void {
+    const w = this.wasm;
+    if (!w) return;
+    try {
+      const out = w.decodeFrame(new Uint8Array(0));
+      const l = out.channelData[0];
+      const r = out.channelData[1];
+      const per = AUDIO_PACKET_FRAMES;
+      for (let k = 0; k < n && (k + 1) * per <= out.samplesDecoded; k++) {
+        const back = n - k;
+        const meta = { seq: next.seq - back, macTime: next.macTime === null ? null : next.macTime - (back * per * 1000) / 48_000, arrival: next.arrival };
+        this.deliver(l!.slice(k * per, (k + 1) * per), r ? r.slice(k * per, (k + 1) * per) : null, meta);
+        this.diag.concealed++;
+      }
+    } catch {
+      /* silence then */
+    }
+  }
+
+  /** A decoded packet (planar; `r` null for mono) to the player, at its slot. */
+  private deliver(l: Float32Array, right: Float32Array | null, meta: Pending): void {
+    if (!this.ctx || !this.node) return;
+    const r = right ?? l;
+    {
+      if (hasSound(l)) this.soundAt = meta.arrival;
+      const now = performance.now();
+      const base = this.jitter.base;
+      const slot = meta.macTime !== null && base !== null ? meta.macTime + base + this.depthNow(now) : meta.arrival + this.depthNow(now);
+      const at = Math.round(this.frameAt(slot));
+      if (this.diag.lastPlayed !== null) this.diag.decodedGapMax = Math.max(this.diag.decodedGapMax, now - this.diag.lastPlayed);
+      this.diag.lastPlayed = now;
+      this.node.port.postMessage({ t: "packet", p: { l, r, at, seq: meta.seq, macTime: meta.macTime } }, r === l ? [l.buffer] : [l.buffer, r.buffer]);
+    }
+  }
+
   private fromWorklet(m: { frame: number; stats: AudioSchedulerStats }): void {
     const now = performance.now();
-    if (m.stats.underruns > this.lastUnderruns) this.jitter.interruption(now);
+    if (m.stats.underruns > this.lastUnderruns) {
+      this.jitter.interruption(now);
+      const d = this.diag;
+      if (d.underrunsAt.length < 10)
+        d.underrunsAt.push({ sincePacketMs: d.lastArrival === null ? -1 : Math.round(now - d.lastArrival), sincePlayedMs: d.lastPlayed === null ? -1 : Math.round(now - d.lastPlayed) });
+    }
+    const prevOverflow = this.worklet?.stats.overflow;
+    if (prevOverflow !== undefined && m.stats.overflow > prevOverflow) this.diag.overflow += m.stats.overflow - prevOverflow;
     this.lastUnderruns = m.stats.underruns;
     this.worklet = { ...m, at: now };
   }

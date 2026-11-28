@@ -1,3 +1,4 @@
+import { DecodeWatch } from "./decodeload.js";
 import { AckSender, ACK_TIMEOUT_MS, ackOutcome, type AckOutcome } from "./acks.js";
 import { parseCursorPart } from "./cursor.js";
 import { avcC, codecString, lengthPrefixed, sameBytes, splitAccessUnit } from "./h264.js";
@@ -42,7 +43,14 @@ export interface VideoCallbacks {
   onNet?: (net: NonNullable<StreamAckResponse["net"]>) => void;
   /** A link stream was opened (`video.opened`): what `/stream`'s response headers would have said (`X-Display`…). */
   onOpened?: (headers: Record<string, string>) => void;
+  /** The decoder can't keep up with the stream ("slow": ask for a smaller / slower one, `StreamLevels`) or has had
+   *  room for a long while ("easy"). Once each per stream (`DecodeWatch`). */
+  onDecodeLoad?: (verdict: "slow" | "easy") => void;
 }
+
+/** This page's decoder runs short of output buffers when the A/V sync holds pictures back (`DecodeWatch`'s "floor"):
+ *  the video stops waiting for the sound for the rest of the page's life (a device property). */
+let framesScarce = false;
 
 export interface VideoOptions {
   /** How the stream, its acks and its reports reach the server (not needed with `link`). */
@@ -214,6 +222,7 @@ export class VideoStream implements AVSyncVideo {
   private statsPictures = 0;
   private statsBytes = 0;
   private statsDecode: number[] = [];
+  private readonly decodeWatch = new DecodeWatch();
 
   constructor(
     private readonly opts: VideoOptions,
@@ -271,6 +280,11 @@ export class VideoStream implements AVSyncVideo {
   /** The playout responds at once (the user interacts). */
   get interactive(): boolean {
     return this.playout.interactive;
+  }
+
+  /** Pictures held back for the sound starve this page's decoder: the A/V sync leaves the video alone. */
+  get holdsFewFrames(): boolean {
+    return framesScarce;
   }
 
   /** The A/V sync's extra wait for smooth pictures (ms; `AVSyncDriver` sets it). */
@@ -698,6 +712,11 @@ export class VideoStream implements AVSyncVideo {
     if (at !== undefined) {
       decodeMs = now - at;
       this.statsDecode.push(decodeMs);
+      const verdict = this.decodeWatch.add(decodeMs, now, this.playout.syncFloor);
+      if (verdict === "floor") {
+        framesScarce = true;
+        this.playout.syncFloor = 0;
+      } else if (verdict) this.cb.onDecodeLoad?.(verdict);
       this.enqueued.delete(frame.timestamp);
     }
     const meta = this.meta.get(frame.timestamp);

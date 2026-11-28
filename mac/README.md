@@ -429,6 +429,9 @@ Every switch the helper reads (nothing else is read; the tests have their own op
   embedder's `ServiceHost.Options.link` ignores them).
 - `YOYO_LINK_RELAYS` (a comma list of iroh relay URLs, `off` = none): `--remote`'s default `LinkOptions.relays` instead of
   Yoyo Control's relay (`LinkOptions.defaultRelays`, docs/LINK.md「端点、地址、路径」).
+- `YOYO_LINK_STUN` (a comma list of STUN servers, `host:port`, `off` = none): `--remote`'s default `LinkOptions.stunServers`,
+  for this Mac's public address in browsers' WebRTC answers. Without one (and without a router mapping) an answer names
+  only private addresses, which a browser on another network can't reach, not even through TURN.
 - `YOYO_LINK_TRACE` (a directory, `off` = none): `--remote`'s default `LinkOptions.traceDirectory`. The app sets it to
   `<log directory>/link-trace` for its service unless the environment already has it.
 - `YOYO_HOME` (the app only): its home instead of `~/Library/Application Support/YoyoControl` (see「The app」).

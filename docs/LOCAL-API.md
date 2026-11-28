@@ -218,7 +218,8 @@ uu Link 的 WebRTC 那一路（`LINK.md`「WebRTC」）：浏览器拨不了 QUI
   （没认证的连接满了不拒新来的，请走最老的，见 LINK.md「守卫」）；504：15 s 没答。错误体是 `{ error }`。
 - `/status.link.rtc = { port, direct? }`：WebRTC 的 UDP 端口（默认 Link 端口 + 1，即 47821）和路由器给它的映射（有时）。
 - 选项（`LinkOptions`）：`rtc`（默认开）、`rtcPort`（nil = Link 端口 + 1）、`stunServers`（默认空）；环境变量 `YOYO_LINK_RTC_PORT`
-  （`off` 关掉）。
+  （`off` 关掉）、`YOYO_LINK_STUN`（逗号分隔的 `host:port`，`off` 或不设 = 没有）。没有 STUN、路由器也不给映射时，答复里只有内网地址：
+  别的网络里的浏览器连不到，经 TURN 也不行（中继不往私有地址发）。
 
 ## 外部显示器（嵌入方自己的画面）
 

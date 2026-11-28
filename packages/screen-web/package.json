@@ -1,6 +1,6 @@
 {
   "name": "@yoyocontrol/screen-web",
-  "version": "0.3.1",
+  "version": "0.3.6",
   "description": "Transport-free web client of a Yoyo Control screen: stream parts, H.264 on WebCodecs, acks, cursor, timed sound, input, status model, media over a uu Link, stats line, A/V sync",
   "keywords": [
     "yoyo-control",
@@ -34,5 +34,8 @@
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --test --import tsx \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "opus-decoder": "^0.7.12"
   }
 }

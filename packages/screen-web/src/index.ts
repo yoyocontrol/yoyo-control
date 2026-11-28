@@ -20,3 +20,4 @@ export * from "./net.js";
 export * from "./stats.js";
 export * from "./avsync.js";
 export * from "./audiobuffer.js";
+export * from "./decodeload.js";

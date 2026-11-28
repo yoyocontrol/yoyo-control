@@ -242,6 +242,10 @@ final class LinkRtcTests: XCTestCase {
         XCTAssertEqual(LinkOptions(rtcPort: 50_000).rtcPort(forLinkPort: 47_820), 50_000)
         XCTAssertFalse(LinkOptions.fromEnvironment(["YOYO_LINK_RTC_PORT": "off"]).rtc)
         XCTAssertEqual(LinkOptions.fromEnvironment(["YOYO_LINK_RTC_PORT": "40001"]).rtcPort, 40_001)
+        XCTAssertEqual(LinkOptions.fromEnvironment([:]).stunServers, [])
+        XCTAssertEqual(LinkOptions.fromEnvironment(["YOYO_LINK_STUN": "a.example:3478, b.example:19302"]).stunServers,
+                       ["a.example:3478", "b.example:19302"])
+        XCTAssertEqual(LinkOptions.fromEnvironment(["YOYO_LINK_STUN": "off"]).stunServers, [])
     }
 }
 #endif

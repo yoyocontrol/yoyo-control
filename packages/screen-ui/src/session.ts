@@ -26,6 +26,7 @@ import {
   type ScreenLink,
   type ScreenTransport,
   type StreamStatusPart,
+  StreamLevels,
 } from "@yoyocontrol/screen-web";
 import { DIRECT_ROUTE, type ScreenBackend, type ScreenRoute, type ScreenRouting, type ScreenStatus } from "./contracts.js";
 
@@ -82,6 +83,8 @@ export class ScreenSession {
   hasFrame = false;
 
   private video: VideoStream | null = null;
+  /** The stream's size and rate for this page: lower while the decoder here can't keep up (`StreamLevels`). */
+  private readonly levels = new StreamLevels();
   /** The link the open stream is on (null: HTTP). */
   private streamLink: ScreenLink | null = null;
   private streamRoute: ScreenRoute;
@@ -255,6 +258,13 @@ export class ScreenSession {
     if (!this.video && !this.waitingToRetry && !this.pendingOpen) this.openStream();
   }
 
+  /** The stream's size or rate changed: a new stream at it, the picture staying until the first one of it. */
+  private changeLevel(): void {
+    if (!this.video) return;
+    this.dropStream();
+    this.updateFrames();
+  }
+
   /** Another display: the picture goes, and what was known of the last one's connection. */
   restartFrames(): void {
     this.stopFrames();
@@ -314,6 +324,7 @@ export class ScreenSession {
       interactivity: this.interactivity,
       net: this.net,
       audioReport: () => (this.audioState === "playing" || this.audioState === "waiting" ? this.audio.report() : null),
+      ...(this.levels.index > 0 ? { extra: { ...this.levels.level } } : {}),
     };
     // over a link the stream opens on it (video.open; its route from the link's path); else POST /stream on the route
     const video = new VideoStream(
@@ -336,6 +347,11 @@ export class ScreenSession {
         onEnd: (info) => token === this.streamToken && this.streamEnded(info),
         onOpened: () => {
           if (token === this.streamToken) this.responded();
+        },
+        onDecodeLoad: (verdict) => {
+          if (token !== this.streamToken) return;
+          const now = performance.now();
+          if (verdict === "slow" ? this.levels.slow(now) : this.levels.easy(now)) this.changeLevel();
         },
       },
     );

@@ -4,6 +4,7 @@ const svg = (body: string, fill = false) =>
   `<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="${fill ? "currentColor" : "none"}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
 
 export const ICONS = {
+  more: svg(`<circle cx="5.5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="18.5" cy="12" r="1.4" fill="currentColor"/>`),
   close: svg(`<path d="M6 6l12 12M18 6L6 18"/>`),
   question: svg(`<path d="M9.2 9.2a2.9 2.9 0 1 1 4.1 2.6c-.8.4-1.3 1-1.3 1.9v.5"/><circle cx="12" cy="17.6" r=".6" fill="currentColor"/>`),
   display: svg(`<rect x="2.5" y="4" width="13" height="9" rx="1.5"/><path d="M6 16h6"/><rect x="11" y="9" width="10.5" height="7.5" rx="1.5"/><path d="M14 19.5h4.5"/>`),

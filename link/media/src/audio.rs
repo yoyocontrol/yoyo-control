@@ -1,7 +1,10 @@
 //! Audio (LINK.md §5.6): one datagram per Opus packet, carrying `r` older packets as redundancy; `r` follows the
-//! receiver's audio report. The receiver dedups by `aseq` and hands packets on in order with the gap before each.
+//! receiver's audio report. The receiver dedups by `aseq` and hands packets on in order with the gap before each; a
+//! packet missing in the sequence is waited for while `AudioStreamReceiver::REORDER_HOLD` later ones arrive (a cellular
+//! path reorders datagrams: one arriving right after its successor isn't lost, and the player's jitter buffer has room
+//! for the wait).
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::time::Micros;
 use crate::wire::AudioDatagram;
@@ -104,12 +107,16 @@ pub(crate) struct AudioStreamReceiver {
     /// Primary aseqs seen among the last `LOSS_SPAN` (pre-redundancy loss for the report).
     primaries: BTreeSet<u32>,
     highest: Option<u32>,
+    /// Packets past a gap, waiting for it (aseq → time, data, recovered).
+    held: BTreeMap<u32, (u64, Vec<u8>, bool)>,
     pub(crate) stats: AudioRxStats,
 }
 
 impl AudioStreamReceiver {
     /// The audio report's window in packets (≈ 2 s of 20 ms packets).
     const LOSS_SPAN: u32 = 100;
+    /// Packets held past a gap before it counts as lost (≈ 60 ms of 20 ms packets).
+    pub(crate) const REORDER_HOLD: usize = 3;
 
     pub(crate) fn new(id: u8) -> AudioStreamReceiver {
         AudioStreamReceiver {
@@ -119,6 +126,7 @@ impl AudioStreamReceiver {
             packet_us: 20_000,
             primaries: BTreeSet::new(),
             highest: None,
+            held: BTreeMap::new(),
             stats: AudioRxStats::default(),
         }
     }
@@ -149,22 +157,33 @@ impl AudioStreamReceiver {
             .collect();
         cands.push((d.aseq, d.time_us, d.data, false));
         cands.sort_by_key(|c| c.0);
-        let next = *self.next.get_or_insert(d.aseq);
-        let mut next = next;
+        let mut next = *self.next.get_or_insert(d.aseq);
         for (aseq, time_us, data, recovered) in cands {
-            if aseq < next {
-                if !recovered && aseq.saturating_add(1) < next {
+            if aseq < next || self.held.contains_key(&aseq) {
+                if aseq < next && !recovered && aseq.saturating_add(1) < next {
                     self.stats.late += 1;
                 }
                 continue;
             }
+            self.held.insert(aseq, (time_us, data.to_vec(), recovered));
+        }
+        // on in order; a gap waits while fewer than REORDER_HOLD packets are past it
+        loop {
+            let aseq = if self.held.contains_key(&next) {
+                next
+            } else if self.held.len() >= Self::REORDER_HOLD {
+                *self.held.keys().next().expect("held")
+            } else {
+                break;
+            };
+            let (time_us, data, recovered) = self.held.remove(&aseq).expect("held");
             let gap = aseq - next;
             self.stats.lost += gap as u64;
             self.stats.packets += 1;
             if recovered {
                 self.stats.recovered += 1;
             }
-            out.push(AudioPacket { stream: self.id, aseq, time_us, data: data.to_vec(), recovered, gap_before: gap });
+            out.push(AudioPacket { stream: self.id, aseq, time_us, data, recovered, gap_before: gap });
             next = aseq.saturating_add(1);
         }
         self.next = Some(next);
@@ -243,5 +262,21 @@ mod tests {
         let seqs: Vec<(u32, u32)> = out.iter().map(|p| (p.aseq, p.gap_before)).collect();
         assert_eq!(seqs, vec![(0, 0), (1, 0), (3, 1), (4, 0), (5, 0)]);
         assert_eq!(rx.stats.lost, 1);
+    }
+
+    #[test]
+    fn reordered_packets_wait_for_each_other() {
+        let mut tx = AudioStreamSender::new(0);
+        let mut rx = AudioStreamReceiver::new(0);
+        let ds: Vec<Vec<u8>> = (0..7u32).map(|i| tx.packet(Micros(0), i as u64 * 20_000, &[i as u8], 1200).1).collect();
+        let mut out = Vec::new();
+        // 2 comes after 3 and 4, 5 after 6: within the hold, nothing is lost
+        for i in [0, 1, 3, 4, 2, 6, 5] {
+            rx.on_datagram(&AudioDatagram::parse(&ds[i]).unwrap(), &mut out);
+        }
+        let seqs: Vec<(u32, u32)> = out.iter().map(|p| (p.aseq, p.gap_before)).collect();
+        assert_eq!(seqs, (0..7).map(|a| (a, 0)).collect::<Vec<_>>());
+        assert_eq!(rx.stats.lost, 0);
+        assert_eq!(out[2].data, vec![2]);
     }
 }
